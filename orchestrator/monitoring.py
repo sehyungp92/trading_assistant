@@ -8,7 +8,7 @@ Runs on a cron schedule (e.g., every 10 minutes) and produces alerts when:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field

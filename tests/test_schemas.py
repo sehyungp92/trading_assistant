@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from schemas.events import EventMetadata, MarketSnapshot, TradeEvent, MissedOpportunityEvent, DailySnapshot
+from schemas.events import EventMetadata, TradeEvent, DailySnapshot
 
 
 class TestEventMetadata:

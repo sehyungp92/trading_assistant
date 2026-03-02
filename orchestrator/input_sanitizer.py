@@ -7,7 +7,7 @@ This is a deterministic first-pass filter; it does NOT use LLM calls.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

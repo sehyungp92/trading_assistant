@@ -6,11 +6,11 @@ These define the data contracts between VPS bots, the relay, and the orchestrato
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, computed_field, model_validator
+from pydantic import BaseModel, computed_field
 
 
 class TradeSide(str, Enum):

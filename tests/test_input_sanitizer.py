@@ -1,6 +1,6 @@
 import pytest
 
-from orchestrator.input_sanitizer import InputSanitizer, SanitizedInput
+from orchestrator.input_sanitizer import InputSanitizer
 
 
 @pytest.fixture

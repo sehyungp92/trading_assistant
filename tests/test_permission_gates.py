@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 
 from orchestrator.permission_gates import PermissionGateChecker, PermissionTier
 

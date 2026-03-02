@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator.worker import Worker
-from orchestrator.orchestrator_brain import OrchestratorBrain, ActionType
+from orchestrator.orchestrator_brain import OrchestratorBrain
 from orchestrator.db.queue import EventQueue
 from orchestrator.task_registry import TaskRegistry
 

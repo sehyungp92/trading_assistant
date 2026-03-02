@@ -1,9 +1,8 @@
 import json
-from datetime import datetime, timezone
 
 import pytest
 
-from orchestrator.orchestrator_brain import OrchestratorBrain, Action, ActionType
+from orchestrator.orchestrator_brain import OrchestratorBrain, ActionType
 
 
 @pytest.fixture

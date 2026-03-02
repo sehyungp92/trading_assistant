@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.monitoring import MonitoringCheck, MonitoringLoop, Alert, AlertSeverity
+from orchestrator.monitoring import MonitoringCheck, AlertSeverity
 from orchestrator.task_registry import TaskRegistry
 from schemas.tasks import TaskRecord, TaskStatus
 
