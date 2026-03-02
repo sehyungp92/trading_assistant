@@ -1,0 +1,51 @@
+# schemas/strategy_suggestions.py
+"""Strategy suggestion schemas — 4-tier refinement output models.
+
+Tier 1: Parameter suggestions (automated, high confidence)
+Tier 2: Filter adjustments (automated, medium confidence)
+Tier 3: Strategy variants (semi-automated, requires human judgment)
+Tier 4: New hypotheses (human-led, Claude-assisted)
+"""
+from __future__ import annotations
+
+from collections import Counter
+from enum import Enum
+
+from pydantic import BaseModel, computed_field
+
+
+class SuggestionTier(str, Enum):
+    PARAMETER = "parameter"
+    FILTER = "filter"
+    STRATEGY_VARIANT = "strategy_variant"
+    HYPOTHESIS = "hypothesis"
+
+
+class StrategySuggestion(BaseModel):
+    """A single strategy refinement suggestion."""
+
+    tier: SuggestionTier
+    bot_id: str = ""
+    title: str
+    description: str
+    current_value: str = ""
+    suggested_value: str = ""
+    evidence_days: int = 0
+    estimated_impact_pnl: float = 0.0
+    confidence: float = 0.0  # 0–1
+    simulation_assumptions: list[str] = []
+    requires_human_judgment: bool = False
+
+
+class RefinementReport(BaseModel):
+    """Aggregated strategy refinement output for a week."""
+
+    week_start: str
+    week_end: str
+    suggestions: list[StrategySuggestion] = []
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def suggestions_by_tier(self) -> dict[str, int]:
+        counts = Counter(s.tier.value for s in self.suggestions)
+        return dict(counts)
