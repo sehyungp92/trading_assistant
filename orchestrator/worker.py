@@ -31,6 +31,8 @@ class Worker:
         self.on_alert: Callable[[Action], Awaitable[None]] | None = None
         self.on_heartbeat: Callable[[Action], Awaitable[None]] | None = None
         self.on_triage: Callable[[Action], Awaitable[None]] | None = None
+        self.on_daily_analysis: Callable[[Action], Awaitable[None]] | None = None
+        self.on_weekly_analysis: Callable[[Action], Awaitable[None]] | None = None
 
     async def process_batch(self, limit: int = 10) -> int:
         """Process up to `limit` pending events. Returns count processed."""
@@ -70,6 +72,18 @@ class Worker:
                 await self.on_heartbeat(action)
             else:
                 logger.debug("Heartbeat: %s", action.bot_id)
+
+        elif action.type == ActionType.SPAWN_DAILY_ANALYSIS:
+            if self.on_daily_analysis:
+                await self.on_daily_analysis(action)
+            else:
+                logger.info("Daily analysis triggered but no handler set: %s", action.event_id)
+
+        elif action.type == ActionType.SPAWN_WEEKLY_SUMMARY:
+            if self.on_weekly_analysis:
+                await self.on_weekly_analysis(action)
+            else:
+                logger.info("Weekly analysis triggered but no handler set: %s", action.event_id)
 
         elif action.type == ActionType.QUEUE_FOR_DAILY:
             logger.debug("Queued for daily: %s", action.event_id)

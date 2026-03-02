@@ -17,6 +17,11 @@ class SchedulerConfig:
     monitoring_interval_minutes: int = 10
     worker_interval_seconds: int = 60
     relay_poll_interval_seconds: int = 300
+    daily_analysis_hour: int = 6  # UTC hour to run daily analysis
+    daily_analysis_minute: int = 0
+    weekly_analysis_day_of_week: str = "sun"  # day of week for weekly analysis
+    weekly_analysis_hour: int = 8
+    weekly_analysis_minute: int = 0
 
 
 def create_scheduler_jobs(
@@ -24,10 +29,12 @@ def create_scheduler_jobs(
     worker_fn: Callable[[], Awaitable[None]],
     monitoring_fn: Callable[[], Awaitable[None]],
     relay_fn: Callable[[], Awaitable[None]],
+    daily_analysis_fn: Callable[[], Awaitable[None]] | None = None,
+    weekly_analysis_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
-    return [
+    jobs = [
         {
             "name": "worker",
             "func": worker_fn,
@@ -47,3 +54,24 @@ def create_scheduler_jobs(
             "seconds": config.relay_poll_interval_seconds,
         },
     ]
+
+    if daily_analysis_fn is not None:
+        jobs.append({
+            "name": "daily_analysis",
+            "func": daily_analysis_fn,
+            "trigger": "cron",
+            "hour": config.daily_analysis_hour,
+            "minute": config.daily_analysis_minute,
+        })
+
+    if weekly_analysis_fn is not None:
+        jobs.append({
+            "name": "weekly_analysis",
+            "func": weekly_analysis_fn,
+            "trigger": "cron",
+            "day_of_week": config.weekly_analysis_day_of_week,
+            "hour": config.weekly_analysis_hour,
+            "minute": config.weekly_analysis_minute,
+        })
+
+    return jobs

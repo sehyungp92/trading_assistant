@@ -68,6 +68,12 @@ class OrchestratorBrain:
     def _handle_heartbeat(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.UPDATE_HEARTBEAT, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_daily_analysis_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.SPAWN_DAILY_ANALYSIS, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_weekly_summary_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.SPAWN_WEEKLY_SUMMARY, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
 
@@ -76,4 +82,6 @@ class OrchestratorBrain:
         "missed_opportunity": _handle_missed_opportunity,
         "error": _handle_error,
         "heartbeat": _handle_heartbeat,
+        "daily_analysis_trigger": _handle_daily_analysis_trigger,
+        "weekly_summary_trigger": _handle_weekly_summary_trigger,
     }
