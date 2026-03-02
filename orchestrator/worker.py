@@ -33,6 +33,7 @@ class Worker:
         self.on_triage: Callable[[Action], Awaitable[None]] | None = None
         self.on_daily_analysis: Callable[[Action], Awaitable[None]] | None = None
         self.on_weekly_analysis: Callable[[Action], Awaitable[None]] | None = None
+        self.on_wfo: Callable[[Action], Awaitable[None]] | None = None
 
     async def process_batch(self, limit: int = 10) -> int:
         """Process up to `limit` pending events. Returns count processed."""
@@ -85,8 +86,17 @@ class Worker:
             else:
                 logger.info("Weekly analysis triggered but no handler set: %s", action.event_id)
 
+        elif action.type == ActionType.SPAWN_WFO:
+            if self.on_wfo:
+                await self.on_wfo(action)
+            else:
+                logger.info("WFO triggered but no handler set: %s", action.event_id)
+
         elif action.type == ActionType.QUEUE_FOR_DAILY:
             logger.debug("Queued for daily: %s", action.event_id)
+
+        elif action.type == ActionType.QUEUE_FOR_WEEKLY:
+            logger.debug("Queued for weekly: %s", action.event_id)
 
         elif action.type == ActionType.LOG_UNKNOWN:
             logger.warning("Unknown event type from %s: %s", action.bot_id, action.event_id)

@@ -22,6 +22,10 @@ class SchedulerConfig:
     weekly_analysis_day_of_week: str = "sun"  # day of week for weekly analysis
     weekly_analysis_hour: int = 8
     weekly_analysis_minute: int = 0
+    wfo_day_of_week: str = "sat"  # run WFO on Saturday
+    wfo_hour: int = 2
+    wfo_minute: int = 0
+    stale_error_sweep_interval_seconds: int = 600  # sweep stale errors every 10 min
 
 
 def create_scheduler_jobs(
@@ -31,6 +35,8 @@ def create_scheduler_jobs(
     relay_fn: Callable[[], Awaitable[None]],
     daily_analysis_fn: Callable[[], Awaitable[None]] | None = None,
     weekly_analysis_fn: Callable[[], Awaitable[None]] | None = None,
+    wfo_fn: Callable[[], Awaitable[None]] | None = None,
+    stale_error_sweep_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
@@ -72,6 +78,24 @@ def create_scheduler_jobs(
             "day_of_week": config.weekly_analysis_day_of_week,
             "hour": config.weekly_analysis_hour,
             "minute": config.weekly_analysis_minute,
+        })
+
+    if wfo_fn is not None:
+        jobs.append({
+            "name": "wfo",
+            "func": wfo_fn,
+            "trigger": "cron",
+            "day_of_week": config.wfo_day_of_week,
+            "hour": config.wfo_hour,
+            "minute": config.wfo_minute,
+        })
+
+    if stale_error_sweep_fn is not None:
+        jobs.append({
+            "name": "stale_error_sweep",
+            "func": stale_error_sweep_fn,
+            "trigger": "interval",
+            "seconds": config.stale_error_sweep_interval_seconds,
         })
 
     return jobs

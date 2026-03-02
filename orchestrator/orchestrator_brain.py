@@ -17,6 +17,8 @@ class ActionType(str, Enum):
     SPAWN_TRIAGE = "spawn_triage"
     SPAWN_DAILY_ANALYSIS = "spawn_daily_analysis"
     SPAWN_WEEKLY_SUMMARY = "spawn_weekly_summary"
+    SPAWN_WFO = "spawn_wfo"
+    QUEUE_FOR_WEEKLY = "queue_for_weekly"
     UPDATE_HEARTBEAT = "update_heartbeat"
     LOG_UNKNOWN = "log_unknown"
 
@@ -52,7 +54,7 @@ class OrchestratorBrain:
 
     def _handle_error(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         payload = json.loads(event.get("payload", "{}"))
-        severity = payload.get("severity", "LOW").upper()
+        severity = payload.get("severity", "MEDIUM").upper()
 
         if severity == "CRITICAL":
             return [
@@ -62,7 +64,9 @@ class OrchestratorBrain:
             return [
                 Action(type=ActionType.SPAWN_TRIAGE, event_id=event_id, bot_id=bot_id, details=payload),
             ]
-        else:
+        elif severity == "LOW":
+            return [Action(type=ActionType.QUEUE_FOR_WEEKLY, event_id=event_id, bot_id=bot_id)]
+        else:  # MEDIUM or unrecognized
             return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
     def _handle_heartbeat(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
@@ -74,6 +78,9 @@ class OrchestratorBrain:
     def _handle_weekly_summary_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.SPAWN_WEEKLY_SUMMARY, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_wfo_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.SPAWN_WFO, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
 
@@ -84,4 +91,5 @@ class OrchestratorBrain:
         "heartbeat": _handle_heartbeat,
         "daily_analysis_trigger": _handle_daily_analysis_trigger,
         "weekly_summary_trigger": _handle_weekly_summary_trigger,
+        "wfo_trigger": _handle_wfo_trigger,
     }
