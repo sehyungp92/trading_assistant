@@ -136,14 +136,14 @@ class TestWeeklyPipelineIntegration:
         package = assembler.assemble()
 
         # Verify complete package
-        assert "system_prompt" in package
-        assert "task_prompt" in package
-        assert "data" in package
-        assert "weekly_summary" in package["data"]
-        assert "refinement_report" in package["data"]
-        assert "daily_reports" in package["data"]
-        assert len(package["data"]["daily_reports"]) == 7
-        assert "portfolio_risk_cards" in package["data"]
-        assert len(package["data"]["portfolio_risk_cards"]) == 7
-        assert "instructions" in package
-        assert "weekly" in package["task_prompt"].lower()
+        assert package.system_prompt
+        assert package.task_prompt
+        assert package.data
+        assert "weekly_summary" in package.data
+        assert "refinement_report" in package.data
+        assert "daily_reports" in package.data
+        assert len(package.data["daily_reports"]) == 7
+        assert "portfolio_risk_cards" in package.data
+        assert len(package.data["portfolio_risk_cards"]) == 7
+        assert package.instructions
+        assert "weekly" in package.task_prompt.lower()

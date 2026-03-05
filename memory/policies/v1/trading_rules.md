@@ -1,7 +1,7 @@
 # Trading Rules — v1
 
 ## Constraints
-- Maximum 3 actionable suggestions per daily report
+- Maximum 5 actionable suggestions per daily report
 - All suggestions must be specific and testable
 - Never recommend increasing position size without WFO validation
 - Missed opportunity calculations must disclose simulation assumptions

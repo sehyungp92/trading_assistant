@@ -71,8 +71,8 @@ class TestFullTriagePipeline:
             [],
         )
         prompt_pkg = asm.assemble(ctx, result.severity, result.complexity)
-        assert "HIGH" in prompt_pkg["task_prompt"]
-        assert "obvious_fix" in prompt_pkg["task_prompt"]
+        assert "HIGH" in prompt_pkg.task_prompt
+        assert "obvious_fix" in prompt_pkg.task_prompt
 
     def test_repeated_errors_promote_severity(self, tmp_path: Path):
         """MEDIUM errors repeated >3/hour → promoted to HIGH → NEEDS_INVESTIGATION."""

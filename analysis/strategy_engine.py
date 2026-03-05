@@ -99,44 +99,281 @@ class StrategyEngine:
         return suggestions
 
     def analyze_regime_fit(
-        self, bot_id: str, regime_trends: list[RegimePerformanceTrend]
+        self, bot_id: str, regime_trends: list[RegimePerformanceTrend],
+        trades: list | None = None,
     ) -> list[StrategySuggestion]:
-        """Tier 3: Detect consistent losses in a specific regime."""
+        """Tier 3: Detect consistent losses in a specific regime.
+
+        If trades are provided, includes quantified exclusion impact in the description.
+        """
+        return self.analyze_regime_fit_quantified(bot_id, regime_trends, trades)
+
+    def compute_regime_exclusion_impact(
+        self, bot_id: str, trades: list, regime_to_exclude: str
+    ) -> dict:
+        """Compute P&L impact of excluding all trades in a specific regime."""
+        baseline_pnl = sum(t.pnl for t in trades)
+        kept = [t for t in trades if (t.market_regime or "unknown") != regime_to_exclude]
+        excluded_pnl = sum(t.pnl for t in kept)
+        excluded_count = len(trades) - len(kept)
+        return {
+            "regime": regime_to_exclude,
+            "baseline_pnl": baseline_pnl,
+            "excluded_pnl": excluded_pnl,
+            "delta_pnl": excluded_pnl - baseline_pnl,
+            "excluded_trade_count": excluded_count,
+            "total_trade_count": len(trades),
+        }
+
+    def analyze_regime_fit_quantified(
+        self, bot_id: str, regime_trends: list["RegimePerformanceTrend"],
+        trades: list | None = None,
+    ) -> list["StrategySuggestion"]:
+        """Tier 3: Regime fit analysis with quantified exclusion impact."""
         suggestions: list[StrategySuggestion] = []
 
         for trend in regime_trends:
             if len(trend.weekly_pnl) < self.regime_min_weeks:
                 continue
-
-            # All weeks negative in this regime
             losing_weeks = sum(1 for pnl in trend.weekly_pnl if pnl < self.regime_loss_threshold)
-            if losing_weeks >= self.regime_min_weeks:
-                total_loss = sum(pnl for pnl in trend.weekly_pnl if pnl < 0)
-                suggestions.append(
-                    StrategySuggestion(
-                        tier=SuggestionTier.STRATEGY_VARIANT,
-                        bot_id=bot_id,
-                        title=f"Add regime gate for {trend.regime} on {bot_id}",
-                        description=(
-                            f"{bot_id} lost in {trend.regime} regime for "
-                            f"{losing_weeks}/{len(trend.weekly_pnl)} weeks "
-                            f"(total: ${total_loss:.0f}). "
-                            f"Consider adding a regime gate to disable trading "
-                            f"in {trend.regime} conditions."
-                        ),
-                        requires_human_judgment=True,
-                        evidence_days=len(trend.weekly_pnl) * 7,
-                        confidence=0.5,
-                    )
+            if losing_weeks < self.regime_min_weeks:
+                continue
+
+            total_loss = sum(pnl for pnl in trend.weekly_pnl if pnl < 0)
+            desc = (
+                f"{bot_id} lost in {trend.regime} regime for "
+                f"{losing_weeks}/{len(trend.weekly_pnl)} weeks "
+                f"(total: ${total_loss:.0f}). "
+            )
+
+            if trades:
+                impact = self.compute_regime_exclusion_impact(bot_id, trades, trend.regime)
+                desc += (
+                    f"Excluding {trend.regime} trades would change PnL from "
+                    f"${impact['baseline_pnl']:.0f} to ${impact['excluded_pnl']:.0f} "
+                    f"(+${impact['delta_pnl']:.0f}, removing {impact['excluded_trade_count']} trades). "
                 )
 
+            desc += f"Consider adding a regime gate to disable trading in {trend.regime} conditions."
+
+            suggestions.append(
+                StrategySuggestion(
+                    tier=SuggestionTier.STRATEGY_VARIANT,
+                    bot_id=bot_id,
+                    title=f"Add regime gate for {trend.regime} on {bot_id}",
+                    description=desc,
+                    requires_human_judgment=True,
+                    evidence_days=len(trend.weekly_pnl) * 7,
+                    confidence=0.5,
+                    estimated_impact_pnl=abs(total_loss),
+                )
+            )
+
         return suggestions
+
+    def detect_alpha_decay(
+        self,
+        bot_id: str,
+        rolling_sharpe_30d: float,
+        rolling_sharpe_60d: float,
+        rolling_sharpe_90d: float,
+        decay_threshold: float = 0.3,
+    ) -> list[StrategySuggestion]:
+        """Tier 4: Detect declining Sharpe ratio over 30/60/90 day windows."""
+        if rolling_sharpe_90d <= 0:
+            return []
+        # Check if 30d Sharpe is significantly below 90d Sharpe
+        decay_ratio = (rolling_sharpe_90d - rolling_sharpe_30d) / rolling_sharpe_90d
+        if decay_ratio < decay_threshold:
+            return []
+        return [StrategySuggestion(
+            tier=SuggestionTier.HYPOTHESIS,
+            bot_id=bot_id,
+            title=f"Alpha decay detected — {bot_id}",
+            description=(
+                f"30d Sharpe ({rolling_sharpe_30d:.2f}) is {decay_ratio:.0%} below "
+                f"90d Sharpe ({rolling_sharpe_90d:.2f}). The strategy may be losing edge. "
+                f"Review signal quality and market regime alignment."
+            ),
+            evidence_days=90,
+            confidence=min(0.9, 0.5 + decay_ratio),
+            requires_human_judgment=True,
+        )]
+
+    def detect_signal_decay(
+        self,
+        bot_id: str,
+        signal_outcome_correlation_30d: float,
+        signal_outcome_correlation_90d: float,
+        decay_threshold: float = 0.2,
+    ) -> list[StrategySuggestion]:
+        """Tier 4: Detect declining signal-to-outcome correlation."""
+        drop = signal_outcome_correlation_90d - signal_outcome_correlation_30d
+        if drop < decay_threshold:
+            return []
+        return [StrategySuggestion(
+            tier=SuggestionTier.HYPOTHESIS,
+            bot_id=bot_id,
+            title=f"Signal quality decay — {bot_id}",
+            description=(
+                f"Signal→outcome correlation dropped from {signal_outcome_correlation_90d:.2f} "
+                f"(90d) to {signal_outcome_correlation_30d:.2f} (30d). "
+                f"Signal may need recalibration or replacement."
+            ),
+            evidence_days=90,
+            confidence=min(0.9, 0.5 + drop),
+            requires_human_judgment=True,
+        )]
+
+    def detect_exit_timing_issues(
+        self,
+        bot_id: str,
+        avg_exit_efficiency: float,
+        premature_exit_pct: float,
+        efficiency_threshold: float = 0.5,
+        premature_threshold: float = 0.4,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Detect systematic premature exits."""
+        if avg_exit_efficiency >= efficiency_threshold and premature_exit_pct <= premature_threshold:
+            return []
+        suggestions: list[StrategySuggestion] = []
+        if avg_exit_efficiency < efficiency_threshold:
+            suggestions.append(StrategySuggestion(
+                tier=SuggestionTier.STRATEGY_VARIANT,
+                bot_id=bot_id,
+                title=f"Premature exits — {bot_id}",
+                description=(
+                    f"Average exit efficiency is {avg_exit_efficiency:.0%} (captures "
+                    f"{avg_exit_efficiency:.0%} of available move). "
+                    f"{premature_exit_pct:.0%} of exits are premature. "
+                    f"Consider trailing stop or wider take-profit."
+                ),
+                evidence_days=30,
+                confidence=0.6,
+                requires_human_judgment=True,
+            ))
+        return suggestions
+
+    def detect_correlation_breakdown(
+        self,
+        correlations: list,  # list[CorrelationSummary]
+        threshold: float = 0.7,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Detect rising cross-bot return correlation (systemic risk)."""
+        suggestions: list[StrategySuggestion] = []
+        for corr in correlations:
+            if corr.rolling_30d_correlation >= threshold:
+                suggestions.append(StrategySuggestion(
+                    tier=SuggestionTier.STRATEGY_VARIANT,
+                    bot_id=f"{corr.bot_a}+{corr.bot_b}",
+                    title=f"High correlation — {corr.bot_a} / {corr.bot_b}",
+                    description=(
+                        f"30d return correlation is {corr.rolling_30d_correlation:.2f}. "
+                        f"Same-direction trading {corr.same_direction_pct:.0%} of the time. "
+                        f"This increases systemic risk during adverse moves. "
+                        f"Consider diversifying signal sources or staggering entry timing."
+                    ),
+                    evidence_days=30,
+                    confidence=min(0.9, corr.rolling_30d_correlation),
+                    requires_human_judgment=True,
+                ))
+        return suggestions
+
+    def detect_time_of_day_patterns(
+        self,
+        bot_id: str,
+        hourly_buckets: list,  # list[HourlyBucket]
+        min_trades: int = 10,
+        loss_threshold: float = 0.35,
+    ) -> list[StrategySuggestion]:
+        """Tier 2: Detect hours with consistently poor performance."""
+        suggestions: list[StrategySuggestion] = []
+        for bucket in hourly_buckets:
+            if bucket.trade_count < min_trades:
+                continue
+            if bucket.pnl < 0 and bucket.win_rate < loss_threshold:
+                suggestions.append(StrategySuggestion(
+                    tier=SuggestionTier.FILTER,
+                    bot_id=bot_id,
+                    title=f"Poor hour {bucket.hour:02d}:00 — {bot_id}",
+                    description=(
+                        f"Hour {bucket.hour:02d}:00 UTC: {bucket.trade_count} trades, "
+                        f"PnL ${bucket.pnl:.0f}, win rate {bucket.win_rate:.0%}. "
+                        f"Consider adding a time-of-day gate to avoid this hour."
+                    ),
+                    evidence_days=7,
+                    confidence=0.6,
+                ))
+        return suggestions
+
+    def detect_drawdown_patterns(
+        self,
+        bot_id: str,
+        largest_single_loss_pct: float,
+        max_drawdown_pct: float,
+        avg_loss_pct: float,
+        concentration_threshold: float = 3.0,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Detect concentrated drawdown (single loss dominates)."""
+        if avg_loss_pct <= 0:
+            return []
+        concentration = largest_single_loss_pct / avg_loss_pct
+        if concentration < concentration_threshold:
+            return []
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            title=f"Concentrated drawdown risk — {bot_id}",
+            description=(
+                f"Largest single loss ({largest_single_loss_pct:.1f}%) is "
+                f"{concentration:.1f}x the average loss ({avg_loss_pct:.1f}%). "
+                f"Max drawdown: {max_drawdown_pct:.1f}%. "
+                f"Consider tighter per-trade risk limits or position sizing adjustments."
+            ),
+            evidence_days=30,
+            confidence=0.65,
+            requires_human_judgment=True,
+        )]
+
+    def detect_position_sizing_issues(
+        self,
+        bot_id: str,
+        avg_win_pct: float,
+        avg_loss_pct: float,
+        win_rate: float,
+        loss_win_ratio_threshold: float = 1.5,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Detect asymmetric position sizing (losses > wins despite positive win rate)."""
+        if avg_win_pct <= 0 or win_rate < 0.5:
+            return []
+        loss_win_ratio = avg_loss_pct / avg_win_pct
+        if loss_win_ratio < loss_win_ratio_threshold:
+            return []
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            title=f"Position sizing imbalance — {bot_id}",
+            description=(
+                f"Average loss ({avg_loss_pct:.1f}%) is {loss_win_ratio:.1f}x "
+                f"average win ({avg_win_pct:.1f}%) despite {win_rate:.0%} win rate. "
+                f"Risk/reward is asymmetric — consider reducing position size on "
+                f"lower-confidence signals or tightening stop placement."
+            ),
+            evidence_days=30,
+            confidence=0.6,
+            requires_human_judgment=True,
+        )]
 
     def build_report(
         self,
         bot_summaries: dict[str, BotWeeklySummary],
         filter_summaries: dict[str, list[FilterWeeklySummary]] | None = None,
         regime_trends: dict[str, list[RegimePerformanceTrend]] | None = None,
+        rolling_sharpe: dict[str, dict[str, float]] | None = None,
+        signal_correlations: dict[str, dict[str, float]] | None = None,
+        hourly_buckets: dict[str, list] | None = None,
+        correlation_summaries: list | None = None,
+        drawdown_data: dict[str, dict] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -153,6 +390,44 @@ class StrategyEngine:
                 all_suggestions.extend(
                     self.analyze_regime_fit(bot_id, regime_trends[bot_id])
                 )
+
+        # New detectors
+        if rolling_sharpe:
+            for bot_id, sharpe in rolling_sharpe.items():
+                all_suggestions.extend(self.detect_alpha_decay(
+                    bot_id, sharpe.get("30d", 0), sharpe.get("60d", 0), sharpe.get("90d", 0),
+                ))
+
+        if signal_correlations:
+            for bot_id, corr in signal_correlations.items():
+                all_suggestions.extend(self.detect_signal_decay(
+                    bot_id, corr.get("30d", 0), corr.get("90d", 0),
+                ))
+
+        if hourly_buckets:
+            for bot_id, buckets in hourly_buckets.items():
+                all_suggestions.extend(self.detect_time_of_day_patterns(bot_id, buckets))
+
+        if correlation_summaries:
+            all_suggestions.extend(self.detect_correlation_breakdown(correlation_summaries))
+
+        if drawdown_data:
+            for bot_id, dd in drawdown_data.items():
+                all_suggestions.extend(self.detect_drawdown_patterns(
+                    bot_id,
+                    dd.get("largest_single_loss_pct", 0),
+                    dd.get("max_drawdown_pct", 0),
+                    dd.get("avg_loss_pct", 0),
+                ))
+
+        for bot_id, summary in bot_summaries.items():
+            if summary.avg_win > 0 and abs(summary.avg_loss) > 0:
+                all_suggestions.extend(self.detect_position_sizing_issues(
+                    bot_id,
+                    avg_win_pct=summary.avg_win,
+                    avg_loss_pct=abs(summary.avg_loss),
+                    win_rate=summary.win_rate,
+                ))
 
         return RefinementReport(
             week_start=self.week_start,

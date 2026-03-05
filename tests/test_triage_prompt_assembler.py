@@ -19,9 +19,9 @@ class TestTriagePromptAssembler:
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX)
 
-        assert "system_prompt" in result
-        assert "task_prompt" in result
-        assert "context" in result
+        assert result.system_prompt is not None
+        assert result.task_prompt
+        assert result.data.get("context")
 
     def test_task_prompt_includes_severity_and_complexity(self, tmp_path: Path):
         ctx = TriageContext(
@@ -34,8 +34,8 @@ class TestTriagePromptAssembler:
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX)
 
-        assert "HIGH" in result["task_prompt"]
-        assert "obvious_fix" in result["task_prompt"]
+        assert "HIGH" in result.task_prompt
+        assert "obvious_fix" in result.task_prompt
 
     def test_includes_past_rejections_in_context(self, tmp_path: Path):
         ctx = TriageContext(
@@ -48,7 +48,7 @@ class TestTriagePromptAssembler:
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX)
 
-        assert "wrong version pinned" in result["context"]
+        assert "wrong version pinned" in result.data["context"]
 
     def test_includes_stack_trace_in_context(self, tmp_path: Path):
         ctx = TriageContext(
@@ -61,7 +61,7 @@ class TestTriagePromptAssembler:
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.SINGLE_FUNCTION)
 
-        assert "Traceback" in result["context"]
+        assert "Traceback" in result.data["context"]
 
     def test_includes_source_snippet_in_context(self, tmp_path: Path):
         ctx = TriageContext(
@@ -74,7 +74,7 @@ class TestTriagePromptAssembler:
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.SINGLE_FUNCTION)
 
-        assert "return x / y" in result["context"]
+        assert "return x / y" in result.data["context"]
 
     def test_loads_policies_for_system_prompt(self, tmp_path: Path):
         policy_dir = tmp_path / "policies" / "v1"
@@ -88,4 +88,4 @@ class TestTriagePromptAssembler:
         )
         result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX)
 
-        assert "Be helpful" in result["system_prompt"]
+        assert "Be helpful" in result.system_prompt

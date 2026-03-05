@@ -1,16 +1,16 @@
 # analysis/triage_prompt_assembler.py
 """Triage prompt assembler — builds context package for the Claude triage agent.
 
-Follows the same pattern as DailyPromptAssembler:
-  SYSTEM PROMPT: policies
-  TASK PROMPT: triage instructions with severity/complexity
-  CONTEXT: stack trace + source + git log + past rejections
+Uses ContextBuilder for shared policy loading. Adds triage-specific
+context: stack trace, source snippet, git log, past rejections.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+from analysis.context_builder import ContextBuilder
 from schemas.bug_triage import BugComplexity, BugSeverity
+from schemas.prompt_package import PromptPackage
 from skills.triage_context_builder import TriageContext
 
 _TRIAGE_INSTRUCTIONS = """\
@@ -30,35 +30,20 @@ class TriagePromptAssembler:
 
     def __init__(self, memory_dir: Path) -> None:
         self._memory_dir = memory_dir
+        self._ctx = ContextBuilder(memory_dir)
 
     def assemble(
         self,
         context: TriageContext,
         severity: BugSeverity,
         complexity: BugComplexity,
-    ) -> dict:
+    ) -> PromptPackage:
         """Build the complete prompt package."""
-        system_prompt = self._build_system_prompt()
-        task_prompt = self._build_task_prompt(severity, complexity)
-        context_text = self._build_context(context)
-
-        return {
-            "system_prompt": system_prompt,
-            "task_prompt": task_prompt,
-            "context": context_text,
-            "instructions": _TRIAGE_INSTRUCTIONS,
-        }
-
-    def _build_system_prompt(self) -> str:
-        parts: list[str] = []
-        policy_dir = self._memory_dir / "policies" / "v1"
-
-        for name in ["agents.md", "trading_rules.md", "soul.md"]:
-            path = policy_dir / name
-            if path.exists():
-                parts.append(f"--- {name} ---\n{path.read_text()}")
-
-        return "\n\n".join(parts)
+        pkg = self._ctx.base_package()
+        pkg.task_prompt = self._build_task_prompt(severity, complexity)
+        pkg.data = {"context": self._build_context(context)}
+        pkg.instructions = _TRIAGE_INSTRUCTIONS
+        return pkg
 
     def _build_task_prompt(
         self, severity: BugSeverity, complexity: BugComplexity,

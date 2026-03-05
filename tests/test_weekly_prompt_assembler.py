@@ -76,12 +76,12 @@ class TestWeeklyPromptAssembler:
         )
         package = assembler.assemble()
 
-        assert "system_prompt" in package
-        assert "task_prompt" in package
-        assert "data" in package
-        assert "instructions" in package
-        assert "corrections" in package
-        assert "context_files" in package
+        assert package.system_prompt
+        assert package.task_prompt
+        assert package.data
+        assert package.instructions
+        assert package.corrections is not None
+        assert package.context_files is not None
 
     def test_system_prompt_includes_policies(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -94,8 +94,8 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert "trading assistant" in package["system_prompt"]
-        assert "Max drawdown" in package["system_prompt"]
+        assert "trading assistant" in package.system_prompt
+        assert "Max drawdown" in package.system_prompt
 
     def test_data_includes_weekly_summary(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -108,8 +108,8 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert "weekly_summary" in package["data"]
-        assert package["data"]["weekly_summary"]["total_net_pnl"] == 500.0
+        assert "weekly_summary" in package.data
+        assert package.data["weekly_summary"]["total_net_pnl"] == 500.0
 
     def test_data_includes_daily_reports(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -122,8 +122,8 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert "daily_reports" in package["data"]
-        assert len(package["data"]["daily_reports"]) == 7
+        assert "daily_reports" in package.data
+        assert len(package.data["daily_reports"]) == 7
 
     def test_data_includes_risk_cards(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -136,8 +136,8 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert "portfolio_risk_cards" in package["data"]
-        assert len(package["data"]["portfolio_risk_cards"]) == 7
+        assert "portfolio_risk_cards" in package.data
+        assert len(package.data["portfolio_risk_cards"]) == 7
 
     def test_task_prompt_mentions_weekly(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -150,7 +150,7 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert "weekly" in package["task_prompt"].lower()
+        assert "weekly" in package.task_prompt.lower()
 
     def test_corrections_loaded(self, setup_dirs):
         curated, memory, runs = setup_dirs
@@ -163,4 +163,4 @@ class TestWeeklyPromptAssembler:
             runs_dir=runs,
         )
         package = assembler.assemble()
-        assert len(package["corrections"]) == 1
+        assert len(package.corrections) == 1

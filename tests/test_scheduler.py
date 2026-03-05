@@ -7,7 +7,7 @@ from orchestrator.scheduler import SchedulerConfig, create_scheduler_jobs
 class TestSchedulerConfig:
     def test_default_config(self):
         config = SchedulerConfig()
-        assert config.monitoring_interval_minutes == 10
+        assert config.monitoring_interval_minutes == 60
         assert config.worker_interval_seconds == 60
         assert config.relay_poll_interval_seconds == 300
 

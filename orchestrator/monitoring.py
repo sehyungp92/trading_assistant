@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
 
+from orchestrator.event_stream import EventStream
+from orchestrator.orchestrator_brain import OrchestratorBrain
 from orchestrator.task_registry import TaskRegistry
 
 
@@ -40,11 +42,19 @@ class MonitoringCheck:
         task_timeout_seconds: int = 3600,
         heartbeat_dir: str = "",
         heartbeat_max_age_seconds: int = 7200,
+        queue=None,
+        dead_letter_critical_threshold: int = 5,
+        brain: OrchestratorBrain | None = None,
+        heartbeat_md_path: str = "",
     ) -> None:
         self._registry = registry
         self._task_timeout = task_timeout_seconds
         self._heartbeat_dir = heartbeat_dir
         self._heartbeat_max_age = heartbeat_max_age_seconds
+        self._queue = queue
+        self._dead_letter_critical = dead_letter_critical_threshold
+        self._brain = brain
+        self._heartbeat_md_path = heartbeat_md_path
 
     async def check_stale_tasks(self) -> list[Alert]:
         """Find tasks stuck in RUNNING state beyond timeout."""
@@ -61,32 +71,39 @@ class MonitoringCheck:
             for task in stale
         ]
 
-    def check_heartbeats(self) -> list[Alert]:
-        """Check VPS sidecar heartbeat freshness."""
+    def _read_heartbeats(self) -> list[tuple[str, datetime | None, float, str | None]]:
+        """Read all heartbeat files. Returns [(bot_id, last_seen, age_seconds, error)]."""
         if not self._heartbeat_dir:
             return []
-
-        alerts: list[Alert] = []
         hb_path = Path(self._heartbeat_dir)
-
-        for hb_file in hb_path.glob("*.heartbeat"):
+        now = datetime.now(timezone.utc)
+        results = []
+        for hb_file in sorted(hb_path.glob("*.heartbeat")):
             bot_id = hb_file.stem
             try:
                 last_seen = datetime.fromisoformat(hb_file.read_text().strip())
-                age = (datetime.now(timezone.utc) - last_seen).total_seconds()
-                if age > self._heartbeat_max_age:
-                    alerts.append(Alert(
-                        severity=AlertSeverity.CRITICAL,
-                        source="heartbeat",
-                        message=f"Bot '{bot_id}' last heartbeat was {age / 3600:.1f}h ago",
-                    ))
+                age = (now - last_seen).total_seconds()
+                results.append((bot_id, last_seen, age, None))
             except (ValueError, OSError) as e:
+                results.append((bot_id, None, 0.0, str(e)))
+        return results
+
+    def check_heartbeats(self) -> list[Alert]:
+        """Check VPS sidecar heartbeat freshness."""
+        alerts: list[Alert] = []
+        for bot_id, _last_seen, age, error in self._read_heartbeats():
+            if error:
                 alerts.append(Alert(
                     severity=AlertSeverity.HIGH,
                     source="heartbeat",
-                    message=f"Cannot read heartbeat for '{bot_id}': {e}",
+                    message=f"Cannot read heartbeat for '{bot_id}': {error}",
                 ))
-
+            elif age > self._heartbeat_max_age:
+                alerts.append(Alert(
+                    severity=AlertSeverity.CRITICAL,
+                    source="heartbeat",
+                    message=f"Bot '{bot_id}' last heartbeat was {age / 3600:.1f}h ago",
+                ))
         return alerts
 
     def check_run_outputs(self, run_dir: str, expected_files: list[str]) -> list[Alert]:
@@ -104,12 +121,93 @@ class MonitoringCheck:
 
         return alerts
 
+    async def update_heartbeat_md(self) -> None:
+        """Write a human-readable system status to heartbeat.md."""
+        if not self._heartbeat_md_path:
+            return
+
+        now = datetime.now(timezone.utc)
+        lines = [
+            "# System Heartbeat",
+            f"Last check: {now.isoformat()}",
+            "",
+            "## Bot Status",
+        ]
+
+        heartbeats = self._read_heartbeats()
+        if heartbeats:
+            for bot_id, _last_seen, age, error in heartbeats:
+                if error:
+                    lines.append(f"- {bot_id}: unknown (unreadable)")
+                elif age > self._heartbeat_max_age:
+                    lines.append(f"- {bot_id}: STALE (last seen {age / 3600:.1f}h ago)")
+                else:
+                    lines.append(f"- {bot_id}: healthy (last seen {int(age / 60)}min ago)")
+        else:
+            lines.append("- No heartbeat data available")
+
+        lines.append("")
+        lines.append("## Queue")
+
+        pending = 0
+        dead_count = 0
+        if self._queue:
+            try:
+                pending = await self._queue.count_pending()
+            except Exception:
+                pass
+            try:
+                dead_count = await self._queue.count_dead_letters()
+            except Exception:
+                pass
+
+        lines.append(f"- Pending events: {pending}")
+        lines.append(f"- Dead letters: {dead_count}")
+
+        lines.append("")
+        lines.append("## Last Analyses")
+
+        if self._brain:
+            lines.append(f"- Daily: {self._brain.last_daily_analysis or 'never'}")
+            lines.append(f"- Weekly: {self._brain.last_weekly_analysis or 'never'}")
+        else:
+            lines.append("- Daily: unknown")
+            lines.append("- Weekly: unknown")
+
+        lines.append("")
+
+        md_path = Path(self._heartbeat_md_path)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+
+    async def check_dead_letters(self) -> list[Alert]:
+        """Alert when events are stuck in dead-letter queue."""
+        if not self._queue:
+            return []
+        try:
+            count = await self._queue.count_dead_letters()
+        except Exception:
+            return []
+        if count == 0:
+            return []
+        severity = AlertSeverity.CRITICAL if count >= self._dead_letter_critical else AlertSeverity.HIGH
+        return [Alert(
+            severity=severity,
+            source="dead_letter",
+            message=f"{count} event(s) in dead-letter queue — inspect and reprocess or discard",
+        )]
+
 
 class MonitoringLoop:
     """Orchestrates all monitoring checks and collects alerts."""
 
-    def __init__(self, checks: list[MonitoringCheck]) -> None:
+    def __init__(
+        self,
+        checks: list[MonitoringCheck],
+        event_stream: EventStream | None = None,
+    ) -> None:
         self._checks = checks
+        self._event_stream: EventStream | None = event_stream
 
     async def run_all(self) -> list[Alert]:
         """Run all checks and return combined alerts."""
@@ -117,4 +215,18 @@ class MonitoringLoop:
         for check in self._checks:
             all_alerts.extend(await check.check_stale_tasks())
             all_alerts.extend(check.check_heartbeats())
-        return sorted(all_alerts, key=lambda a: list(AlertSeverity).index(a.severity))
+            all_alerts.extend(await check.check_dead_letters())
+            await check.update_heartbeat_md()
+        sorted_alerts = sorted(all_alerts, key=lambda a: list(AlertSeverity).index(a.severity))
+
+        # Emit SSE events for CRITICAL/HIGH alerts
+        if self._event_stream:
+            for alert in sorted_alerts:
+                if alert.severity in (AlertSeverity.CRITICAL, AlertSeverity.HIGH):
+                    self._event_stream.broadcast("alert", {
+                        "severity": alert.severity.value,
+                        "source": alert.source,
+                        "message": alert.message,
+                    })
+
+        return sorted_alerts

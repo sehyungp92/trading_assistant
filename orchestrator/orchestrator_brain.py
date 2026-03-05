@@ -7,6 +7,8 @@ The brain decides WHAT should happen; workers execute HOW.
 from __future__ import annotations
 
 import json
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 
@@ -19,6 +21,7 @@ class ActionType(str, Enum):
     SPAWN_WEEKLY_SUMMARY = "spawn_weekly_summary"
     SPAWN_WFO = "spawn_wfo"
     QUEUE_FOR_WEEKLY = "queue_for_weekly"
+    SEND_NOTIFICATION = "send_notification"
     UPDATE_HEARTBEAT = "update_heartbeat"
     LOG_UNKNOWN = "log_unknown"
 
@@ -29,10 +32,66 @@ class Action:
     event_id: str
     bot_id: str
     details: dict | None = None
+    chain_id: str = ""
+
+
+class ErrorRateTracker:
+    """Sliding window counter for error frequency tracking per bot+error_type."""
+
+    def __init__(self, window_seconds: int = 3600, storm_threshold: int = 3) -> None:
+        self._window = window_seconds
+        self._storm_threshold = storm_threshold
+        self._events: dict[str, list[float]] = defaultdict(list)
+        self._triage_spawned: dict[str, bool] = defaultdict(bool)
+
+    def _prune(self, key: str, cutoff: float) -> None:
+        """Prune expired timestamps and remove empty keys."""
+        self._events[key] = [t for t in self._events[key] if t > cutoff]
+        if not self._events[key]:
+            del self._events[key]
+            self._triage_spawned.pop(key, None)
+
+    def record_and_check(self, bot_id: str, error_type: str) -> tuple[int, bool, bool]:
+        """Record an error and return (count_in_window, is_suppressed, is_storm)."""
+        key = f"{bot_id}:{error_type}"
+        now = time.monotonic()
+        cutoff = now - self._window
+
+        self._prune(key, cutoff)
+        self._events[key].append(now)
+
+        count = len(self._events[key])
+        already_triaging = self._triage_spawned.get(key, False)
+        is_storm = count >= self._storm_threshold
+
+        if is_storm:
+            self._triage_spawned[key] = True
+            return count, False, True
+
+        if already_triaging:
+            return count, True, False
+
+        self._triage_spawned[key] = True
+        return count, False, False
+
+    def total_count(self) -> int:
+        """Return the total error count across all keys within the current window."""
+        now = time.monotonic()
+        cutoff = now - self._window
+        total = 0
+        for key in list(self._events):
+            self._prune(key, cutoff)
+            total += len(self._events.get(key, []))
+        return total
 
 
 class OrchestratorBrain:
     """Deterministic decision engine for incoming events."""
+
+    def __init__(self) -> None:
+        self._error_tracker = ErrorRateTracker()
+        self.last_daily_analysis: str | None = None
+        self.last_weekly_analysis: str | None = None
 
     def decide(self, event: dict) -> list[Action]:
         """Given a raw event dict, return a list of actions to take."""
@@ -61,8 +120,19 @@ class OrchestratorBrain:
                 Action(type=ActionType.ALERT_IMMEDIATE, event_id=event_id, bot_id=bot_id, details=payload),
             ]
         elif severity == "HIGH":
+            error_type = payload.get("error_type", "unknown")
+            count, suppressed, is_storm = self._error_tracker.record_and_check(bot_id, error_type)
+
+            if suppressed:
+                return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+            details = dict(payload)
+            if is_storm:
+                details["urgency"] = "error_storm"
+                details["error_count"] = count
+
             return [
-                Action(type=ActionType.SPAWN_TRIAGE, event_id=event_id, bot_id=bot_id, details=payload),
+                Action(type=ActionType.SPAWN_TRIAGE, event_id=event_id, bot_id=bot_id, details=details),
             ]
         elif severity == "LOW":
             return [Action(type=ActionType.QUEUE_FOR_WEEKLY, event_id=event_id, bot_id=bot_id)]
@@ -81,8 +151,23 @@ class OrchestratorBrain:
     def _handle_wfo_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.SPAWN_WFO, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_notification_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.SEND_NOTIFICATION, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
+
+    def get_error_rate_1h(self) -> float:
+        """Return the total error count in the last hour across all keys."""
+        return float(self._error_tracker.total_count())
+
+    def record_daily_analysis(self, timestamp: str) -> None:
+        """Record the timestamp of the last daily analysis run."""
+        self.last_daily_analysis = timestamp
+
+    def record_weekly_analysis(self, timestamp: str) -> None:
+        """Record the timestamp of the last weekly analysis run."""
+        self.last_weekly_analysis = timestamp
 
     _handlers: dict = {
         "trade": _handle_trade,
@@ -92,4 +177,5 @@ class OrchestratorBrain:
         "daily_analysis_trigger": _handle_daily_analysis_trigger,
         "weekly_summary_trigger": _handle_weekly_summary_trigger,
         "wfo_trigger": _handle_wfo_trigger,
+        "notification_trigger": _handle_notification_trigger,
     }

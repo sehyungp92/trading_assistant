@@ -1,15 +1,18 @@
 # analysis/weekly_prompt_assembler.py
 """Weekly prompt assembler — builds context package for weekly analysis Claude invocation.
 
-Similar to the daily prompt assembler (analysis/prompt_assembler.py) but with
-weekly-specific data: 7 daily reports, weekly summary, week-over-week comparisons,
-strategy refinement report, portfolio risk card series, and corrections.
+Uses ContextBuilder for shared policy/corrections loading. Adds weekly-specific
+data: 7 daily reports, weekly summary, week-over-week comparisons,
+strategy refinement report, portfolio risk card series.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from analysis.context_builder import ContextBuilder
+from schemas.prompt_package import PromptPackage
 
 _WEEKLY_INSTRUCTIONS = """\
 1. Trend analysis: Is performance improving or degrading? By bot? By regime?
@@ -21,7 +24,16 @@ _WEEKLY_INSTRUCTIONS = """\
 7. Week-over-week comparison: This week vs. last 4 weeks
 8. Strategy refinement: Review the refinement report and highlight top suggestions
 9. Actionable items: Max 5 specific, testable suggestions ranked by confidence
-10. Output: weekly_report.md"""
+   QUANTIFICATION REQUIRED: Each suggestion MUST quantify expected Calmar ratio impact.
+   Include: (a) expected return change, (b) expected max drawdown change,
+   (c) evidence base (trade count, time period, statistical confidence).
+10. Output: weekly_report.md
+11. Structural analysis: Based on 30-day root cause patterns, assess whether any bot's signal logic needs structural changes (not just parameter tuning). Specifically evaluate:
+    - Has signal->outcome correlation declined? Does the signal need recalibration or replacement?
+    - Are filters blocking high-quality signals? Should a filter be restructured rather than threshold-adjusted?
+    - Are exits consistently premature? Should the exit strategy change (e.g., trailing stop)?
+12. Parameter space proposals: If evidence suggests a new dimension should be optimized (e.g., adding a time-of-day gate, changing position sizing model), propose it with supporting evidence. These proposals require human approval.
+13. Do NOT re-suggest anything in the rejected_suggestions list unless you present new quantitative evidence."""
 
 
 class WeeklyPromptAssembler:
@@ -42,26 +54,16 @@ class WeeklyPromptAssembler:
         self.curated_dir = curated_dir
         self.memory_dir = memory_dir
         self.runs_dir = runs_dir
+        self._ctx = ContextBuilder(memory_dir)
 
-    def assemble(self) -> dict:
+    def assemble(self) -> PromptPackage:
         """Build the complete weekly prompt package."""
-        return {
-            "system_prompt": self._build_system_prompt(),
-            "task_prompt": self._build_task_prompt(),
-            "data": self._load_data(),
-            "instructions": _WEEKLY_INSTRUCTIONS,
-            "corrections": self._load_corrections(),
-            "context_files": self._list_context_files(),
-        }
-
-    def _build_system_prompt(self) -> str:
-        parts: list[str] = []
-        policy_dir = self.memory_dir / "policies" / "v1"
-        for name in ["agents.md", "trading_rules.md", "soul.md"]:
-            path = policy_dir / name
-            if path.exists():
-                parts.append(f"--- {name} ---\n{path.read_text()}")
-        return "\n\n".join(parts)
+        pkg = self._ctx.base_package()
+        pkg.task_prompt = self._build_task_prompt()
+        pkg.data.update(self._load_data())
+        pkg.instructions = _WEEKLY_INSTRUCTIONS
+        pkg.context_files.extend(self._list_data_files())
+        return pkg
 
     def _build_task_prompt(self) -> str:
         bot_list = ", ".join(self.bots)
@@ -75,28 +77,21 @@ class WeeklyPromptAssembler:
     def _load_data(self) -> dict:
         data: dict = {}
 
-        # Weekly summary
         weekly_dir = self.curated_dir / "weekly" / self.week_start
         summary_path = weekly_dir / "weekly_summary.json"
         if summary_path.exists():
             data["weekly_summary"] = json.loads(summary_path.read_text())
 
-        # Refinement report
         refinement_path = weekly_dir / "refinement_report.json"
         if refinement_path.exists():
             data["refinement_report"] = json.loads(refinement_path.read_text())
 
-        # Week-over-week
         wow_path = weekly_dir / "week_over_week.json"
         if wow_path.exists():
             data["week_over_week"] = json.loads(wow_path.read_text())
 
-        # 7 daily reports
         data["daily_reports"] = self._load_daily_reports()
-
-        # 7 portfolio risk cards
         data["portfolio_risk_cards"] = self._load_risk_cards()
-
         return data
 
     def _load_daily_reports(self) -> list[dict]:
@@ -119,30 +114,13 @@ class WeeklyPromptAssembler:
                 cards.append(json.loads(card_path.read_text()))
         return cards
 
-    def _load_corrections(self) -> list[dict]:
-        corrections_path = self.memory_dir / "findings" / "corrections.jsonl"
-        if not corrections_path.exists():
-            return []
-        corrections: list[dict] = []
-        for line in corrections_path.read_text().strip().splitlines():
-            if line.strip():
-                corrections.append(json.loads(line))
-        return corrections
-
-    def _list_context_files(self) -> list[str]:
+    def _list_data_files(self) -> list[str]:
         files: list[str] = []
         weekly_dir = self.curated_dir / "weekly" / self.week_start
         for name in ["weekly_summary.json", "refinement_report.json", "week_over_week.json"]:
             path = weekly_dir / name
             if path.exists():
                 files.append(str(path))
-
-        policy_dir = self.memory_dir / "policies" / "v1"
-        for name in ["agents.md", "trading_rules.md", "soul.md"]:
-            path = policy_dir / name
-            if path.exists():
-                files.append(str(path))
-
         return files
 
     def _week_dates(self) -> list[str]:

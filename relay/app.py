@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from relay.auth import verify_hmac
 from relay.db.store import RelayStore
+from relay.rate_limiter import SlidingWindowRateLimiter
 
 
 class EventBatch(BaseModel):
@@ -30,6 +31,7 @@ def create_relay_app(db_path: str = "relay.db", shared_secrets: dict[str, str] |
     """Factory function so tests can inject a temp DB path and secrets."""
     secrets = shared_secrets or {}
     store = RelayStore(db_path)
+    rate_limiter = SlidingWindowRateLimiter()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -56,6 +58,9 @@ def create_relay_app(db_path: str = "relay.db", shared_secrets: dict[str, str] |
         canonical = json.dumps(data, sort_keys=True)
         if not verify_hmac(canonical, x_signature, secret):
             raise HTTPException(status_code=401, detail="Invalid signature")
+
+        if not rate_limiter.is_allowed(bot_id):
+            raise HTTPException(status_code=429, detail=f"Rate limit exceeded for bot: {bot_id}")
 
         events = data.get("events", [])
         accepted, duplicates = await store.store_events(events)

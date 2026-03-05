@@ -1,4 +1,4 @@
--- Event queue with idempotent deduplication
+-- Event queue with idempotent deduplication and dead-letter support
 CREATE TABLE IF NOT EXISTS events (
     event_id        TEXT PRIMARY KEY,
     bot_id          TEXT NOT NULL,
@@ -6,9 +6,12 @@ CREATE TABLE IF NOT EXISTS events (
     payload         TEXT NOT NULL,
     exchange_timestamp TEXT NOT NULL,
     received_at     TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | acked | failed
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | processing | acked | failed | dead_letter
     processed_at    TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    max_retries     INTEGER NOT NULL DEFAULT 3,
+    last_error      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);

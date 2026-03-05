@@ -6,11 +6,12 @@ These define the data contracts between VPS bots, the relay, and the orchestrato
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 
 class TradeSide(str, Enum):
@@ -37,6 +38,7 @@ class EventMetadata(BaseModel):
     event_type: str
     payload_key: str
     bar_id: Optional[str] = None
+    trace_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:16])
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -101,6 +103,10 @@ class TradeEvent(BaseModel):
     root_causes: list[str] = []
     evidence_refs: list[str] = []
 
+    signal_factors: list[dict] | None = None
+    post_exit_1h_price: float | None = None
+    post_exit_4h_price: float | None = None
+
 
 class MissedOpportunityEvent(BaseModel):
     event_metadata: Optional[EventMetadata] = None
@@ -118,6 +124,7 @@ class MissedOpportunityEvent(BaseModel):
     would_have_hit_sl: Optional[bool] = None
     confidence: float = 0.0
     assumption_tags: list[str] = []
+    margin_pct: float | None = None  # how close to filter threshold (requires bot B4)
 
 
 class DailySnapshot(BaseModel):
