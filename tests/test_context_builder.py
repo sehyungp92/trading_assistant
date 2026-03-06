@@ -165,3 +165,54 @@ class TestBasePackageWithFailureLog:
         pkg = ctx.base_package()
         assert "rejected_suggestions" in pkg.data
         assert len(pkg.data["rejected_suggestions"]) == 1
+
+
+class TestLoadAllocationHistory:
+    def test_loads_allocation_records(self, tmp_path):
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        (findings / "allocation_history.jsonl").write_text(
+            '{"date":"2026-03-01","bot_id":"bot-a","allocation_pct":25.0}\n'
+            '{"date":"2026-03-02","bot_id":"bot-a","allocation_pct":30.0}\n'
+        )
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        records = ctx.load_allocation_history()
+        assert len(records) == 2
+        # Temporal decay: most recent first
+        assert records[0]["date"] == "2026-03-02"
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        assert ctx.load_allocation_history() == []
+
+    def test_temporal_decay_excludes_old_records(self, tmp_path):
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        (findings / "allocation_history.jsonl").write_text(
+            '{"date":"2020-01-01","bot_id":"bot-a","allocation_pct":10.0}\n'
+            '{"date":"2026-03-01","bot_id":"bot-a","allocation_pct":25.0}\n'
+        )
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        records = ctx.load_allocation_history()
+        assert len(records) == 1
+        assert records[0]["date"] == "2026-03-01"
+
+    def test_base_package_includes_allocation_history(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        (findings / "allocation_history.jsonl").write_text(
+            '{"date":"2026-03-01","bot_id":"bot-a","allocation_pct":25.0}\n'
+        )
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        pkg = ctx.base_package()
+        assert "allocation_history" in pkg.data
+        assert len(pkg.data["allocation_history"]) == 1
+
+    def test_base_package_excludes_empty_allocation_history(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        pkg = ctx.base_package()
+        assert "allocation_history" not in pkg.data

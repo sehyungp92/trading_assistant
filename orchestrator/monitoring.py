@@ -8,14 +8,19 @@ Runs on a cron schedule (e.g., every 10 minutes) and produces alerts when:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
+from typing import Any
 
 from orchestrator.event_stream import EventStream
 from orchestrator.orchestrator_brain import OrchestratorBrain
 from orchestrator.task_registry import TaskRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class AlertSeverity(str, Enum):
@@ -46,6 +51,13 @@ class MonitoringCheck:
         dead_letter_critical_threshold: int = 5,
         brain: OrchestratorBrain | None = None,
         heartbeat_md_path: str = "",
+        relay_url: str = "",
+        relay_timeout: float = 10.0,
+        relay_disk_threshold_bytes: int = 500_000_000,
+        bot_silence_threshold_seconds: int = 21600,
+        latency_p95_threshold_seconds: float = 1800.0,
+        latency_tracker=None,
+        _relay_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._registry = registry
         self._task_timeout = task_timeout_seconds
@@ -55,6 +67,13 @@ class MonitoringCheck:
         self._dead_letter_critical = dead_letter_critical_threshold
         self._brain = brain
         self._heartbeat_md_path = heartbeat_md_path
+        self._relay_url = relay_url
+        self._relay_timeout = relay_timeout
+        self._relay_disk_threshold = relay_disk_threshold_bytes
+        self._bot_silence_threshold = bot_silence_threshold_seconds
+        self._latency_p95_threshold = latency_p95_threshold_seconds
+        self._latency_tracker = latency_tracker
+        self._relay_client_factory = _relay_client_factory
 
     async def check_stale_tasks(self) -> list[Alert]:
         """Find tasks stuck in RUNNING state beyond timeout."""
@@ -165,6 +184,20 @@ class MonitoringCheck:
         lines.append(f"- Dead letters: {dead_count}")
 
         lines.append("")
+        lines.append("## Relay")
+        if self._relay_url:
+            lines.append(f"- URL: {self._relay_url}")
+        else:
+            lines.append("- Not configured")
+
+        if self._latency_tracker:
+            agg = self._latency_tracker.get_aggregate_stats()
+            if agg.sample_count > 0:
+                lines.append(f"- Delivery latency p50: {agg.p50:.1f}s, p95: {agg.p95:.1f}s ({agg.sample_count} samples)")
+            else:
+                lines.append("- No latency data")
+
+        lines.append("")
         lines.append("## Last Analyses")
 
         if self._brain:
@@ -198,6 +231,83 @@ class MonitoringCheck:
         )]
 
 
+    async def check_relay_health(self) -> list[Alert]:
+        """Check relay health via its enriched /health endpoint.
+
+        Produces alerts for:
+        - Unreachable relay → CRITICAL
+        - Disk threshold exceeded → HIGH
+        - Per-bot silence > threshold → HIGH
+        - Latency p95 > threshold → HIGH
+        """
+        if not self._relay_url:
+            return []
+
+        import httpx
+        from schemas.relay_health import RelayHealthResponse
+
+        alerts: list[Alert] = []
+        now = datetime.now(timezone.utc)
+
+        try:
+            if self._relay_client_factory:
+                client = self._relay_client_factory()
+            else:
+                client = httpx.AsyncClient(
+                    base_url=self._relay_url, timeout=self._relay_timeout,
+                )
+
+            async with client:
+                resp = await client.get("/health")
+                resp.raise_for_status()
+                health = RelayHealthResponse(**resp.json())
+        except Exception as exc:
+            logger.warning("Relay health check failed: %s", exc)
+            return [Alert(
+                severity=AlertSeverity.CRITICAL,
+                source="relay_health",
+                message=f"Relay unreachable: {exc}",
+            )]
+
+        # Disk threshold
+        if health.db_size_bytes > self._relay_disk_threshold:
+            mb = health.db_size_bytes / (1024 * 1024)
+            alerts.append(Alert(
+                severity=AlertSeverity.HIGH,
+                source="relay_health",
+                message=f"Relay DB size {mb:.0f} MB exceeds threshold",
+            ))
+
+        # Per-bot silence
+        for bot_id, last_ts in health.last_event_per_bot.items():
+            try:
+                last_dt = datetime.fromisoformat(last_ts)
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age = (now - last_dt).total_seconds()
+                if age > self._bot_silence_threshold:
+                    alerts.append(Alert(
+                        severity=AlertSeverity.HIGH,
+                        source="relay_health",
+                        message=f"Bot '{bot_id}' last event was {age / 3600:.1f}h ago on relay",
+                    ))
+            except (ValueError, TypeError):
+                pass
+
+        # Latency p95 per bot
+        if self._latency_tracker:
+            all_stats = self._latency_tracker.get_all_stats()
+            for bot_id, stats in all_stats.items():
+                if stats.p95 > self._latency_p95_threshold:
+                    alerts.append(Alert(
+                        severity=AlertSeverity.HIGH,
+                        source="relay_health",
+                        message=f"Bot '{bot_id}' delivery latency p95 is {stats.p95:.0f}s",
+                    ))
+
+        return alerts
+
+
 class MonitoringLoop:
     """Orchestrates all monitoring checks and collects alerts."""
 
@@ -216,6 +326,7 @@ class MonitoringLoop:
             all_alerts.extend(await check.check_stale_tasks())
             all_alerts.extend(check.check_heartbeats())
             all_alerts.extend(await check.check_dead_letters())
+            all_alerts.extend(await check.check_relay_health())
             await check.update_heartbeat_md()
         sorted_alerts = sorted(all_alerts, key=lambda a: list(AlertSeverity).index(a.severity))
 

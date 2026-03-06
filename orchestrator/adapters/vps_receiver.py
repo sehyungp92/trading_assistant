@@ -30,6 +30,7 @@ class VPSReceiver:
         min_poll_seconds: int = 10,
         max_poll_seconds: int = 300,
         *,
+        latency_tracker=None,
         _client_factory: Callable[[], Any] | None = None,
     ) -> None:
         self._relay_url = relay_url
@@ -37,6 +38,7 @@ class VPSReceiver:
         self._watermark_key = watermark_key
         self._timeout = timeout
         self._client_factory = _client_factory
+        self._latency_tracker = latency_tracker
         self._consecutive_failures: int = 0
         self._min_poll = min_poll_seconds
         self._max_poll = max_poll_seconds
@@ -75,6 +77,14 @@ class VPSReceiver:
             now = datetime.now(timezone.utc).isoformat()
             for event in events:
                 event.setdefault("received_at", now)
+                # Record latency if tracker available
+                if self._latency_tracker:
+                    ex_ts = event.get("exchange_timestamp", "")
+                    rx_ts = event.get("received_at", "")
+                    if ex_ts and rx_ts:
+                        self._latency_tracker.record(
+                            event.get("bot_id", "unknown"), ex_ts, rx_ts,
+                        )
 
             result = await self._queue.enqueue_batch(events)
             logger.info(

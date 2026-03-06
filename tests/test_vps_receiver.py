@@ -217,6 +217,30 @@ class TestPollRetry:
         assert receiver._consecutive_failures == 0
 
 
+class TestLatencyRecording:
+    async def test_pull_records_latency_when_tracker_provided(
+        self, fake_relay, relay_app, local_queue,
+    ):
+        """VPSReceiver records latency for each event when tracker is present."""
+        from orchestrator.latency_tracker import LatencyTracker
+
+        fake_relay.seed(count=2)
+        tracker = LatencyTracker()
+
+        transport = ASGITransport(app=relay_app)
+        receiver = VPSReceiver(
+            relay_url="http://relay",
+            local_queue=local_queue,
+            latency_tracker=tracker,
+            _client_factory=lambda: AsyncClient(transport=transport, base_url="http://relay"),
+        )
+        pulled = await receiver.pull_and_store()
+        assert pulled == 2
+
+        stats = tracker.get_stats("bot1")
+        assert stats.sample_count == 2
+
+
 class TestDrain:
     async def test_drain_pulls_multiple_batches(self, fake_relay, relay_app, local_queue):
         """Seeds 5 events, drains with batch_size=2 — should pull all in 3 batches."""

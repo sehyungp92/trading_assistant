@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from comms.dispatcher import NotificationDispatcher
 from orchestrator.adapters.vps_receiver import VPSReceiver
 from orchestrator.agent_runner import AgentRunner
+from orchestrator.latency_tracker import LatencyTracker
 from orchestrator.config import AppConfig
 from orchestrator.conversation_tracker import ConversationTracker
 from orchestrator.db.queue import EventQueue
@@ -119,6 +120,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     session_store = SessionStore(base_dir=str(db_path / ".assistant" / "sessions"))
     subagent_mgr = SubagentManager()
 
+    # Latency tracker — shared across VPSReceiver, monitoring, and /metrics
+    latency_tracker = LatencyTracker()
+
     # Integration layer components
     dispatcher = NotificationDispatcher()
     skills_registry = SkillsRegistry()
@@ -134,6 +138,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             queue=queue,
             brain=brain,
             heartbeat_md_path=str(db_path / "memory" / "heartbeat.md"),
+            relay_url=config.relay_url,
+            latency_tracker=latency_tracker,
         )],
         event_stream=event_stream,
     )
@@ -178,7 +184,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Relay polling — only active when RELAY_URL is configured
     vps_receiver: VPSReceiver | None = None
     if config.relay_url:
-        vps_receiver = VPSReceiver(relay_url=config.relay_url, local_queue=queue)
+        vps_receiver = VPSReceiver(
+            relay_url=config.relay_url,
+            local_queue=queue,
+            latency_tracker=latency_tracker,
+        )
 
     # ProactiveScanner for morning/evening notifications
     from skills.proactive_scanner import ProactiveScanner
@@ -400,6 +410,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     app.state.monitoring_loop = monitoring_loop
     app.state.notification_preferences = notification_prefs
     app.state.vps_receiver = vps_receiver
+    app.state.latency_tracker = latency_tracker
     app.state.config = config
     app.state.consolidator = consolidator
     app.state.audit_consumer = audit_consumer
@@ -413,13 +424,19 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     @app.get("/metrics")
     async def metrics():
         """Operational metrics for monitoring the orchestrator itself."""
-        from schemas.orchestrator_metrics import OrchestratorMetrics
+        from schemas.orchestrator_metrics import BotLatencyStats, OrchestratorMetrics
 
         pending = await queue.count_pending()
         dead_count = await queue.count_dead_letters()
         running = subagent_mgr.get_running()
         uptime = (datetime.now(timezone.utc) - app.state.start_time).total_seconds()
         error_rate = brain.get_error_rate_1h()
+
+        agg = latency_tracker.get_aggregate_stats()
+        per_bot = [
+            BotLatencyStats(bot_id=bid, p50=s.p50, p95=s.p95, max=s.max, sample_count=s.sample_count)
+            for bid, s in latency_tracker.get_all_stats().items()
+        ]
 
         return OrchestratorMetrics(
             queue_depth=pending,
@@ -429,12 +446,21 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             uptime_seconds=uptime,
             last_daily_analysis=brain.last_daily_analysis,
             last_weekly_analysis=brain.last_weekly_analysis,
+            delivery_latency_p50=agg.p50,
+            delivery_latency_p95=agg.p95,
+            delivery_latency_max=agg.max,
+            per_bot_latency=per_bot,
         ).model_dump(mode="json")
 
     @app.post("/ingest")
     async def ingest_event(event: dict):
         """Direct event ingest — bypasses relay, useful for testing."""
         event.setdefault("received_at", datetime.now(timezone.utc).isoformat())
+        # Record latency for directly ingested events too
+        ex_ts = event.get("exchange_timestamp", "")
+        rx_ts = event.get("received_at", "")
+        if ex_ts and rx_ts:
+            latency_tracker.record(event.get("bot_id", "unknown"), ex_ts, rx_ts)
         inserted = await queue.enqueue(event)
         return {"inserted": inserted, "event_id": event.get("event_id")}
 

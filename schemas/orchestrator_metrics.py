@@ -4,6 +4,15 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
+class BotLatencyStats(BaseModel):
+    """Per-bot delivery latency percentiles."""
+    bot_id: str
+    p50: float = 0.0
+    p95: float = 0.0
+    max: float = 0.0
+    sample_count: int = 0
+
+
 class OrchestratorMetrics(BaseModel):
     """Point-in-time snapshot of orchestrator operational state."""
     queue_depth: int = 0
@@ -13,3 +22,7 @@ class OrchestratorMetrics(BaseModel):
     uptime_seconds: float = 0.0
     last_daily_analysis: str | None = None
     last_weekly_analysis: str | None = None
+    delivery_latency_p50: float = 0.0
+    delivery_latency_p95: float = 0.0
+    delivery_latency_max: float = 0.0
+    per_bot_latency: list[BotLatencyStats] = []

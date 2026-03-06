@@ -128,6 +128,20 @@ class ContextBuilder:
                 outcomes.append(json.loads(line))
         return outcomes
 
+    def load_allocation_history(self) -> list[dict]:
+        """Load allocation history from findings/allocation_history.jsonl.
+
+        Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
+        """
+        path = self._memory_dir / "findings" / "allocation_history.jsonl"
+        if not path.exists():
+            return []
+        entries: list[dict] = []
+        for line in path.read_text().strip().split("\n"):
+            if line.strip():
+                entries.append(json.loads(line))
+        return _apply_temporal_window(entries)
+
     def list_policy_files(self) -> list[str]:
         """List paths to included policy files (for context_files tracking)."""
         files: list[str] = []
@@ -209,6 +223,7 @@ class ContextBuilder:
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
         outcome_measurements = self.load_outcome_measurements()
+        allocation_history = self.load_allocation_history()
         consolidated_patterns = self.load_consolidated_patterns()
         data: dict = {}
         if failure_log:
@@ -217,6 +232,8 @@ class ContextBuilder:
             data["rejected_suggestions"] = rejected_suggestions
         if outcome_measurements:
             data["outcome_measurements"] = outcome_measurements
+        if allocation_history:
+            data["allocation_history"] = allocation_history
         if consolidated_patterns:
             data["consolidated_patterns"] = consolidated_patterns
         if session_store and agent_type:
