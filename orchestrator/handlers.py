@@ -263,6 +263,11 @@ class Handlers:
                 refinement_report, week_start, week_end,
             )
 
+            # Run allocation analyses
+            allocation_results = self._run_allocation_analyses(
+                portfolio_summary, week_start, week_end,
+            )
+
             # Write refinement report
             weekly_dir = self._curated_dir / "weekly" / week_start
             weekly_dir.mkdir(parents=True, exist_ok=True)
@@ -292,6 +297,10 @@ class Handlers:
             # Inject simulation results into prompt data
             if simulation_results:
                 package.data.update({"simulation_results": simulation_results})
+
+            # Inject allocation analysis results
+            if allocation_results:
+                package.data.update({"allocation_analysis": allocation_results})
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "weekly_analysis",
@@ -740,6 +749,51 @@ class Handlers:
 
         except Exception:
             logger.warning("Simulation skills import failed — skipping simulations")
+
+        return results
+
+    def _run_allocation_analyses(
+        self,
+        portfolio_summary: object,
+        week_start: str,
+        week_end: str,
+    ) -> dict:
+        """Run portfolio allocation, synergy, and proportion optimization analyses."""
+        results: dict = {}
+
+        try:
+            from schemas.weekly_metrics import WeeklySummary
+            from skills.portfolio_allocator import PortfolioAllocator
+            from skills.synergy_analyzer import SynergyAnalyzer
+            from skills.strategy_proportion_optimizer import StrategyProportionOptimizer
+
+            bot_summaries = getattr(portfolio_summary, "bot_summaries", {})
+            if not bot_summaries:
+                return results
+
+            # 1. Portfolio allocation (cross-bot)
+            allocator = PortfolioAllocator(week_start, week_end)
+            n_bots = len(bot_summaries)
+            current = {bid: 100.0 / n_bots for bid in bot_summaries} if n_bots > 0 else {}
+            alloc_report = allocator.compute(bot_summaries, current)
+            results["portfolio_allocation"] = alloc_report.model_dump(mode="json")
+
+            # 2. Synergy analysis (cross-strategy)
+            per_strat = {
+                bid: s.per_strategy_summary
+                for bid, s in bot_summaries.items()
+            }
+            synergy = SynergyAnalyzer(week_start, week_end)
+            synergy_report = synergy.compute(per_strat)
+            results["synergy_analysis"] = synergy_report.model_dump(mode="json")
+
+            # 3. Proportion optimization (intra-bot)
+            optimizer = StrategyProportionOptimizer(week_start, week_end)
+            proportion_report = optimizer.compute(per_strat)
+            results["proportion_optimization"] = proportion_report.model_dump(mode="json")
+
+        except Exception:
+            logger.warning("Allocation analyses failed — skipping")
 
         return results
 

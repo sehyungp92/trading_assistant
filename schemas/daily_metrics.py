@@ -8,6 +8,27 @@ from __future__ import annotations
 from pydantic import BaseModel, computed_field
 
 
+class PerStrategySummary(BaseModel):
+    """Per-strategy daily performance breakdown."""
+
+    strategy_id: str
+    trades: int = 0
+    win_count: int = 0
+    loss_count: int = 0
+    gross_pnl: float = 0.0
+    net_pnl: float = 0.0
+    win_rate: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    best_trade_pnl: float = 0.0
+    worst_trade_pnl: float = 0.0
+    avg_entry_slippage_bps: float | None = None
+    avg_mfe_pct: float | None = None
+    avg_mae_pct: float | None = None
+    avg_exit_efficiency: float | None = None
+    symbols_traded: list[str] = []
+
+
 class BotDailySummary(BaseModel):
     """Aggregated daily stats for a single bot."""
 
@@ -29,6 +50,7 @@ class BotDailySummary(BaseModel):
     error_count: int = 0
     uptime_pct: float = 100.0
     avg_process_quality: float = 100.0
+    per_strategy_summary: dict[str, PerStrategySummary] = {}
 
     @computed_field  # type: ignore[prop-decorator]
     @property

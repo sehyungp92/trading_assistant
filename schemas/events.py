@@ -150,3 +150,5 @@ class DailySnapshot(BaseModel):
     uptime_pct: float = 100.0
     avg_process_quality: float = 100.0
     root_cause_distribution: dict = {}
+    per_strategy_summary: dict = {}
+    overlay_state_summary: dict | None = None

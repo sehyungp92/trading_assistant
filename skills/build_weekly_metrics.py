@@ -14,6 +14,7 @@ from pathlib import Path
 from schemas.daily_metrics import BotDailySummary, FilterAnalysis
 from schemas.weekly_metrics import (
     BotWeeklySummary,
+    StrategyWeeklySummary,
     WeeklySummary,
     WeekOverWeekComparison,
     ProcessQualityTrend,
@@ -68,6 +69,8 @@ class WeeklyMetricsBuilder:
         error_count = sum(d.error_count for d in dailies)
         avg_uptime = sum(d.uptime_pct for d in dailies) / len(dailies)
 
+        per_strategy = self.build_strategy_summaries(bot_id, dailies)
+
         return BotWeeklySummary(
             week_start=self.week_start,
             week_end=self.week_end,
@@ -86,7 +89,72 @@ class WeeklyMetricsBuilder:
             error_count=error_count,
             avg_uptime_pct=avg_uptime,
             daily_pnl=daily_pnl,
+            per_strategy_summary=per_strategy,
         )
+
+    def build_strategy_summaries(
+        self, bot_id: str, dailies: list[BotDailySummary]
+    ) -> dict[str, StrategyWeeklySummary]:
+        """Aggregate per-strategy daily data into weekly per-strategy summaries."""
+        accum: dict[str, dict] = {}
+
+        for day in dailies:
+            for strat_id, strat in day.per_strategy_summary.items():
+                if strat_id not in accum:
+                    accum[strat_id] = {
+                        "trades": 0,
+                        "win_count": 0,
+                        "loss_count": 0,
+                        "gross_pnl": 0.0,
+                        "net_pnl": 0.0,
+                        "win_amounts": [],
+                        "loss_amounts": [],
+                        "daily_pnl": {},
+                    }
+                a = accum[strat_id]
+                a["trades"] += strat.trades
+                a["win_count"] += strat.win_count
+                a["loss_count"] += strat.loss_count
+                a["gross_pnl"] += strat.gross_pnl
+                a["net_pnl"] += strat.net_pnl
+                a["daily_pnl"][day.date] = strat.net_pnl
+                if strat.win_count > 0:
+                    a["win_amounts"].append((strat.avg_win, strat.win_count))
+                if strat.loss_count > 0:
+                    a["loss_amounts"].append((strat.avg_loss, strat.loss_count))
+
+        result: dict[str, StrategyWeeklySummary] = {}
+        for strat_id, a in accum.items():
+            total_win_w = sum(w for _, w in a["win_amounts"])
+            total_loss_w = sum(w for _, w in a["loss_amounts"])
+            avg_win = (
+                sum(v * w for v, w in a["win_amounts"]) / total_win_w
+                if total_win_w > 0
+                else 0.0
+            )
+            avg_loss = (
+                sum(v * w for v, w in a["loss_amounts"]) / total_loss_w
+                if total_loss_w > 0
+                else 0.0
+            )
+            total = a["trades"]
+            win_rate = a["win_count"] / total if total > 0 else 0.0
+
+            result[strat_id] = StrategyWeeklySummary(
+                strategy_id=strat_id,
+                bot_id=bot_id,
+                total_trades=total,
+                win_count=a["win_count"],
+                loss_count=a["loss_count"],
+                gross_pnl=a["gross_pnl"],
+                net_pnl=a["net_pnl"],
+                win_rate=win_rate,
+                avg_win=avg_win,
+                avg_loss=avg_loss,
+                daily_pnl=a["daily_pnl"],
+            )
+
+        return result
 
     def build_portfolio_summary(
         self, dailies_by_bot: dict[str, list[BotDailySummary]]

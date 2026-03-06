@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from schemas.daily_metrics import BotDailySummary, RegimeAnalysis, FilterAnalysis, RootCauseSummary
+from schemas.daily_metrics import BotDailySummary, PerStrategySummary, RegimeAnalysis, FilterAnalysis, RootCauseSummary
 from schemas.weekly_metrics import (
     BotWeeklySummary,
     WeeklySummary,
@@ -190,3 +190,93 @@ class TestWeeklyMetricsBuilder:
         assert (output_dir / "weekly_summary.json").exists()
         data = json.loads((output_dir / "weekly_summary.json").read_text())
         assert data["total_net_pnl"] == 350.0
+
+
+class TestPerStrategyAggregation:
+    """Tests for build_strategy_summaries() method."""
+
+    def _make_daily_with_strategies(
+        self, date: str, bot_id: str, strategies: dict[str, dict],
+    ) -> BotDailySummary:
+        per_strat = {}
+        for sid, vals in strategies.items():
+            per_strat[sid] = PerStrategySummary(strategy_id=sid, **vals)
+        return BotDailySummary(
+            date=date, bot_id=bot_id, per_strategy_summary=per_strat,
+        )
+
+    def test_aggregates_single_strategy(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        dailies = [
+            self._make_daily_with_strategies("2026-02-24", "bot1", {
+                "strat_a": {"trades": 3, "win_count": 2, "loss_count": 1, "net_pnl": 100.0, "avg_win": 80.0, "avg_loss": -60.0},
+            }),
+            self._make_daily_with_strategies("2026-02-25", "bot1", {
+                "strat_a": {"trades": 4, "win_count": 3, "loss_count": 1, "net_pnl": 150.0, "avg_win": 70.0, "avg_loss": -40.0},
+            }),
+        ]
+        result = builder.build_strategy_summaries("bot1", dailies)
+        assert "strat_a" in result
+        s = result["strat_a"]
+        assert s.total_trades == 7
+        assert s.win_count == 5
+        assert s.loss_count == 2
+        assert s.net_pnl == 250.0
+        assert len(s.daily_pnl) == 2
+        assert s.daily_pnl["2026-02-24"] == 100.0
+
+    def test_aggregates_multiple_strategies(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        dailies = [
+            self._make_daily_with_strategies("2026-02-24", "bot1", {
+                "strat_a": {"trades": 2, "net_pnl": 50.0},
+                "strat_b": {"trades": 3, "net_pnl": -20.0},
+            }),
+            self._make_daily_with_strategies("2026-02-25", "bot1", {
+                "strat_a": {"trades": 1, "net_pnl": 30.0},
+                "strat_b": {"trades": 2, "net_pnl": 40.0},
+            }),
+        ]
+        result = builder.build_strategy_summaries("bot1", dailies)
+        assert len(result) == 2
+        assert result["strat_a"].net_pnl == 80.0
+        assert result["strat_b"].net_pnl == 20.0
+
+    def test_empty_dailies(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        result = builder.build_strategy_summaries("bot1", [])
+        assert result == {}
+
+    def test_no_per_strategy_data(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        dailies = [BotDailySummary(date="2026-02-24", bot_id="bot1")]
+        result = builder.build_strategy_summaries("bot1", dailies)
+        assert result == {}
+
+    def test_weighted_average_win_loss(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        dailies = [
+            self._make_daily_with_strategies("2026-02-24", "bot1", {
+                "s": {"trades": 4, "win_count": 3, "loss_count": 1, "avg_win": 100.0, "avg_loss": -50.0},
+            }),
+            self._make_daily_with_strategies("2026-02-25", "bot1", {
+                "s": {"trades": 2, "win_count": 1, "loss_count": 1, "avg_win": 200.0, "avg_loss": -80.0},
+            }),
+        ]
+        result = builder.build_strategy_summaries("bot1", dailies)
+        s = result["s"]
+        # weighted avg_win: (100*3 + 200*1) / 4 = 125
+        assert abs(s.avg_win - 125.0) < 0.01
+        # weighted avg_loss: (-50*1 + -80*1) / 2 = -65
+        assert abs(s.avg_loss - (-65.0)) < 0.01
+
+    def test_wired_into_build_bot_summary(self):
+        builder = WeeklyMetricsBuilder("2026-02-24", "2026-03-02", ["bot1"])
+        dailies = [
+            self._make_daily_with_strategies("2026-02-24", "bot1", {
+                "strat_a": {"trades": 5, "net_pnl": 200.0},
+            }),
+        ]
+        result = builder.build_bot_summary("bot1", dailies)
+        assert "strat_a" in result.per_strategy_summary
+        assert result.per_strategy_summary["strat_a"].net_pnl == 200.0

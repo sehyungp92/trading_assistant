@@ -33,7 +33,15 @@ _WEEKLY_INSTRUCTIONS = """\
     - Are filters blocking high-quality signals? Should a filter be restructured rather than threshold-adjusted?
     - Are exits consistently premature? Should the exit strategy change (e.g., trailing stop)?
 12. Parameter space proposals: If evidence suggests a new dimension should be optimized (e.g., adding a time-of-day gate, changing position sizing model), propose it with supporting evidence. These proposals require human approval.
-13. Do NOT re-suggest anything in the rejected_suggestions list unless you present new quantitative evidence."""
+13. Do NOT re-suggest anything in the rejected_suggestions list unless you present new quantitative evidence.
+14. PORTFOLIO & STRATEGY ALLOCATION ASSESSMENT
+    Review the allocation_analysis data and for each recommendation:
+    a. Validate the quantitative rationale against your qualitative analysis
+    b. Flag any recommendations you disagree with, explaining why
+    c. For cross-bot allocation: assess whether rebalancing is warranted given market conditions
+    d. For intra-bot proportions: consider strategy interactions not captured by correlation alone
+    e. For same-instrument strategies (e.g., all NQ in momentum_trader): assess signal independence
+    f. Highlight the top 3 allocation changes by expected impact"""
 
 
 class WeeklyPromptAssembler:
@@ -92,6 +100,12 @@ class WeeklyPromptAssembler:
 
         data["daily_reports"] = self._load_daily_reports()
         data["portfolio_risk_cards"] = self._load_risk_cards()
+
+        # Load allocation analysis if present
+        alloc_path = weekly_dir / "allocation_analysis.json"
+        if alloc_path.exists():
+            data["allocation_analysis"] = json.loads(alloc_path.read_text())
+
         return data
 
     def _load_daily_reports(self) -> list[dict]:
@@ -117,7 +131,7 @@ class WeeklyPromptAssembler:
     def _list_data_files(self) -> list[str]:
         files: list[str] = []
         weekly_dir = self.curated_dir / "weekly" / self.week_start
-        for name in ["weekly_summary.json", "refinement_report.json", "week_over_week.json"]:
+        for name in ["weekly_summary.json", "refinement_report.json", "week_over_week.json", "allocation_analysis.json"]:
             path = weekly_dir / name
             if path.exists():
                 files.append(str(path))

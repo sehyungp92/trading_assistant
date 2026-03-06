@@ -9,6 +9,22 @@ from __future__ import annotations
 from pydantic import BaseModel, computed_field
 
 
+class StrategyWeeklySummary(BaseModel):
+    """Per-strategy weekly aggregation across daily breakdowns."""
+
+    strategy_id: str
+    bot_id: str
+    total_trades: int = 0
+    win_count: int = 0
+    loss_count: int = 0
+    gross_pnl: float = 0.0
+    net_pnl: float = 0.0
+    win_rate: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    daily_pnl: dict[str, float] = {}  # date → net_pnl for time series
+
+
 class BotWeeklySummary(BaseModel):
     """Aggregated weekly stats for a single bot."""
 
@@ -29,6 +45,7 @@ class BotWeeklySummary(BaseModel):
     error_count: int = 0
     avg_uptime_pct: float = 100.0
     daily_pnl: dict[str, float] = {}  # date → PnL for sparkline
+    per_strategy_summary: dict[str, StrategyWeeklySummary] = {}
 
     @computed_field  # type: ignore[prop-decorator]
     @property
