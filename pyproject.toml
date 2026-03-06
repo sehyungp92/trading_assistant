@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["orchestrator*", "relay*", "schemas*", "skills*", "analysis*", "comms*"]
+include = ["orchestrator*", "schemas*", "skills*", "analysis*", "comms*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

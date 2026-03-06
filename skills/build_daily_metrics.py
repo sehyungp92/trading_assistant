@@ -307,11 +307,54 @@ class DailyMetricsBuilder:
             total_trades_with_data=total_with_data,
         )
 
+    def coordinator_impact(self, coordination_events: list[dict]) -> dict:
+        """Aggregate coordinator events into a daily summary.
+
+        Args:
+            coordination_events: list of raw coordinator event dicts
+                (parsed from coordination_YYYY-MM-DD.jsonl)
+
+        Returns:
+            dict with event counts, action breakdown, and rule summary.
+        """
+        if not coordination_events:
+            return {
+                "bot_id": self.bot_id,
+                "date": self.date,
+                "total_events": 0,
+                "by_action": {},
+                "by_rule": {},
+                "symbols_affected": [],
+            }
+
+        by_action: dict[str, int] = defaultdict(int)
+        by_rule: dict[str, int] = defaultdict(int)
+        symbols: set[str] = set()
+
+        for evt in coordination_events:
+            action = evt.get("action", "unknown")
+            rule = evt.get("rule", "unknown")
+            symbol = evt.get("symbol", "")
+            by_action[action] += 1
+            by_rule[rule] += 1
+            if symbol:
+                symbols.add(symbol)
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "total_events": len(coordination_events),
+            "by_action": dict(by_action),
+            "by_rule": dict(by_rule),
+            "symbols_affected": sorted(symbols),
+        }
+
     def write_curated(
         self,
         trades: list[TradeEvent],
         missed: list[MissedOpportunityEvent],
         base_dir: Path,
+        coordination_events: list[dict] | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
@@ -343,6 +386,13 @@ class DailyMetricsBuilder:
         from skills.slippage_analyzer import SlippageAnalyzer as _SlipAnalyzer
         _sa = _SlipAnalyzer(bot_id=self.bot_id, date=self.date)
         self._write_json(output_dir / "regime_bps.json", _sa.export_regime_bps(trades))
+
+        # Write coordinator impact if events provided
+        if coordination_events:
+            self._write_json(
+                output_dir / "coordinator_impact.json",
+                self.coordinator_impact(coordination_events),
+            )
 
         return output_dir
 

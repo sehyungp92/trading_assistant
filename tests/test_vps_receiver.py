@@ -1,27 +1,85 @@
+"""Tests for VPSReceiver — uses a fake in-memory relay (no relay/ import)."""
+
 import json
 
-import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
 
 from orchestrator.adapters.vps_receiver import VPSReceiver
 from orchestrator.db.queue import EventQueue
-from relay.app import create_relay_app
-from relay.auth import compute_hmac
 
 
-SHARED_SECRET = "test-secret"
+# ---------------------------------------------------------------------------
+# Fake relay — implements the HTTP contract without importing relay/
+# ---------------------------------------------------------------------------
+
+class FakeRelay:
+    """Minimal in-memory relay implementing GET /events + POST /ack."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+        self._acked_through: int = -1  # index into self.events
+
+    def seed(self, count: int = 3, prefix: str = "pull"):
+        for i in range(count):
+            self.events.append({
+                "event_id": f"{prefix}{i}",
+                "bot_id": "bot1",
+                "event_type": "trade",
+                "payload": json.dumps({"trade_id": f"t{i}"}),
+                "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+            })
+
+    async def handle_get_events(self, request: Request) -> JSONResponse:
+        since = request.query_params.get("since")
+        limit = int(request.query_params.get("limit", "100"))
+
+        start = 0
+        if since:
+            for idx, e in enumerate(self.events):
+                if e["event_id"] == since:
+                    start = idx + 1
+                    break
+
+        results = []
+        for e in self.events[start:]:
+            if results and len(results) >= limit:
+                break
+            results.append(e)
+        return JSONResponse({"events": results})
+
+    async def handle_ack(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        watermark = body["watermark"]
+        for idx, e in enumerate(self.events):
+            if e["event_id"] == watermark:
+                self._acked_through = idx
+                break
+        return JSONResponse({"status": "ok"})
+
+    def as_app(self) -> Starlette:
+        return Starlette(routes=[
+            Route("/events", self.handle_get_events),
+            Route("/ack", self.handle_ack, methods=["POST"]),
+        ])
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fake_relay():
+    return FakeRelay()
 
 
 @pytest.fixture
-async def relay_app(tmp_path):
-    app = create_relay_app(
-        db_path=str(tmp_path / "relay.db"),
-        shared_secrets={"bot1": SHARED_SECRET},
-    )
-    await app.state.store.initialize()
-    yield app
-    await app.state.store.close()
+def relay_app(fake_relay):
+    return fake_relay.as_app()
 
 
 @pytest.fixture
@@ -32,7 +90,6 @@ async def local_queue(tmp_path) -> EventQueue:
 
 
 def _make_receiver(relay_app, local_queue: EventQueue, **kwargs) -> VPSReceiver:
-    """Create a VPSReceiver that routes HTTP through the in-process relay app."""
     transport = ASGITransport(app=relay_app)
 
     def client_factory():
@@ -46,30 +103,13 @@ def _make_receiver(relay_app, local_queue: EventQueue, **kwargs) -> VPSReceiver:
     )
 
 
-async def _seed_relay(relay_app, count: int = 3):
-    """Push events to the relay for the receiver to pull."""
-    transport = ASGITransport(app=relay_app)
-    async with AsyncClient(transport=transport, base_url="http://relay") as client:
-        for i in range(count):
-            payload = {
-                "bot_id": "bot1",
-                "events": [
-                    {
-                        "event_id": f"pull{i}",
-                        "bot_id": "bot1",
-                        "event_type": "trade",
-                        "payload": json.dumps({"trade_id": f"t{i}"}),
-                        "exchange_timestamp": "2026-03-01T14:00:00+00:00",
-                    },
-                ],
-            }
-            sig = compute_hmac(json.dumps(payload, sort_keys=True), SHARED_SECRET)
-            await client.post("/events", json=payload, headers={"X-Signature": sig})
-
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 class TestVPSReceiver:
-    async def test_pull_events_into_local_queue(self, relay_app, local_queue):
-        await _seed_relay(relay_app, count=3)
+    async def test_pull_events_into_local_queue(self, fake_relay, relay_app, local_queue):
+        fake_relay.seed(count=3)
 
         receiver = _make_receiver(relay_app, local_queue)
         pulled = await receiver.pull_and_store()
@@ -83,8 +123,8 @@ class TestVPSReceiver:
         pulled = await receiver.pull_and_store()
         assert pulled == 0
 
-    async def test_ack_after_pull(self, relay_app, local_queue):
-        await _seed_relay(relay_app, count=2)
+    async def test_ack_after_pull(self, fake_relay, relay_app, local_queue):
+        fake_relay.seed(count=2)
 
         receiver = _make_receiver(relay_app, local_queue)
         await receiver.pull_and_store()
@@ -95,8 +135,8 @@ class TestVPSReceiver:
 
 
 class TestWatermarkPersistence:
-    async def test_watermark_persisted_to_db(self, relay_app, local_queue):
-        await _seed_relay(relay_app, count=3)
+    async def test_watermark_persisted_to_db(self, fake_relay, relay_app, local_queue):
+        fake_relay.seed(count=3)
 
         receiver = _make_receiver(relay_app, local_queue)
         await receiver.pull_and_store()
@@ -104,30 +144,21 @@ class TestWatermarkPersistence:
         watermark = await local_queue.get_watermark("relay")
         assert watermark == "pull2"
 
-    async def test_watermark_loaded_on_next_pull(self, relay_app, local_queue):
+    async def test_watermark_loaded_on_next_pull(self, fake_relay, relay_app, local_queue):
         """A second VPSReceiver instance resumes from persisted watermark."""
-        await _seed_relay(relay_app, count=2)
+        fake_relay.seed(count=2)
 
         receiver1 = _make_receiver(relay_app, local_queue)
         await receiver1.pull_and_store()
 
         # Seed more events after the first batch
-        transport = ASGITransport(app=relay_app)
-        async with AsyncClient(transport=transport, base_url="http://relay") as client:
-            payload = {
-                "bot_id": "bot1",
-                "events": [
-                    {
-                        "event_id": "pull_new",
-                        "bot_id": "bot1",
-                        "event_type": "trade",
-                        "payload": json.dumps({"trade_id": "new"}),
-                        "exchange_timestamp": "2026-03-01T15:00:00+00:00",
-                    },
-                ],
-            }
-            sig = compute_hmac(json.dumps(payload, sort_keys=True), SHARED_SECRET)
-            await client.post("/events", json=payload, headers={"X-Signature": sig})
+        fake_relay.events.append({
+            "event_id": "pull_new",
+            "bot_id": "bot1",
+            "event_type": "trade",
+            "payload": json.dumps({"trade_id": "new"}),
+            "exchange_timestamp": "2026-03-01T15:00:00+00:00",
+        })
 
         # New receiver loads watermark from DB — only gets the new event
         receiver2 = _make_receiver(relay_app, local_queue)
@@ -140,7 +171,7 @@ class TestWatermarkPersistence:
 
 
 class TestPollRetry:
-    async def test_poll_handles_connection_error(self, relay_app, local_queue):
+    async def test_poll_handles_connection_error(self, local_queue):
         """Relay unreachable returns 0, no exception propagated."""
 
         def bad_factory():
@@ -156,11 +187,8 @@ class TestPollRetry:
         assert result == 0
         assert receiver._consecutive_failures == 1
 
-    async def test_poll_handles_http_error(self, relay_app, local_queue):
+    async def test_poll_handles_http_error(self, local_queue):
         """Relay returns 500 → returns 0, no exception."""
-        from starlette.applications import Starlette
-        from starlette.responses import PlainTextResponse
-        from starlette.routing import Route
 
         async def error_handler(request):
             return PlainTextResponse("Internal Server Error", status_code=500)
@@ -190,9 +218,9 @@ class TestPollRetry:
 
 
 class TestDrain:
-    async def test_drain_pulls_multiple_batches(self, relay_app, local_queue):
+    async def test_drain_pulls_multiple_batches(self, fake_relay, relay_app, local_queue):
         """Seeds 5 events, drains with batch_size=2 — should pull all in 3 batches."""
-        await _seed_relay(relay_app, count=5)
+        fake_relay.seed(count=5)
 
         receiver = _make_receiver(relay_app, local_queue)
         total = await receiver.drain(batch_size=2, max_batches=10)
@@ -207,9 +235,9 @@ class TestDrain:
         total = await receiver.drain()
         assert total == 0
 
-    async def test_drain_caps_at_max_batches(self, relay_app, local_queue):
+    async def test_drain_caps_at_max_batches(self, fake_relay, relay_app, local_queue):
         """Drain respects max_batches limit."""
-        await _seed_relay(relay_app, count=5)
+        fake_relay.seed(count=5)
 
         receiver = _make_receiver(relay_app, local_queue)
         # batch_size=1, max_batches=3 → should only get 3 events

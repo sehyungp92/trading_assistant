@@ -41,7 +41,36 @@ _WEEKLY_INSTRUCTIONS = """\
     c. For cross-bot allocation: assess whether rebalancing is warranted given market conditions
     d. For intra-bot proportions: consider strategy interactions not captured by correlation alone
     e. For same-instrument strategies (e.g., all NQ in momentum_trader): assess signal independence
-    f. Highlight the top 3 allocation changes by expected impact"""
+    f. Highlight the top 3 allocation changes by expected impact
+15. PORTFOLIO ALLOCATION ASSESSMENT FRAMEWORK
+    For each bot and each strategy within each bot:
+    a. Compute capital efficiency: PnL / (unit_risk × max_positions × days_active)
+    b. Compute marginal Sharpe contribution: portfolio Sharpe with vs. without this strategy
+    c. If capital efficiency differs >2x between strategies, propose reallocation with:
+       - Current allocation and suggested allocation (as % of equity and R-units)
+       - Expected Calmar ratio change
+       - Minimum observation period before re-evaluating
+    d. For same-instrument strategies (e.g., all NQ in momentum_trader), assess signal independence:
+       - Entry overlap rate (% of entries within 2 bars of each other)
+       - Return correlation at trade level (not just daily)
+       - If correlation > 0.6, recommend consolidation or differentiation
+16. REGIME-CONDITIONAL ANALYSIS
+    Review the regime_conditional_analysis data and:
+    a. Validate regime-specific allocation suggestions
+    b. Identify regimes where specific strategies should be scaled down or paused
+    c. Assess regime transition patterns — is the current regime distribution shifting?
+    d. For each regime with >20 trades: confirm whether allocation adjustments are warranted
+17. STRUCTURAL ASSESSMENT
+    Review the structural_analysis data and:
+    a. For decaying strategies: assess whether decay is structural or cyclical
+    b. For architecture mismatches: evaluate whether the suggested change is appropriate
+    c. For filter ROI: recommend filter changes only when net impact exceeds $500/week
+    d. Prioritize structural proposals by reversibility — prefer low-effort, reversible changes
+18. COORDINATOR INTERACTION EFFECTS (swing_trader only)
+    Review the interaction_analysis data and:
+    a. Assess net coordinator benefit — is the coordination system net positive?
+    b. For each rule: evaluate whether the tightening/boosting parameters are optimal
+    c. Assess overlay regime impact — should overlay signals gate more/fewer strategies?"""
 
 
 class WeeklyPromptAssembler:
@@ -106,6 +135,21 @@ class WeeklyPromptAssembler:
         if alloc_path.exists():
             data["allocation_analysis"] = json.loads(alloc_path.read_text())
 
+        # Load structural analysis if present
+        structural_path = weekly_dir / "structural_analysis.json"
+        if structural_path.exists():
+            data["structural_analysis"] = json.loads(structural_path.read_text())
+
+        # Load regime-conditional analysis if present
+        regime_path = weekly_dir / "regime_conditional_analysis.json"
+        if regime_path.exists():
+            data["regime_conditional_analysis"] = json.loads(regime_path.read_text())
+
+        # Load interaction analysis if present
+        interaction_path = weekly_dir / "interaction_analysis.json"
+        if interaction_path.exists():
+            data["interaction_analysis"] = json.loads(interaction_path.read_text())
+
         return data
 
     def _load_daily_reports(self) -> list[dict]:
@@ -131,7 +175,11 @@ class WeeklyPromptAssembler:
     def _list_data_files(self) -> list[str]:
         files: list[str] = []
         weekly_dir = self.curated_dir / "weekly" / self.week_start
-        for name in ["weekly_summary.json", "refinement_report.json", "week_over_week.json", "allocation_analysis.json"]:
+        for name in [
+            "weekly_summary.json", "refinement_report.json", "week_over_week.json",
+            "allocation_analysis.json", "structural_analysis.json",
+            "regime_conditional_analysis.json", "interaction_analysis.json",
+        ]:
             path = weekly_dir / name
             if path.exists():
                 files.append(str(path))

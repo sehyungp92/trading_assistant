@@ -11,6 +11,12 @@ Tier 4 (Hypothesis): reserved for Claude to synthesize in the weekly report
 """
 from __future__ import annotations
 
+from schemas.regime_conditional import (
+    RegimeAllocation,
+    RegimeConditionalReport,
+    RegimeDistribution,
+    RegimeStrategyMetrics,
+)
 from schemas.strategy_suggestions import (
     SuggestionTier,
     StrategySuggestion,
@@ -20,6 +26,7 @@ from schemas.weekly_metrics import (
     BotWeeklySummary,
     FilterWeeklySummary,
     RegimePerformanceTrend,
+    StrategyWeeklySummary,
 )
 
 
@@ -363,6 +370,129 @@ class StrategyEngine:
             confidence=0.6,
             requires_human_judgment=True,
         )]
+
+    def compute_regime_conditional_metrics(
+        self,
+        per_strategy_summaries: dict[str, dict[str, StrategyWeeklySummary]],
+        trades_by_bot: dict[str, list],
+    ) -> RegimeConditionalReport:
+        """Compute regime-conditional performance metrics and allocation suggestions.
+
+        Args:
+            per_strategy_summaries: outer key=bot_id, inner key=strategy_id
+            trades_by_bot: bot_id → list of TradeEvent
+        """
+        import math
+        import statistics
+        from collections import defaultdict
+
+        # Group trades by (bot_id, strategy_id, regime)
+        grouped: dict[tuple[str, str, str], list] = defaultdict(list)
+        regime_counts: dict[str, int] = defaultdict(int)
+        total_trades = 0
+
+        for bot_id, trades in trades_by_bot.items():
+            for t in trades:
+                regime = getattr(t, "market_regime", None) or "unknown"
+                strat = getattr(t, "entry_signal", "") or "default"
+                grouped[(bot_id, strat, regime)].append(t)
+                regime_counts[regime] += 1
+                total_trades += 1
+
+        # Compute per-group metrics
+        metrics: list[RegimeStrategyMetrics] = []
+        regime_strategy_sharpes: dict[str, dict[str, float]] = defaultdict(dict)
+
+        for (bot_id, strat_id, regime), trades in grouped.items():
+            if not trades:
+                continue
+            pnls = [t.pnl for t in trades]
+            wins = [p for p in pnls if p > 0]
+            win_rate = len(wins) / len(pnls) if pnls else 0.0
+            expectancy = statistics.mean(pnls) if pnls else 0.0
+            sharpe = 0.0
+            if len(pnls) >= 2:
+                std = statistics.stdev(pnls)
+                if std > 0:
+                    sharpe = (statistics.mean(pnls) / std) * math.sqrt(252)
+
+            # Max drawdown from cumulative PnL
+            cumsum = 0.0
+            peak = 0.0
+            max_dd = 0.0
+            for p in pnls:
+                cumsum += p
+                if cumsum > peak:
+                    peak = cumsum
+                dd = (peak - cumsum) / peak if peak > 0 else 0.0
+                if dd > max_dd:
+                    max_dd = dd
+
+            key = f"{bot_id}:{strat_id}"
+            regime_strategy_sharpes[regime][key] = sharpe
+
+            metrics.append(RegimeStrategyMetrics(
+                bot_id=bot_id,
+                strategy_id=strat_id,
+                regime=regime,
+                trade_count=len(trades),
+                win_rate=round(win_rate, 4),
+                expectancy=round(expectancy, 2),
+                sharpe=round(sharpe, 4),
+                max_drawdown_pct=round(max_dd * 100, 2),
+            ))
+
+        # Regime distribution
+        regime_dist: list[RegimeDistribution] = []
+        for regime, count in regime_counts.items():
+            pct = (count / total_trades * 100.0) if total_trades > 0 else 0.0
+            regime_dist.append(RegimeDistribution(
+                regime=regime,
+                pct_of_time=round(pct, 1),
+                trade_count=count,
+            ))
+
+        # Optimal allocations per regime (inverse-volatility weighted)
+        allocations: list[RegimeAllocation] = []
+        for regime, strat_sharpes in regime_strategy_sharpes.items():
+            if not strat_sharpes:
+                continue
+            # Use max(sharpe, 0.01) to avoid division by zero; zero/negative → minimum alloc
+            inv_vol = {}
+            for key, s in strat_sharpes.items():
+                inv_vol[key] = max(s, 0.01)
+            total_inv = sum(inv_vol.values())
+            alloc = {k: round(v / total_inv * 100.0, 1) for k, v in inv_vol.items()} if total_inv > 0 else {}
+            allocations.append(RegimeAllocation(
+                regime=regime,
+                allocations=alloc,
+                rationale=f"Inverse-volatility allocation across {len(alloc)} strategies in {regime} regime",
+            ))
+
+        # Generate suggestions for underperforming strategy-regime combos
+        suggestions: list[dict] = []
+        for m in metrics:
+            if m.trade_count >= 10 and m.win_rate < 0.35 and m.expectancy < 0:
+                suggestions.append({
+                    "regime": m.regime,
+                    "strategy": f"{m.bot_id}:{m.strategy_id}",
+                    "current_alloc": "equal",
+                    "suggested_alloc": "reduce",
+                    "reason": (
+                        f"In {m.regime}, {m.bot_id}:{m.strategy_id} has "
+                        f"{m.win_rate:.0%} win rate and ${m.expectancy:.0f} expectancy "
+                        f"over {m.trade_count} trades. Consider scaling down."
+                    ),
+                })
+
+        return RegimeConditionalReport(
+            week_start=self.week_start,
+            week_end=self.week_end,
+            metrics=metrics,
+            optimal_allocations=allocations,
+            regime_distribution=regime_dist,
+            suggestions=suggestions,
+        )
 
     def build_report(
         self,

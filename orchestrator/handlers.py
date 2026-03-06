@@ -792,6 +792,53 @@ class Handlers:
             proportion_report = optimizer.compute(per_strat)
             results["proportion_optimization"] = proportion_report.model_dump(mode="json")
 
+            # 4. Structural analysis
+            from skills.structural_analyzer import StructuralAnalyzer
+
+            structural = StructuralAnalyzer(week_start, week_end)
+            structural_report = structural.compute(per_strat)
+            results["structural_analysis"] = structural_report.model_dump(mode="json")
+
+            # Write to weekly curated dir for prompt assembler
+            weekly_dir = self._curated_dir / "weekly" / week_start
+            weekly_dir.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            (weekly_dir / "structural_analysis.json").write_text(
+                _json.dumps(results["structural_analysis"], indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            # 5. Regime-conditional metrics
+            from analysis.strategy_engine import StrategyEngine as _SE
+
+            engine = _SE(week_start=week_start, week_end=week_end)
+            trades_by_bot: dict[str, list] = {}
+            for bid in bot_summaries:
+                trades, _ = self._load_trades_for_week(bid, week_start, week_end)
+                trades_by_bot[bid] = trades
+
+            regime_report = engine.compute_regime_conditional_metrics(per_strat, trades_by_bot)
+            results["regime_conditional_analysis"] = regime_report.model_dump(mode="json")
+            (weekly_dir / "regime_conditional_analysis.json").write_text(
+                _json.dumps(results["regime_conditional_analysis"], indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            # 6. Interaction analysis (swing_trader only)
+            if "swing_trader" in bot_summaries:
+                from skills.interaction_analyzer import InteractionAnalyzer
+                from schemas.interaction_analysis import CoordinatorAction
+
+                ia = InteractionAnalyzer(week_start, week_end, bot_id="swing_trader")
+                coord_events = self._load_coordinator_events(week_start, week_end)
+                swing_trades = trades_by_bot.get("swing_trader", [])
+                interaction_report = ia.compute(coord_events, swing_trades)
+                results["interaction_analysis"] = interaction_report.model_dump(mode="json")
+                (weekly_dir / "interaction_analysis.json").write_text(
+                    _json.dumps(results["interaction_analysis"], indent=2, default=str),
+                    encoding="utf-8",
+                )
+
         except Exception:
             logger.warning("Allocation analyses failed — skipping")
 
@@ -836,6 +883,35 @@ class Handlers:
             current += timedelta(days=1)
 
         return (trades, missed)
+
+    def _load_coordinator_events(
+        self, week_start: str, week_end: str,
+    ) -> list:
+        """Load coordinator action events for swing_trader within a date range."""
+        from datetime import timedelta
+        from schemas.interaction_analysis import CoordinatorAction
+
+        events: list[CoordinatorAction] = []
+        start = datetime.strptime(week_start, "%Y-%m-%d")
+        end = datetime.strptime(week_end, "%Y-%m-%d")
+
+        current = start
+        while current <= end:
+            date_str = current.strftime("%Y-%m-%d")
+            coord_file = self._curated_dir / date_str / "swing_trader" / "coordinator_impact.json"
+            if not coord_file.exists():
+                # Also check for raw coordination JSONL
+                coord_jsonl = self._curated_dir.parent / "data" / "coordination" / f"coordination_{date_str}.jsonl"
+                if coord_jsonl.exists():
+                    for line in coord_jsonl.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            try:
+                                events.append(CoordinatorAction(**json.loads(line)))
+                            except Exception:
+                                pass
+            current += timedelta(days=1)
+
+        return events
 
     def _load_bot_dailies(self, bot_id: str, week_start: str, week_end: str) -> list:
         """Load BotDailySummary objects from curated dir for a date range."""
