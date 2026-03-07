@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from schemas.deployment_monitoring import (
     DeploymentRecord,
     DeploymentStatus,
 )
+from schemas.notifications import NotificationPriority
 from skills.deployment_monitor import DeploymentMonitor
 
 
@@ -300,9 +301,9 @@ class TestDeploymentMonitor:
         pr_request = call_args[0][0]
         assert pr_request.branch_name == "ta/rollback-dep1abcd"
         assert "ROLLBACK" in pr_request.title
-        # File change should revert new_value -> old_value
-        assert pr_request.file_changes[0].new_content == "2.0"
-        assert pr_request.file_changes[0].original_content == "1.5"
+        # Without file_change_generator, fallback produces descriptive diff_preview
+        assert "Revert sl_pct" in pr_request.file_changes[0].diff_preview
+        assert "1.5 -> 2.0" in pr_request.file_changes[0].diff_preview
 
     def test_monitoring_window_expired(self, monitor: DeploymentMonitor):
         monitor.create_deployment(
@@ -400,3 +401,202 @@ class TestDeploymentMonitor:
         assert record.pre_deploy_metrics is not None
         assert record.pre_deploy_metrics.avg_pnl == 100.0
         assert record.param_changes[0]["param_name"] == "sl_pct"
+
+
+class TestCheckDeploymentsHandler:
+    """Tests for Handlers._check_deployments() state machine."""
+
+    def _make_handlers(self, monitor, dispatcher=None):
+        """Create a Handlers instance with mocked dependencies."""
+        from orchestrator.handlers import Handlers
+        from orchestrator.event_stream import EventStream
+        from schemas.notifications import NotificationPreferences
+
+        agent_runner = MagicMock()
+        event_stream = EventStream()
+        disp = dispatcher or MagicMock()
+        disp.dispatch = AsyncMock()
+        prefs = NotificationPreferences()
+        handlers = Handlers(
+            agent_runner=agent_runner,
+            event_stream=event_stream,
+            dispatcher=disp,
+            notification_prefs=prefs,
+            curated_dir=Path("/tmp/curated"),
+            memory_dir=Path("/tmp/memory"),
+            runs_dir=Path("/tmp/runs"),
+            source_root=Path("/tmp"),
+            bots=["bot1"],
+            deployment_monitor=monitor,
+        )
+        return handlers
+
+    @pytest.mark.asyncio
+    async def test_check_deployments_handles_merged(self, tmp_path: Path):
+        """MERGED state → collect pre-deploy metrics + mark_deployed."""
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        monitor = DeploymentMonitor(findings_dir=findings, curated_dir=curated)
+        monitor.create_deployment(
+            deployment_id="dep1",
+            approval_request_id="req1",
+            pr_url="https://github.com/user/repo/pull/42",
+            bot_id="bot1",
+            param_changes=[],
+        )
+        # Manually set to MERGED
+        record = monitor.get_by_id("dep1")
+        record.status = DeploymentStatus.MERGED
+        monitor._update_record(record)
+
+        # Set up curated data so collect_metrics_snapshot has something to read
+        bot_dir = curated / "2026-03-07" / "bot1"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "summary.json").write_text(json.dumps({
+            "trade_count": 50, "win_rate": 0.55, "avg_pnl": 100.0,
+            "sharpe_ratio": 1.2, "max_drawdown_pct": 5.0,
+        }))
+
+        handlers = self._make_handlers(monitor)
+        await handlers._check_deployments()
+
+        updated = monitor.get_by_id("dep1")
+        assert updated.status == DeploymentStatus.DEPLOYED
+        assert updated.pre_deploy_metrics is not None
+        assert updated.pre_deploy_metrics.avg_pnl == 100.0
+
+    @pytest.mark.asyncio
+    async def test_check_deployments_handles_deployed_no_regression(self, tmp_path: Path):
+        """DEPLOYED without regression → continue monitoring."""
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        monitor = DeploymentMonitor(findings_dir=findings, curated_dir=curated)
+        monitor.create_deployment(
+            deployment_id="dep1",
+            approval_request_id="req1",
+            pr_url="https://github.com/user/repo/pull/42",
+            bot_id="bot1",
+            param_changes=[],
+        )
+        # Set up pre-deploy metrics
+        monitor.record_pre_deploy_metrics(
+            "dep1", _make_snapshot(avg_pnl=100.0, win_rate=0.55),
+        )
+        monitor.mark_deployed("dep1")
+
+        # Set up curated data with similar metrics (no regression)
+        bot_dir = curated / "2026-03-07" / "bot1"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "summary.json").write_text(json.dumps({
+            "trade_count": 45, "win_rate": 0.54, "avg_pnl": 95.0,
+            "sharpe_ratio": 1.1, "max_drawdown_pct": 5.5,
+        }))
+
+        dispatcher = MagicMock()
+        dispatcher.dispatch = AsyncMock()
+        handlers = self._make_handlers(monitor, dispatcher)
+        await handlers._check_deployments()
+
+        updated = monitor.get_by_id("dep1")
+        assert updated.regression_detected is False
+        # No notification sent for non-regression
+        dispatcher.dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_check_deployments_handles_deployed_regression(self, tmp_path: Path):
+        """DEPLOYED with regression → rollback PR + notification."""
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        mock_pr_builder = MagicMock()
+        mock_pr_builder.create_pr = AsyncMock(
+            return_value=PRResult(
+                success=True,
+                pr_url="https://github.com/user/repo/pull/99",
+                branch_name="ta/rollback-dep1",
+            )
+        )
+
+        monitor = DeploymentMonitor(
+            findings_dir=findings, curated_dir=curated, pr_builder=mock_pr_builder,
+        )
+        monitor.create_deployment(
+            deployment_id="dep1",
+            approval_request_id="req1",
+            pr_url="https://github.com/user/repo/pull/42",
+            bot_id="bot1",
+            param_changes=[
+                {"param_name": "sl_pct", "old_value": 2.0, "new_value": 1.5,
+                 "file_path": "config.yaml"},
+            ],
+        )
+        # Pre-deploy: good metrics
+        monitor.record_pre_deploy_metrics(
+            "dep1", _make_snapshot(avg_pnl=100.0, win_rate=0.55),
+        )
+        monitor.mark_deployed("dep1")
+
+        # Curated data shows severe decline (70% PnL drop)
+        bot_dir = curated / "2026-03-07" / "bot1"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "summary.json").write_text(json.dumps({
+            "trade_count": 50, "win_rate": 0.35, "avg_pnl": 30.0,
+            "sharpe_ratio": 0.3, "max_drawdown_pct": 12.0,
+        }))
+
+        dispatcher = MagicMock()
+        dispatcher.dispatch = AsyncMock()
+        handlers = self._make_handlers(monitor, dispatcher)
+        await handlers._check_deployments()
+
+        updated = monitor.get_by_id("dep1")
+        assert updated.regression_detected is True
+        assert updated.status == DeploymentStatus.ROLLED_BACK
+        assert updated.rollback_pr_url == "https://github.com/user/repo/pull/99"
+        # Notification sent
+        dispatcher.dispatch.assert_called_once()
+        payload = dispatcher.dispatch.call_args[0][0]
+        assert payload.priority == NotificationPriority.CRITICAL
+        assert "Regression Detected" in payload.title
+
+    @pytest.mark.asyncio
+    async def test_check_deployments_monitoring_expired(self, tmp_path: Path):
+        """Expired monitoring window → clean exit, no regression check."""
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        monitor = DeploymentMonitor(findings_dir=findings, curated_dir=curated)
+        monitor.create_deployment(
+            deployment_id="dep1",
+            approval_request_id="req1",
+            pr_url="https://github.com/user/repo/pull/42",
+            bot_id="bot1",
+            param_changes=[],
+        )
+        monitor.record_pre_deploy_metrics(
+            "dep1", _make_snapshot(avg_pnl=100.0, win_rate=0.55),
+        )
+        monitor.mark_deployed("dep1")
+
+        # Force monitoring window to expire
+        record = monitor.get_by_id("dep1")
+        record.monitoring_end_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        monitor._update_record(record)
+
+        handlers = self._make_handlers(monitor)
+        await handlers._check_deployments()
+
+        # Deployment should still be DEPLOYED (not regressed, not rolled back)
+        updated = monitor.get_by_id("dep1")
+        assert updated.status == DeploymentStatus.DEPLOYED
+        assert updated.regression_detected is False

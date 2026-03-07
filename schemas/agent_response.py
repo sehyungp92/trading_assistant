@@ -32,6 +32,8 @@ class AgentSuggestion(BaseModel):
     expected_impact: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     evidence_summary: str = ""
+    proposed_value: Optional[float] = None  # numeric value for parameter suggestions
+    target_param: Optional[str] = None  # parameter name this suggestion targets
 
 
 class StructuralProposal(BaseModel):

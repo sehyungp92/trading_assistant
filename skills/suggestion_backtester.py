@@ -1,8 +1,12 @@
 # skills/suggestion_backtester.py
-"""Suggestion backtester — runs baseline vs proposed parameter backtests.
+"""Suggestion backtester — validates trade data quality before approving suggestions.
 
-Loads historical trades, simulates both configurations, and applies
-safety checks to determine if a parameter change is safe to propose.
+Loads historical trades, computes metrics, and applies safety checks to
+determine if there's sufficient evidence to propose a parameter change.
+
+NOTE: This backtester validates data quality and current performance health.
+It does NOT simulate the impact of parameter changes (that would require
+the full BacktestSimulator with strategy-specific trade filtering).
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class SuggestionBacktester:
-    """Backtests parameter changes against historical trade data."""
+    """Validates trade data quality before approving parameter change suggestions."""
 
     def __init__(self, config_registry: ConfigRegistry, data_dir: Path) -> None:
         self._registry = config_registry
@@ -36,7 +40,7 @@ class SuggestionBacktester:
         current_value: Any,
         proposed_value: Any,
     ) -> BacktestComparison:
-        """Run baseline vs proposed backtest and return comparison."""
+        """Validate trade data quality and return comparison with safety checks."""
         trades = self._load_trades(bot_id)
         param = self._registry.get_parameter(bot_id, param_name)
         is_safety_critical = param.is_safety_critical if param else False
@@ -58,15 +62,20 @@ class SuggestionBacktester:
                 safety_notes=["No trade data available"],
             )
 
-        baseline = self._simulate(trades, param_name, current_value)
-        proposed = self._simulate(trades, param_name, proposed_value)
+        metrics = self._compute_trade_metrics(trades)
+        passes, notes = self._check_safety(metrics, is_safety_critical)
 
-        passes, notes = self._check_safety(baseline, proposed, is_safety_critical)
+        # Honest: baseline and proposed are the same metrics (current trade data).
+        # We validate data quality, not parameter-specific impact.
+        notes.append(
+            "Note: backtester validates current data quality, "
+            "not parameter-specific impact"
+        )
 
         return BacktestComparison(
             context=ctx,
-            baseline=baseline,
-            proposed=proposed,
+            baseline=metrics,
+            proposed=metrics,
             passes_safety=passes,
             safety_notes=notes,
         )
@@ -99,13 +108,8 @@ class SuggestionBacktester:
                     pass
         return trades
 
-    def _simulate(self, trades: list[dict], param_name: str, value: Any) -> SimulationMetrics:
-        """Simple simulation: replay trades and compute metrics.
-
-        This is a simplified simulation that doesn't filter trades by parameter
-        (that would require the full BacktestSimulator with trade schemas).
-        Instead, it computes metrics from the available trade data.
-        """
+    def _compute_trade_metrics(self, trades: list[dict]) -> SimulationMetrics:
+        """Compute metrics from historical trade data."""
         if not trades:
             return SimulationMetrics()
 
@@ -160,41 +164,35 @@ class SuggestionBacktester:
 
     def _check_safety(
         self,
-        baseline: SimulationMetrics,
-        proposed: SimulationMetrics,
+        metrics: SimulationMetrics,
         is_safety_critical: bool,
     ) -> tuple[bool, list[str]]:
-        """Apply safety checks to backtest results."""
+        """Apply safety checks to current trade data metrics."""
         notes: list[str] = []
         passes = True
 
         # Check minimum trade count
-        if proposed.total_trades < 10:
-            notes.append(f"Insufficient trades: {proposed.total_trades} < 10")
+        if metrics.total_trades < 10:
+            notes.append(f"Insufficient trades: {metrics.total_trades} < 10")
             passes = False
 
         # Sharpe ratio >= 0
-        if proposed.sharpe_ratio < 0:
-            notes.append(f"Negative Sharpe ratio: {proposed.sharpe_ratio:.2f}")
+        if metrics.sharpe_ratio < 0:
+            notes.append(f"Negative Sharpe ratio: {metrics.sharpe_ratio:.2f}")
             passes = False
 
         # Profit factor >= 1.0
-        if proposed.profit_factor < 1.0:
-            notes.append(f"Profit factor below 1.0: {proposed.profit_factor:.2f}")
+        if metrics.profit_factor < 1.0:
+            notes.append(f"Profit factor below 1.0: {metrics.profit_factor:.2f}")
             passes = False
 
-        # Max drawdown: not >50% worse (30% for safety-critical)
-        dd_threshold = 0.30 if is_safety_critical else 0.50
-        if baseline.max_drawdown_pct != 0:
-            dd_change = abs(proposed.max_drawdown_pct) - abs(baseline.max_drawdown_pct)
-            if abs(baseline.max_drawdown_pct) > 0:
-                dd_change_ratio = dd_change / abs(baseline.max_drawdown_pct)
-                if dd_change_ratio > dd_threshold:
-                    notes.append(
-                        f"Drawdown worsened by {dd_change_ratio:.0%} "
-                        f"(threshold: {dd_threshold:.0%})"
-                    )
-                    passes = False
+        # Stricter thresholds for safety-critical parameters
+        if is_safety_critical:
+            if metrics.total_trades < 30:
+                notes.append(
+                    f"Safety-critical: need 30+ trades, have {metrics.total_trades}"
+                )
+                passes = False
 
         return passes, notes
 

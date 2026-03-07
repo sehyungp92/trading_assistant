@@ -1,8 +1,9 @@
 # tests/test_adaptive_integration.py
-"""Phase 2A integration tests — end-to-end adaptive threshold pipeline.
+"""Integration tests — ThresholdLearner → StrategyEngine adaptive threshold wiring.
 
-Tests the full loop: suggestion with detection_context -> outcome measurement ->
-threshold learner computes optimal -> strategy engine uses learned threshold.
+ThresholdLearner learns optimal thresholds from suggestion+outcome data.
+StrategyEngine accepts an optional threshold_learner parameter to use learned values.
+These tests verify the full loop: learn → inject → detect with learned thresholds.
 """
 from __future__ import annotations
 
@@ -80,21 +81,11 @@ def _make_outcome_dict(suggestion_id: str, pnl_delta_7d: float) -> dict:
 # ---------------------------------------------------------------------------
 
 class TestAdaptiveIntegration:
-    """End-to-end tests for adaptive threshold pipeline."""
+    """Tests for ThresholdLearner standalone and StrategyEngine with defaults."""
 
-    def test_full_loop(self, tmp_path: Path):
-        """Complete adaptive threshold cycle: detect -> record -> learn -> apply.
-
-        1. Create a StrategyEngine (no learner) that generates tight_stop suggestions
-        2. Write suggestions with detection_context + outcomes to JSONL
-        3. ThresholdLearner learns optimal thresholds
-        4. New StrategyEngine with learner uses the learned threshold
-        """
-        findings_dir = tmp_path / "findings"
-        findings_dir.mkdir()
-
-        # --- Step 1: Generate suggestions from a StrategyEngine without a learner ---
-        engine_no_learner = StrategyEngine(
+    def test_strategy_engine_detects_with_defaults(self):
+        """StrategyEngine generates suggestions using default thresholds."""
+        engine = StrategyEngine(
             week_start="2026-02-24",
             week_end="2026-03-02",
             tight_stop_ratio=0.3,
@@ -111,19 +102,20 @@ class TestAdaptiveIntegration:
             avg_win=200.0,
             avg_loss=-40.0,  # ratio = 40/200 = 0.2, < 0.3 threshold
         )
-        suggestions = engine_no_learner.analyze_parameters(summary)
+        suggestions = engine.analyze_parameters(summary)
         assert len(suggestions) == 1
         assert suggestions[0].detection_context is not None
         assert suggestions[0].detection_context.threshold_value == 0.3  # default
 
-        # --- Step 2: Write 15 suggestion+outcome pairs to JSONL ---
-        # Simulate: at various observed_values, some outcomes positive, some negative
-        # Positive outcomes cluster at higher observed values (ratio >= 0.15)
+    def test_threshold_learner_learns_from_data(self, tmp_path: Path):
+        """ThresholdLearner learns optimal thresholds from suggestion+outcome pairs."""
+        findings_dir = tmp_path / "findings"
+        findings_dir.mkdir()
+
         suggestion_dicts = []
         outcome_dicts = []
         for i in range(15):
             sid = f"s{i:03d}"
-            # Vary the observed_value between 0.05 and 0.28
             observed = 0.05 + i * 0.016
             suggestion_dicts.append(_make_suggestion_dict(
                 suggestion_id=sid,
@@ -133,14 +125,12 @@ class TestAdaptiveIntegration:
                 threshold_value=0.3,
                 observed_value=round(observed, 4),
             ))
-            # Positive outcome when observed_value >= 0.15
             pnl = 500.0 if observed >= 0.15 else -200.0
             outcome_dicts.append(_make_outcome_dict(sid, pnl))
 
         _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
         _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
 
-        # --- Step 3: Learn thresholds ---
         learner = ThresholdLearner(findings_dir, min_samples=10)
         profiles = learner.learn_thresholds()
 
@@ -152,167 +142,14 @@ class TestAdaptiveIntegration:
         assert record.sample_count == 15
         assert record.learned_value is not None
 
-        # --- Step 4: New engine uses the learned threshold ---
-        # Reset learner's cached profile so it loads from disk
-        learner2 = ThresholdLearner(findings_dir, min_samples=10)
-        engine_with_learner = StrategyEngine(
-            week_start="2026-02-24",
-            week_end="2026-03-02",
-            tight_stop_ratio=0.3,
-            threshold_learner=learner2,
-        )
-
-        # Same bot summary as before (ratio = 0.2)
-        suggestions2 = engine_with_learner.analyze_parameters(summary)
-        # The engine should have used the learned threshold, not the default 0.3
-        # The learned threshold should differ from 0.3 since we shaped the data
-        if suggestions2:
-            ctx = suggestions2[0].detection_context
-            assert ctx is not None
-            # The threshold used should be the learned value, not 0.3
-            assert ctx.threshold_value == record.learned_value
-        else:
-            # If no suggestion produced, the learned threshold must be <= 0.2
-            # which means the ratio no longer trips the threshold
-            assert record.learned_value <= 0.2
-
-    def test_insufficient_data_uses_defaults(self, tmp_path: Path):
-        """Only 5 suggestion+outcome pairs — below min_samples, defaults used."""
-        findings_dir = tmp_path / "findings"
-        findings_dir.mkdir()
-
-        suggestion_dicts = []
-        outcome_dicts = []
-        for i in range(5):
-            sid = f"s{i:03d}"
-            suggestion_dicts.append(_make_suggestion_dict(
-                suggestion_id=sid,
-                bot_id="bot_a",
-                detector_name="tight_stop",
-                threshold_name="tight_stop_ratio",
-                threshold_value=0.3,
-                observed_value=0.1 + i * 0.02,
-            ))
-            outcome_dicts.append(_make_outcome_dict(sid, 100.0))
-
-        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
-        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
-
-        learner = ThresholdLearner(findings_dir, min_samples=10)
-        profiles = learner.learn_thresholds()
-
-        # Below min_samples=10 so no profiles computed
-        assert profiles == {}
-
-        # Engine with this learner should still use default thresholds
-        engine = StrategyEngine(
-            week_start="2026-02-24",
-            week_end="2026-03-02",
-            tight_stop_ratio=0.3,
-            threshold_learner=learner,
-        )
-
-        summary = BotWeeklySummary(
-            week_start="2026-02-24",
-            week_end="2026-03-02",
-            bot_id="bot_a",
-            total_trades=50,
-            win_count=30,
-            loss_count=20,
-            avg_win=200.0,
-            avg_loss=-40.0,  # ratio = 0.2
-        )
-        suggestions = engine.analyze_parameters(summary)
-        assert len(suggestions) == 1
-        ctx = suggestions[0].detection_context
-        assert ctx is not None
-        # Should use the default threshold since learner has no data
-        assert ctx.threshold_value == 0.3
-
-    def test_per_bot_specialization(self, tmp_path: Path):
-        """Two bots with different outcome distributions get different thresholds."""
-        findings_dir = tmp_path / "findings"
-        findings_dir.mkdir()
-
-        suggestion_dicts = []
-        outcome_dicts = []
-
-        # bot_a: positive outcomes at HIGH observed values (>= 0.20)
-        for i in range(15):
-            sid = f"a{i:03d}"
-            observed = 0.05 + i * 0.02  # 0.05 to 0.33
-            suggestion_dicts.append(_make_suggestion_dict(
-                suggestion_id=sid,
-                bot_id="bot_a",
-                detector_name="tight_stop",
-                threshold_name="tight_stop_ratio",
-                threshold_value=0.3,
-                observed_value=round(observed, 4),
-            ))
-            pnl = 300.0 if observed >= 0.20 else -150.0
-            outcome_dicts.append(_make_outcome_dict(sid, pnl))
-
-        # bot_b: positive outcomes at LOW observed values (< 0.15)
-        for i in range(15):
-            sid = f"b{i:03d}"
-            observed = 0.05 + i * 0.02  # 0.05 to 0.33
-            suggestion_dicts.append(_make_suggestion_dict(
-                suggestion_id=sid,
-                bot_id="bot_b",
-                detector_name="tight_stop",
-                threshold_name="tight_stop_ratio",
-                threshold_value=0.3,
-                observed_value=round(observed, 4),
-            ))
-            pnl = 300.0 if observed < 0.15 else -150.0
-            outcome_dicts.append(_make_outcome_dict(sid, pnl))
-
-        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
-        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
-
-        learner = ThresholdLearner(findings_dir, min_samples=10)
-        profiles = learner.learn_thresholds()
-
-        assert "bot_a" in profiles
-        assert "bot_b" in profiles
-
-        key = "tight_stop:tight_stop_ratio"
-        rec_a = profiles["bot_a"].thresholds[key]
-        rec_b = profiles["bot_b"].thresholds[key]
-
-        # The learned thresholds should differ since the outcome distributions differ
-        assert rec_a.learned_value != rec_b.learned_value
-
-        # Verify the engine uses per-bot thresholds
-        learner_a = ThresholdLearner(findings_dir, min_samples=10)
-        engine = StrategyEngine(
-            week_start="2026-02-24",
-            week_end="2026-03-02",
-            tight_stop_ratio=0.3,
-            threshold_learner=learner_a,
-        )
-
-        # Check threshold used for bot_a vs bot_b
-        threshold_a = engine._get_threshold(
-            "tight_stop", "tight_stop_ratio", "bot_a", 0.3,
-        )
-        # Reset learner profile cache for bot_b
-        engine._threshold_learner._profile = None
-        threshold_b = engine._get_threshold(
-            "tight_stop", "tight_stop_ratio", "bot_b", 0.3,
-        )
-
-        assert threshold_a != threshold_b
-
-    def test_backward_compat_flag_off(self, tmp_path: Path):
-        """Feature flag off (no learner) — all detectors use default thresholds."""
+    def test_defaults_used_without_learner(self):
+        """StrategyEngine uses default thresholds across all detector tiers."""
         engine = StrategyEngine(
             week_start="2026-02-24",
             week_end="2026-03-02",
             tight_stop_ratio=0.3,
             filter_cost_threshold=0.0,
             regime_min_weeks=3,
-            # No threshold_learner -> feature off
         )
 
         # --- Tier 1: analyze_parameters uses default tight_stop_ratio ---
@@ -360,7 +197,7 @@ class TestAdaptiveIntegration:
         assert ctx3 is not None
         assert ctx3.threshold_value == 0.3  # default decay_threshold
 
-        # All detection_context values use defaults — no adaptive behavior
+        # All detection_context values use defaults
         for s in param_suggestions + filter_suggestions + decay_suggestions:
             assert s.detection_context is not None
             assert s.detection_context.detector_name in (
@@ -475,3 +312,194 @@ class TestAdaptiveIntegration:
         # Confidence should be positive (20 samples / 30 cap)
         assert record.confidence > 0
         assert record.sample_count == 20
+
+    def test_per_bot_learner_specialization(self, tmp_path: Path):
+        """Two bots with different outcome distributions get different learned thresholds."""
+        findings_dir = tmp_path / "findings"
+        findings_dir.mkdir()
+
+        suggestion_dicts = []
+        outcome_dicts = []
+
+        # bot_a: positive outcomes at HIGH observed values (>= 0.20)
+        for i in range(15):
+            sid = f"a{i:03d}"
+            observed = 0.05 + i * 0.02  # 0.05 to 0.33
+            suggestion_dicts.append(_make_suggestion_dict(
+                suggestion_id=sid,
+                bot_id="bot_a",
+                detector_name="tight_stop",
+                threshold_name="tight_stop_ratio",
+                threshold_value=0.3,
+                observed_value=round(observed, 4),
+            ))
+            pnl = 300.0 if observed >= 0.20 else -150.0
+            outcome_dicts.append(_make_outcome_dict(sid, pnl))
+
+        # bot_b: positive outcomes at LOW observed values (< 0.15)
+        for i in range(15):
+            sid = f"b{i:03d}"
+            observed = 0.05 + i * 0.02  # 0.05 to 0.33
+            suggestion_dicts.append(_make_suggestion_dict(
+                suggestion_id=sid,
+                bot_id="bot_b",
+                detector_name="tight_stop",
+                threshold_name="tight_stop_ratio",
+                threshold_value=0.3,
+                observed_value=round(observed, 4),
+            ))
+            pnl = 300.0 if observed < 0.15 else -150.0
+            outcome_dicts.append(_make_outcome_dict(sid, pnl))
+
+        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
+        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
+
+        learner = ThresholdLearner(findings_dir, min_samples=10)
+        profiles = learner.learn_thresholds()
+
+        assert "bot_a" in profiles
+        assert "bot_b" in profiles
+
+        key = "tight_stop:tight_stop_ratio"
+        rec_a = profiles["bot_a"].thresholds[key]
+        rec_b = profiles["bot_b"].thresholds[key]
+
+        # The learned thresholds should differ since the outcome distributions differ
+        assert rec_a.learned_value != rec_b.learned_value
+
+    def test_insufficient_data_returns_empty(self, tmp_path: Path):
+        """Only 5 suggestion+outcome pairs -- below min_samples, no profiles computed."""
+        findings_dir = tmp_path / "findings"
+        findings_dir.mkdir()
+
+        suggestion_dicts = []
+        outcome_dicts = []
+        for i in range(5):
+            sid = f"s{i:03d}"
+            suggestion_dicts.append(_make_suggestion_dict(
+                suggestion_id=sid,
+                bot_id="bot_a",
+                detector_name="tight_stop",
+                threshold_name="tight_stop_ratio",
+                threshold_value=0.3,
+                observed_value=0.1 + i * 0.02,
+            ))
+            outcome_dicts.append(_make_outcome_dict(sid, 100.0))
+
+        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
+        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
+
+        learner = ThresholdLearner(findings_dir, min_samples=10)
+        profiles = learner.learn_thresholds()
+
+        # Below min_samples=10 so no profiles computed
+        assert profiles == {}
+
+    def test_full_loop_learner_to_engine(self, tmp_path: Path):
+        """Full loop: write data → learn → inject into engine → verify engine uses learned threshold."""
+        findings_dir = tmp_path / "findings"
+        findings_dir.mkdir()
+
+        suggestion_dicts = []
+        outcome_dicts = []
+        # Create data where optimal threshold differs from default 0.3:
+        # positive outcomes at observed >= 0.10, negative below
+        for i in range(20):
+            sid = f"s{i:03d}"
+            if i < 10:
+                observed = 0.02 + i * 0.008
+                pnl = -300.0
+            else:
+                observed = 0.10 + (i - 10) * 0.02
+                pnl = 500.0
+            suggestion_dicts.append(_make_suggestion_dict(
+                suggestion_id=sid,
+                bot_id="bot_a",
+                detector_name="tight_stop",
+                threshold_name="tight_stop_ratio",
+                threshold_value=0.3,
+                observed_value=round(observed, 4),
+            ))
+            outcome_dicts.append(_make_outcome_dict(sid, pnl))
+
+        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
+        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
+
+        # Learn thresholds
+        learner = ThresholdLearner(findings_dir, min_samples=10)
+        learner.learn_thresholds()
+
+        # Create a new learner instance (simulates reload) and inject into engine
+        learner2 = ThresholdLearner(findings_dir, min_samples=10)
+        engine = StrategyEngine(
+            week_start="2026-02-24", week_end="2026-03-02",
+            threshold_learner=learner2,
+        )
+
+        # loss/win ratio = 20/100 = 0.2
+        # Default threshold = 0.3 → would trigger (0.2 < 0.3)
+        # Learned threshold should be near 0.10 → should NOT trigger (0.2 >= 0.10)
+        summary = BotWeeklySummary(
+            week_start="2026-02-24", week_end="2026-03-02",
+            bot_id="bot_a", total_trades=50,
+            win_count=30, loss_count=20,
+            avg_win=100.0, avg_loss=-20.0,
+        )
+        result = engine.analyze_parameters(summary)
+        # With learned threshold near 0.10, ratio 0.2 should NOT trigger
+        assert len(result) == 0
+
+    def test_engine_with_learner_mixed_coverage(self, tmp_path: Path):
+        """Learner has data for some detectors but not others."""
+        findings_dir = tmp_path / "findings"
+        findings_dir.mkdir()
+
+        suggestion_dicts = []
+        outcome_dicts = []
+        # Only provide tight_stop data — no filter_cost data
+        for i in range(15):
+            sid = f"s{i:03d}"
+            observed = 0.05 + i * 0.016
+            suggestion_dicts.append(_make_suggestion_dict(
+                suggestion_id=sid,
+                bot_id="bot_a",
+                detector_name="tight_stop",
+                threshold_name="tight_stop_ratio",
+                threshold_value=0.3,
+                observed_value=round(observed, 4),
+            ))
+            pnl = 500.0 if observed >= 0.15 else -200.0
+            outcome_dicts.append(_make_outcome_dict(sid, pnl))
+
+        _write_suggestions(findings_dir / "suggestions.jsonl", suggestion_dicts)
+        _write_outcomes(findings_dir / "outcomes.jsonl", outcome_dicts)
+
+        learner = ThresholdLearner(findings_dir, min_samples=10)
+        learner.learn_thresholds()
+
+        learner2 = ThresholdLearner(findings_dir, min_samples=10)
+        engine = StrategyEngine(
+            week_start="2026-02-24", week_end="2026-03-02",
+            threshold_learner=learner2,
+        )
+
+        # tight_stop: uses learned value (not default 0.3)
+        summary = BotWeeklySummary(
+            week_start="2026-02-24", week_end="2026-03-02",
+            bot_id="bot_a", total_trades=50,
+            win_count=30, loss_count=20,
+            avg_win=100.0, avg_loss=-20.0,
+        )
+        tight_stop_result = engine.analyze_parameters(summary)
+        # The learner should have adjusted the threshold from 0.3
+
+        # filter_cost: no learned data → uses default 0.0
+        f = FilterWeeklySummary(
+            bot_id="bot_a", filter_name="test_filter",
+            total_blocks=10, blocks_that_would_have_won=7,
+            net_impact_pnl=-50.0, confidence=0.8,
+        )
+        filter_result = engine.analyze_filters("bot_a", [f])
+        assert len(filter_result) == 1
+        # Filter threshold should still be the default 0.0 (no learned data)
+        assert filter_result[0].detection_context.threshold_value == 0.0

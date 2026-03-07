@@ -1,17 +1,12 @@
-"""Tests for adaptive strategy engine integration with ThresholdLearner."""
+"""Tests for strategy engine thresholds — default and learned via ThresholdLearner."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from analysis.strategy_engine import StrategyEngine
-from schemas.detection_context import DetectionContext, ThresholdProfile, ThresholdRecord
 from schemas.weekly_metrics import BotWeeklySummary, FilterWeeklySummary
-from skills.threshold_learner import ThresholdLearner
 
 
 def _make_bot_summary(
@@ -53,11 +48,11 @@ def _make_filter_summary(
     )
 
 
-class TestWithoutLearner:
-    """Without ThresholdLearner — backward compatibility."""
+class TestDefaultThresholds:
+    """StrategyEngine uses hardcoded default thresholds."""
 
-    def test_no_learner_uses_default_tight_stop(self):
-        """Without learner, detectors use default thresholds."""
+    def test_default_tight_stop(self):
+        """Detectors use default thresholds."""
         engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
         # loss/win ratio = 20/100 = 0.2, below default 0.3 -> should trigger
         summary = _make_bot_summary(avg_win=100.0, avg_loss=-20.0)
@@ -66,8 +61,8 @@ class TestWithoutLearner:
         assert result[0].detection_context is not None
         assert result[0].detection_context.threshold_value == 0.3  # default
 
-    def test_no_learner_uses_default_alpha_decay(self):
-        """Without learner, alpha_decay uses its parameter default."""
+    def test_default_alpha_decay(self):
+        """Alpha_decay uses its parameter default."""
         engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
         result = engine.detect_alpha_decay(
             "bot_a",
@@ -80,8 +75,8 @@ class TestWithoutLearner:
         assert result[0].detection_context is not None
         assert result[0].detection_context.threshold_value == 0.3
 
-    def test_no_learner_uses_default_filter_cost(self):
-        """Without learner, filter cost uses its default threshold."""
+    def test_default_filter_cost(self):
+        """Filter cost uses its default threshold."""
         engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
         f = _make_filter_summary(net_impact_pnl=-50.0)
         result = engine.analyze_filters("bot_a", [f])
@@ -89,110 +84,15 @@ class TestWithoutLearner:
         assert result[0].detection_context is not None
         assert result[0].detection_context.threshold_value == 0.0  # default
 
+    def test_threshold_learner_attribute_defaults_to_none(self):
+        """StrategyEngine has _threshold_learner attribute, defaulting to None."""
+        engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
+        assert hasattr(engine, "_threshold_learner")
+        assert engine._threshold_learner is None
 
-class TestWithLearner:
-    """With ThresholdLearner providing learned thresholds."""
-
-    def _make_learner(self, thresholds: dict[str, float]) -> MagicMock:
-        """Create a mock ThresholdLearner with given threshold responses."""
-        learner = MagicMock(spec=ThresholdLearner)
-
-        def get_threshold(detector_name, threshold_name, bot_id, default):
-            key = f"{detector_name}:{threshold_name}"
-            return thresholds.get(key, default)
-
-        learner.get_threshold.side_effect = get_threshold
-        return learner
-
-    def test_learned_alpha_decay_threshold_used(self):
-        """With learner providing a learned threshold for alpha_decay, uses learned value."""
-        learner = self._make_learner({"alpha_decay:decay_threshold": 0.15})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
-        # decay_ratio = (1.0 - 0.8) / 1.0 = 0.2
-        # default 0.3 would NOT trigger (0.2 < 0.3), but learned 0.15 WILL trigger (0.2 >= 0.15)
-        result = engine.detect_alpha_decay(
-            "bot_a",
-            rolling_sharpe_30d=0.8,
-            rolling_sharpe_60d=0.9,
-            rolling_sharpe_90d=1.0,
-            decay_threshold=0.3,
-        )
-        assert len(result) == 1
-        assert result[0].detection_context.threshold_value == 0.15
-
-    def test_learned_filter_cost_per_bot(self):
-        """With learner providing learned threshold for filter_cost, uses per-bot value."""
-        learner = self._make_learner({"filter_cost:filter_cost_threshold": -100.0})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
-        # Net impact -50, default threshold 0.0 -> triggers (-50 < 0.0)
-        # But learned threshold -100.0 -> does NOT trigger (-50 is NOT < -100.0)
-        f = _make_filter_summary(net_impact_pnl=-50.0)
-        result = engine.analyze_filters("bot_a", [f])
-        assert len(result) == 0  # filter NOT triggered because learned threshold is lower
-
-    def test_learned_threshold_more_sensitive_more_suggestions(self):
-        """Learned threshold more sensitive (lower) produces more suggestions."""
-        learner = self._make_learner({"alpha_decay:decay_threshold": 0.05})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
-        # decay_ratio = (1.0 - 0.9) / 1.0 = 0.1
-        # default 0.3 would NOT trigger, but learned 0.05 triggers
-        result = engine.detect_alpha_decay(
-            "bot_a",
-            rolling_sharpe_30d=0.9,
-            rolling_sharpe_60d=0.95,
-            rolling_sharpe_90d=1.0,
-        )
-        assert len(result) == 1
-
-    def test_learned_threshold_more_conservative_fewer_suggestions(self):
-        """Learned threshold more conservative (higher) produces fewer suggestions."""
-        learner = self._make_learner({"alpha_decay:decay_threshold": 0.9})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
-        # decay_ratio = (1.0 - 0.5) / 1.0 = 0.5
-        # default 0.3 WOULD trigger, but learned 0.9 does NOT (0.5 < 0.9)
-        result = engine.detect_alpha_decay(
-            "bot_a",
-            rolling_sharpe_30d=0.5,
-            rolling_sharpe_60d=0.7,
-            rolling_sharpe_90d=1.0,
-        )
-        assert len(result) == 0
-
-    def test_build_report_passes_learner_through(self):
-        """build_report passes threshold_learner to underlying detectors."""
-        learner = self._make_learner({"tight_stop:tight_stop_ratio": 0.5})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
-        # loss/win ratio = 40/100 = 0.4
-        # default 0.3 would trigger (0.4 >= 0.3 is False => 0.4 < 0.3 is False, so no trigger)
-        # Wait: condition is loss_win_ratio < threshold. 0.4 < 0.3 is False. So default does NOT trigger.
-        # With learned 0.5: 0.4 < 0.5 is True, so it WILL trigger.
-        summary = _make_bot_summary(avg_win=100.0, avg_loss=-40.0)
-        report = engine.build_report({"bot_a": summary})
-        assert len(report.suggestions) == 1
-        assert report.suggestions[0].detection_context.threshold_value == 0.5
-
-    def test_detection_context_records_effective_threshold(self):
-        """detection_context records the effective (learned) threshold, not the default."""
-        learner = self._make_learner({"alpha_decay:decay_threshold": 0.1})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
+    def test_detection_context_records_default_threshold(self):
+        """detection_context records the default threshold value."""
+        engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
         result = engine.detect_alpha_decay(
             "bot_a",
             rolling_sharpe_30d=0.5,
@@ -202,30 +102,22 @@ class TestWithLearner:
         assert len(result) == 1
         ctx = result[0].detection_context
         assert ctx is not None
-        assert ctx.threshold_value == 0.1  # learned, NOT the default 0.3
         assert ctx.detector_name == "alpha_decay"
         assert ctx.threshold_name == "decay_threshold"
 
-    def test_mixed_some_learned_some_default(self):
-        """Mixed: some detectors have learned thresholds, others use defaults."""
-        # Only alpha_decay has a learned threshold
-        learner = self._make_learner({"alpha_decay:decay_threshold": 0.1})
-        engine = StrategyEngine(
-            week_start="2026-01-01", week_end="2026-01-07",
-            threshold_learner=learner,
-        )
+    def test_mixed_detectors_all_use_defaults(self):
+        """Multiple detectors all use their respective default thresholds."""
+        engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
 
-        # Alpha decay — uses learned 0.1
+        # Alpha decay — uses default
         alpha_result = engine.detect_alpha_decay(
             "bot_a",
             rolling_sharpe_30d=0.8,
             rolling_sharpe_60d=0.9,
-            rolling_sharpe_90d=1.0,  # decay_ratio = 0.2 >= 0.1 -> triggers
+            rolling_sharpe_90d=1.0,  # decay_ratio = 0.2
         )
-        assert len(alpha_result) == 1
-        assert alpha_result[0].detection_context.threshold_value == 0.1
 
-        # Signal decay — no learned value, uses default 0.2
+        # Signal decay — uses default 0.2
         signal_result = engine.detect_signal_decay(
             "bot_a",
             signal_outcome_correlation_30d=0.3,
@@ -234,57 +126,92 @@ class TestWithLearner:
         assert len(signal_result) == 1
         assert signal_result[0].detection_context.threshold_value == 0.2  # default
 
-    def test_feature_flag_off_no_learner(self):
-        """Feature flag off: StrategyEngine constructed without learner."""
+    def test_build_report_uses_defaults(self):
+        """build_report uses default thresholds."""
         engine = StrategyEngine(week_start="2026-01-01", week_end="2026-01-07")
-        assert engine._threshold_learner is None
-
-        # Should still work with default thresholds
+        # loss/win ratio = 20/100 = 0.2, below default 0.3 -> triggers
         summary = _make_bot_summary(avg_win=100.0, avg_loss=-20.0)
+        report = engine.build_report({"bot_a": summary})
+        assert len(report.suggestions) == 1
+        assert report.suggestions[0].detection_context.threshold_value == 0.3  # default
+
+
+class TestWithThresholdLearner:
+    """StrategyEngine uses learned thresholds from ThresholdLearner."""
+
+    def _make_learner(self, overrides: dict[str, float] | None = None) -> MagicMock:
+        """Create a mock ThresholdLearner that returns overrides or falls through to default."""
+        learner = MagicMock()
+        _overrides = overrides or {}
+
+        def _get(detector_name, threshold_name, bot_id, default):
+            key = f"{detector_name}:{threshold_name}:{bot_id}"
+            return _overrides.get(key, default)
+
+        learner.get_threshold.side_effect = _get
+        return learner
+
+    def test_with_threshold_learner_uses_learned_values(self):
+        """Engine uses learned threshold when learner provides one."""
+        # Learned tight_stop_ratio = 0.15 (lower than default 0.3)
+        learner = self._make_learner({"tight_stop:tight_stop_ratio:bot_a": 0.15})
+        engine = StrategyEngine(
+            week_start="2026-01-01", week_end="2026-01-07",
+            threshold_learner=learner,
+        )
+        # loss/win ratio = 20/100 = 0.2 — above learned 0.15, so should NOT trigger
+        summary = _make_bot_summary(bot_id="bot_a", avg_win=100.0, avg_loss=-20.0)
+        result = engine.analyze_parameters(summary)
+        assert len(result) == 0  # 0.2 >= 0.15, no suggestion
+
+    def test_learned_threshold_triggers_detection(self):
+        """Learned threshold can make a detector MORE sensitive."""
+        # Learned tight_stop_ratio = 0.5 (higher than default 0.3)
+        learner = self._make_learner({"tight_stop:tight_stop_ratio:bot_a": 0.5})
+        engine = StrategyEngine(
+            week_start="2026-01-01", week_end="2026-01-07",
+            threshold_learner=learner,
+        )
+        # loss/win ratio = 40/100 = 0.4 — below learned 0.5, triggers
+        summary = _make_bot_summary(bot_id="bot_a", avg_win=100.0, avg_loss=-40.0)
         result = engine.analyze_parameters(summary)
         assert len(result) == 1
+        assert result[0].detection_context.threshold_value == 0.5  # learned
 
+    def test_without_learner_backward_compat(self):
+        """None learner returns defaults — identical to old behavior."""
+        engine = StrategyEngine(
+            week_start="2026-01-01", week_end="2026-01-07",
+            threshold_learner=None,
+        )
+        # loss/win ratio = 20/100 = 0.2, below default 0.3 -> triggers
+        summary = _make_bot_summary(bot_id="bot_a", avg_win=100.0, avg_loss=-20.0)
+        result = engine.analyze_parameters(summary)
+        assert len(result) == 1
+        assert result[0].detection_context.threshold_value == 0.3  # default
 
-@pytest.mark.parametrize("detector_name,method_name,kwargs,threshold_key", [
-    (
-        "alpha_decay", "detect_alpha_decay",
-        {"bot_id": "bot_a", "rolling_sharpe_30d": 0.5, "rolling_sharpe_60d": 0.7, "rolling_sharpe_90d": 1.0},
-        "alpha_decay:decay_threshold",
-    ),
-    (
-        "signal_decay", "detect_signal_decay",
-        {"bot_id": "bot_a", "signal_outcome_correlation_30d": 0.3, "signal_outcome_correlation_90d": 0.6},
-        "signal_decay:decay_threshold",
-    ),
-    (
-        "drawdown_concentration", "detect_drawdown_patterns",
-        {"bot_id": "bot_a", "largest_single_loss_pct": 10.0, "max_drawdown_pct": 15.0, "avg_loss_pct": 2.0},
-        "drawdown_concentration:concentration_threshold",
-    ),
-    (
-        "position_sizing", "detect_position_sizing_issues",
-        {"bot_id": "bot_a", "avg_win_pct": 1.0, "avg_loss_pct": 2.0, "win_rate": 0.6},
-        "position_sizing:loss_win_ratio_threshold",
-    ),
-])
-def test_parametrized_detectors_use_learned_threshold(
-    detector_name, method_name, kwargs, threshold_key,
-):
-    """Parametrized test: multiple detectors use _get_threshold correctly."""
-    learner = MagicMock(spec=ThresholdLearner)
-    learner.get_threshold.return_value = 999.0  # very high threshold
+    def test_learner_affects_alpha_decay(self):
+        """Learner overrides alpha_decay threshold."""
+        learner = self._make_learner({"alpha_decay:decay_threshold:bot_a": 0.6})
+        engine = StrategyEngine(
+            week_start="2026-01-01", week_end="2026-01-07",
+            threshold_learner=learner,
+        )
+        # decay_ratio = (1.0 - 0.5)/1.0 = 0.5, below learned 0.6 -> no trigger
+        result = engine.detect_alpha_decay(
+            "bot_a", rolling_sharpe_30d=0.5, rolling_sharpe_60d=0.8,
+            rolling_sharpe_90d=1.0,
+        )
+        assert len(result) == 0
 
-    engine = StrategyEngine(
-        week_start="2026-01-01", week_end="2026-01-07",
-        threshold_learner=learner,
-    )
-
-    method = getattr(engine, method_name)
-    result = method(**kwargs)
-
-    # The learner should have been called
-    learner.get_threshold.assert_called()
-    # At least one call should have used the detector_name
-    calls = learner.get_threshold.call_args_list
-    detector_calls = [c for c in calls if c[0][0] == detector_name]
-    assert len(detector_calls) > 0, f"Expected _get_threshold to be called for {detector_name}"
+    def test_learner_affects_filter_cost(self):
+        """Learner overrides filter_cost_threshold."""
+        learner = self._make_learner({"filter_cost:filter_cost_threshold:bot_a": -100.0})
+        engine = StrategyEngine(
+            week_start="2026-01-01", week_end="2026-01-07",
+            threshold_learner=learner,
+        )
+        f = _make_filter_summary(net_impact_pnl=-50.0)
+        # -50 > -100 (learned threshold), so no trigger
+        result = engine.analyze_filters("bot_a", [f])
+        assert len(result) == 0

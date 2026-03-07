@@ -18,7 +18,8 @@ from schemas.wfo_results import SimulationMetrics
 class ParameterType(str, Enum):
     YAML_FIELD = "YAML_FIELD"
     PYTHON_CONSTANT = "PYTHON_CONSTANT"
-    DATACLASS_FIELD = "DATACLASS_FIELD"
+    # FileChangeGenerator only supports YAML_FIELD currently.
+    # PYTHON_CONSTANT is used in bot config definitions but not yet auto-modifiable.
 
 
 class ParameterDefinition(BaseModel):

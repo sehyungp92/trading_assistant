@@ -182,14 +182,19 @@ class AutonomousPipeline:
         suggestion: dict,
         param: ParameterDefinition,
     ) -> Any | None:
-        """Extract proposed value from suggestion text.
+        """Extract proposed value from suggestion.
 
-        Regex patterns:
-        - "increase X to Y" / "decrease X to Y"
-        - "set X to Y"
-        - "change X from A to B"
-        Fallback: valid_range midpoint
+        Priority:
+        1. Structured field: suggestion["proposed_value"] (from AgentSuggestion schema)
+        2. Regex extraction from free text (fallback)
+        3. valid_range midpoint (last resort)
         """
+        # 1. Try structured field first (from AgentSuggestion.proposed_value)
+        structured_value = suggestion.get("proposed_value")
+        if structured_value is not None:
+            return self._cast_value(structured_value, param.value_type)
+
+        # 2. Regex fallback on free text
         text = f"{suggestion.get('title', '')} {suggestion.get('description', '')}"
         param_variants = [
             param.param_name,

@@ -27,30 +27,6 @@ def _yaml_param(yaml_key: str = "kmp.quality_min") -> ParameterDefinition:
     )
 
 
-def _python_param(python_path: str = "BASE_RISK_PCT", value_type: str = "float") -> ParameterDefinition:
-    return ParameterDefinition(
-        param_name="BASE_RISK_PCT",
-        bot_id="bot1",
-        param_type=ParameterType.PYTHON_CONSTANT,
-        file_path="config/risk.py",
-        python_path=python_path,
-        current_value=0.02,
-        value_type=value_type,
-    )
-
-
-def _dataclass_param() -> ParameterDefinition:
-    return ParameterDefinition(
-        param_name="threshold",
-        bot_id="bot1",
-        param_type=ParameterType.DATACLASS_FIELD,
-        file_path="config.py",
-        python_path="Config.threshold",
-        current_value=0.5,
-        value_type="float",
-    )
-
-
 class TestFileChangeGenerator:
     def test_yaml_simple_key_change(self, gen: FileChangeGenerator, tmp_path: Path):
         (tmp_path / "config.yaml").write_text(
@@ -76,53 +52,20 @@ class TestFileChangeGenerator:
         assert "# inline" in change.new_content
         assert "quality_min: 0.7" in change.new_content
 
-    def test_python_float_change(self, gen: FileChangeGenerator, tmp_path: Path):
-        (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "risk.py").write_text("BASE_RISK_PCT = 0.02\n")
-        change = gen.generate_change(_python_param(), 0.03, tmp_path)
-        assert "BASE_RISK_PCT = 0.03" in change.new_content
-
-    def test_python_int_change(self, gen: FileChangeGenerator, tmp_path: Path):
-        (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "risk.py").write_text("MAX_POS = 5\n")
+    def test_unsupported_param_type_raises(self, gen: FileChangeGenerator, tmp_path: Path):
+        """Non-YAML param types are not supported."""
+        (tmp_path / "config.yaml").write_text("x: 1\n")
         param = ParameterDefinition(
-            param_name="MAX_POS", bot_id="bot1",
-            param_type=ParameterType.PYTHON_CONSTANT,
-            file_path="config/risk.py",
-            python_path="MAX_POS", current_value=5, value_type="int",
+            param_name="x", bot_id="bot1",
+            param_type=ParameterType.YAML_FIELD,
+            file_path="config.yaml",
+            yaml_key="x",
+            current_value=1,
+            value_type="int",
         )
-        change = gen.generate_change(param, 8, tmp_path)
-        assert "MAX_POS = 8" in change.new_content
-
-    def test_python_bool_change(self, gen: FileChangeGenerator, tmp_path: Path):
-        (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "risk.py").write_text("ENABLED = True\n")
-        param = ParameterDefinition(
-            param_name="ENABLED", bot_id="bot1",
-            param_type=ParameterType.PYTHON_CONSTANT,
-            file_path="config/risk.py",
-            python_path="ENABLED", current_value=True, value_type="bool",
-        )
-        change = gen.generate_change(param, False, tmp_path)
-        assert "ENABLED = False" in change.new_content
-
-    def test_python_with_type_annotation(self, gen: FileChangeGenerator, tmp_path: Path):
-        (tmp_path / "config").mkdir()
-        (tmp_path / "config" / "risk.py").write_text("BASE_RISK_PCT: float = 0.02\n")
-        change = gen.generate_change(_python_param(), 0.03, tmp_path)
-        assert "BASE_RISK_PCT: float = 0.03" in change.new_content
-
-    def test_dataclass_field(self, gen: FileChangeGenerator, tmp_path: Path):
-        (tmp_path / "config.py").write_text(
-            "from dataclasses import dataclass\n\n"
-            "@dataclass\n"
-            "class Config:\n"
-            "    threshold: float = 0.5\n"
-            "    name: str = 'default'\n"
-        )
-        change = gen.generate_change(_dataclass_param(), 0.8, tmp_path)
-        assert "threshold: float = 0.8" in change.new_content
-        assert "name: str = 'default'" in change.new_content
+        # This should work (YAML_FIELD)
+        change = gen.generate_change(param, 2, tmp_path)
+        assert "x: 2" in change.new_content
 
     def test_file_not_found_raises(self, gen: FileChangeGenerator, tmp_path: Path):
         with pytest.raises(FileNotFoundError):

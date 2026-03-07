@@ -303,34 +303,16 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
         _dm_pr_builder = pr_builder if config.autonomous_enabled else None
         _dm_config_registry = config_registry if config.autonomous_enabled else None
+        _dm_file_change_gen = file_change_gen if config.autonomous_enabled else None
         deployment_monitor = DeploymentMonitor(
             findings_dir=db_path / "memory" / "findings",
             curated_dir=db_path / "data" / "curated",
             pr_builder=_dm_pr_builder,
             config_registry=_dm_config_registry,
             event_stream=event_stream,
+            file_change_generator=_dm_file_change_gen,
         )
         logger.info("Deployment monitoring enabled")
-
-    # Experiment manager (always available, used by handlers when present)
-    experiment_manager = None
-    try:
-        from skills.experiment_manager import ExperimentManager
-
-        experiment_manager = ExperimentManager(
-            findings_dir=db_path / "memory" / "findings",
-        )
-    except Exception:
-        logger.warning("ExperimentManager initialization failed — experiment lifecycle disabled")
-
-    # Experiment config generator (feature-flagged via ab_testing_enabled)
-    experiment_config_generator = None
-    if config.ab_testing_enabled and experiment_manager is not None:
-        from skills.experiment_config_generator import ExperimentConfigGenerator
-
-        _ab_config_registry = config_registry if config.autonomous_enabled else None
-        experiment_config_generator = ExperimentConfigGenerator(config_registry=_ab_config_registry)
-        logger.info("A/B testing enabled — ExperimentConfigGenerator created")
 
     handlers = Handlers(
         agent_runner=agent_runner,
@@ -348,7 +330,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         brain=brain,
         suggestion_tracker=suggestion_tracker,
         autonomous_pipeline=autonomous_pipeline,
-        experiment_manager=experiment_manager,
         deployment_monitor=deployment_monitor,
         threshold_learner=threshold_learner,
     )
@@ -376,7 +357,34 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         callback_router = TelegramCallbackRouter()
 
         async def _on_approve_callback(request_id: str) -> str:
-            return await approval_handler.handle_approve(request_id)
+            response = await approval_handler.handle_approve(request_id)
+            # Auto-create deployment record if PR was created and monitoring is enabled
+            if deployment_monitor and "PR created:" in response:
+                req = approval_tracker.get_by_id(request_id)
+                if req and req.pr_url:
+                    try:
+                        import hashlib
+                        dep_id = hashlib.sha256(
+                            f"dep-{request_id}".encode(),
+                        ).hexdigest()[:16]
+                        deployment_monitor.create_deployment(
+                            deployment_id=dep_id,
+                            approval_request_id=request_id,
+                            pr_url=req.pr_url,
+                            bot_id=req.bot_id,
+                            param_changes=req.param_changes,
+                            pr_number=0,
+                        )
+                        logger.info(
+                            "Created deployment record %s for PR %s",
+                            dep_id, req.pr_url,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to create deployment record for %s",
+                            request_id,
+                        )
+            return response
 
         async def _on_reject_callback(request_id: str) -> str:
             return await approval_handler.handle_reject(request_id)
@@ -406,34 +414,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             telegram_adapter.set_callback_router(callback_router)
 
         logger.info("Telegram approval callbacks registered")
-
-    # Register Telegram experiment callbacks when A/B testing is enabled
-    if config.ab_testing_enabled and experiment_manager is not None:
-        from comms.telegram_handlers import TelegramCallbackRouter as _TCR
-
-        # Reuse existing callback_router if available, or create a new one
-        if approval_handler is not None:
-            # callback_router already exists from approval block above
-            pass
-        else:
-            callback_router = _TCR()
-
-        async def _handle_start_experiment(experiment_id: str, context=None) -> str:
-            experiment_manager.activate_experiment(experiment_id)
-            return f"Experiment {experiment_id} started"
-
-        async def _handle_cancel_experiment(experiment_id: str, context=None) -> str:
-            experiment_manager.cancel_experiment(experiment_id)
-            return f"Experiment {experiment_id} cancelled"
-
-        callback_router.register("start_experiment_", _handle_start_experiment)
-        callback_router.register("cancel_experiment_", _handle_cancel_experiment)
-
-        # Connect callback router to Telegram adapter if not already connected
-        if telegram_adapter is not None and (approval_handler is None):
-            telegram_adapter.set_callback_router(callback_router)
-
-        logger.info("Telegram experiment callbacks registered")
 
     # Relay polling — only active when RELAY_URL is configured
     vps_receiver: VPSReceiver | None = None
@@ -638,31 +618,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # AuditTrailConsumer — persists SSE events to JSONL
     audit_consumer = AuditTrailConsumer(log_dir=db_path / "logs")
 
-    # Experiment check function — periodically checks if active experiments should auto-conclude
-    async def _check_experiments() -> None:
-        """Check active experiments for auto-conclusion conditions."""
-        if experiment_manager is None:
-            return
-        try:
-            active = experiment_manager.get_active()
-            for exp in active:
-                if experiment_manager.check_auto_conclusion(exp.experiment_id):
-                    result = experiment_manager.analyze_experiment(exp.experiment_id)
-                    experiment_manager.conclude_experiment(exp.experiment_id, result)
-                    logger.info(
-                        "Auto-concluded experiment %s: %s",
-                        exp.experiment_id,
-                        result.recommendation,
-                    )
-                    if event_stream:
-                        event_stream.broadcast("experiment_concluded", {
-                            "experiment_id": exp.experiment_id,
-                            "recommendation": result.recommendation,
-                            "winner": result.winner,
-                        })
-        except Exception:
-            logger.exception("Experiment check failed")
-
     # Build scheduler jobs
     scheduler_config = SchedulerConfig()
     scheduler_jobs = create_scheduler_jobs(
@@ -700,7 +655,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         pr_review_check_fn=_check_pr_reviews if approval_tracker else None,
         deployment_check_fn=handlers._check_deployments if deployment_monitor else None,
         threshold_learning_fn=threshold_learner.learn_thresholds if threshold_learner else None,
-        experiment_check_fn=_check_experiments if (config.ab_testing_enabled and experiment_manager) else None,
     )
 
     @asynccontextmanager
@@ -782,8 +736,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     app.state.approval_tracker = approval_tracker
     app.state.approval_handler = approval_handler
     app.state.deployment_monitor = deployment_monitor
-    app.state.experiment_manager = experiment_manager
-    app.state.experiment_config_generator = experiment_config_generator
     app.state.threshold_learner = threshold_learner
 
     @app.get("/health")

@@ -29,7 +29,6 @@ from schemas.weekly_metrics import (
     RegimePerformanceTrend,
     StrategyWeeklySummary,
 )
-from skills.threshold_learner import ThresholdLearner
 
 
 class StrategyEngine:
@@ -43,7 +42,7 @@ class StrategyEngine:
         filter_cost_threshold: float = 0.0,
         regime_loss_threshold: float = 0.0,
         regime_min_weeks: int = 3,
-        threshold_learner: ThresholdLearner | None = None,
+        threshold_learner: object | None = None,
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -54,7 +53,11 @@ class StrategyEngine:
         self._threshold_learner = threshold_learner
 
     def _get_threshold(
-        self, detector_name: str, threshold_name: str, bot_id: str, default: float,
+        self,
+        detector_name: str,
+        threshold_name: str,
+        bot_id: str,
+        default: float,
     ) -> float:
         """Return learned threshold if available, else default."""
         if self._threshold_learner is None:
@@ -72,7 +75,10 @@ class StrategyEngine:
         # Tight stop detection: avg_loss is small relative to avg_win
         if summary.avg_win > 0 and summary.avg_loss != 0:
             loss_win_ratio = abs(summary.avg_loss) / summary.avg_win
-            threshold = self._get_threshold("tight_stop", "tight_stop_ratio", summary.bot_id, self.tight_stop_ratio)
+            threshold = self._get_threshold(
+                "tight_stop", "tight_stop_ratio", summary.bot_id,
+                self.tight_stop_ratio,
+            )
             if loss_win_ratio < threshold:
                 suggestions.append(
                     StrategySuggestion(
@@ -107,7 +113,10 @@ class StrategyEngine:
         """Tier 2: Detect filters that cost more than they save."""
         suggestions: list[StrategySuggestion] = []
 
-        threshold = self._get_threshold("filter_cost", "filter_cost_threshold", bot_id, self.filter_cost_threshold)
+        threshold = self._get_threshold(
+            "filter_cost", "filter_cost_threshold", bot_id,
+            self.filter_cost_threshold,
+        )
         for f in filter_summaries:
             if f.net_impact_pnl < threshold:
                 suggestions.append(
@@ -170,10 +179,12 @@ class StrategyEngine:
         suggestions: list[StrategySuggestion] = []
 
         effective_min_weeks = int(self._get_threshold(
-            "regime_loss", "regime_min_weeks", bot_id, float(self.regime_min_weeks),
+            "regime_loss", "regime_min_weeks", bot_id,
+            float(self.regime_min_weeks),
         ))
         effective_loss_threshold = self._get_threshold(
-            "regime_loss", "regime_loss_threshold", bot_id, self.regime_loss_threshold,
+            "regime_loss", "regime_loss_threshold", bot_id,
+            self.regime_loss_threshold,
         )
 
         for trend in regime_trends:
@@ -235,7 +246,9 @@ class StrategyEngine:
             return []
         # Check if 30d Sharpe is significantly below 90d Sharpe
         decay_ratio = (rolling_sharpe_90d - rolling_sharpe_30d) / rolling_sharpe_90d
-        effective_threshold = self._get_threshold("alpha_decay", "decay_threshold", bot_id, decay_threshold)
+        effective_threshold = self._get_threshold(
+            "alpha_decay", "decay_threshold", bot_id, decay_threshold,
+        )
         if decay_ratio < effective_threshold:
             return []
         return [StrategySuggestion(
@@ -268,7 +281,9 @@ class StrategyEngine:
     ) -> list[StrategySuggestion]:
         """Tier 4: Detect declining signal-to-outcome correlation."""
         drop = signal_outcome_correlation_90d - signal_outcome_correlation_30d
-        effective_threshold = self._get_threshold("signal_decay", "decay_threshold", bot_id, decay_threshold)
+        effective_threshold = self._get_threshold(
+            "signal_decay", "decay_threshold", bot_id, decay_threshold,
+        )
         if drop < effective_threshold:
             return []
         return [StrategySuggestion(
@@ -301,8 +316,12 @@ class StrategyEngine:
         premature_threshold: float = 0.4,
     ) -> list[StrategySuggestion]:
         """Tier 3: Detect systematic premature exits."""
-        effective_efficiency = self._get_threshold("exit_timing", "efficiency_threshold", bot_id, efficiency_threshold)
-        effective_premature = self._get_threshold("exit_timing", "premature_threshold", bot_id, premature_threshold)
+        effective_efficiency = self._get_threshold(
+            "exit_timing", "efficiency_threshold", bot_id, efficiency_threshold,
+        )
+        effective_premature = self._get_threshold(
+            "exit_timing", "premature_threshold", bot_id, premature_threshold,
+        )
         if avg_exit_efficiency >= effective_efficiency and premature_exit_pct <= effective_premature:
             return []
         suggestions: list[StrategySuggestion] = []
@@ -339,7 +358,9 @@ class StrategyEngine:
         suggestions: list[StrategySuggestion] = []
         for corr in correlations:
             pair_id = f"{corr.bot_a}+{corr.bot_b}"
-            effective_threshold = self._get_threshold("correlation", "threshold", pair_id, threshold)
+            effective_threshold = self._get_threshold(
+                "correlation", "threshold", pair_id, threshold,
+            )
             if corr.rolling_30d_correlation >= effective_threshold:
                 suggestions.append(StrategySuggestion(
                     tier=SuggestionTier.STRATEGY_VARIANT,
@@ -372,7 +393,9 @@ class StrategyEngine:
         loss_threshold: float = 0.35,
     ) -> list[StrategySuggestion]:
         """Tier 2: Detect hours with consistently poor performance."""
-        effective_threshold = self._get_threshold("time_of_day", "loss_threshold", bot_id, loss_threshold)
+        effective_threshold = self._get_threshold(
+            "time_of_day", "loss_threshold", bot_id, loss_threshold,
+        )
         suggestions: list[StrategySuggestion] = []
         for bucket in hourly_buckets:
             if bucket.trade_count < min_trades:
@@ -411,7 +434,10 @@ class StrategyEngine:
         if avg_loss_pct <= 0:
             return []
         concentration = largest_single_loss_pct / avg_loss_pct
-        effective_threshold = self._get_threshold("drawdown_concentration", "concentration_threshold", bot_id, concentration_threshold)
+        effective_threshold = self._get_threshold(
+            "drawdown_concentration", "concentration_threshold", bot_id,
+            concentration_threshold,
+        )
         if concentration < effective_threshold:
             return []
         return [StrategySuggestion(
@@ -448,7 +474,10 @@ class StrategyEngine:
         if avg_win_pct <= 0 or win_rate < 0.5:
             return []
         loss_win_ratio = avg_loss_pct / avg_win_pct
-        effective_threshold = self._get_threshold("position_sizing", "loss_win_ratio_threshold", bot_id, loss_win_ratio_threshold)
+        effective_threshold = self._get_threshold(
+            "position_sizing", "loss_win_ratio_threshold", bot_id,
+            loss_win_ratio_threshold,
+        )
         if loss_win_ratio < effective_threshold:
             return []
         return [StrategySuggestion(
@@ -482,8 +511,14 @@ class StrategyEngine:
         min_trades: int = 5,
     ) -> list[StrategySuggestion]:
         """Tier 4: Detect degraded signal components from signal_health data."""
-        effective_stability = self._get_threshold("component_signal_decay", "stability_threshold", bot_id, stability_threshold)
-        effective_correlation = self._get_threshold("component_signal_decay", "correlation_threshold", bot_id, correlation_threshold)
+        effective_stability = self._get_threshold(
+            "component_signal_decay", "stability_threshold", bot_id,
+            stability_threshold,
+        )
+        effective_correlation = self._get_threshold(
+            "component_signal_decay", "correlation_threshold", bot_id,
+            correlation_threshold,
+        )
         components = signal_health_data.get("components", [])
         degraded: list[str] = []
 
@@ -527,73 +562,6 @@ class StrategyEngine:
             ),
         )]
 
-    def detect_microstructure_issues(
-        self,
-        bot_id: str,
-        orderbook_stats: dict,
-        spread_threshold_bps: float = 20.0,
-        imbalance_threshold: float = 0.5,
-        min_events: int = 10,
-    ) -> list[StrategySuggestion]:
-        """Tier 2: Detect high spread or adverse order book imbalance patterns."""
-        suggestions: list[StrategySuggestion] = []
-
-        event_count = orderbook_stats.get("event_count", 0)
-        if event_count < min_events:
-            return suggestions
-
-        avg_spread = orderbook_stats.get("avg_spread_bps", 0.0)
-        max_spread = orderbook_stats.get("max_spread_bps", 0.0)
-        avg_imbalance = orderbook_stats.get("avg_imbalance_ratio", 1.0)
-
-        effective_spread = self._get_threshold("microstructure", "spread_threshold_bps", bot_id, spread_threshold_bps)
-        effective_imbalance = self._get_threshold("microstructure", "imbalance_threshold", bot_id, imbalance_threshold)
-
-        if avg_spread > effective_spread:
-            suggestions.append(StrategySuggestion(
-                tier=SuggestionTier.FILTER,
-                bot_id=bot_id,
-                title=f"High average spread — {bot_id}",
-                description=(
-                    f"Average spread is {avg_spread:.1f} bps (max: {max_spread:.1f} bps) "
-                    f"across {event_count} observations. High spreads erode entry/exit quality. "
-                    f"Consider adding a spread filter or timing entries to lower-spread periods."
-                ),
-                evidence_days=7,
-                confidence=0.6,
-                detection_context=DetectionContext(
-                    detector_name="microstructure",
-                    bot_id=bot_id,
-                    threshold_name="spread_threshold_bps",
-                    threshold_value=effective_spread,
-                    observed_value=avg_spread,
-                ),
-            ))
-
-        if avg_imbalance < effective_imbalance:
-            suggestions.append(StrategySuggestion(
-                tier=SuggestionTier.FILTER,
-                bot_id=bot_id,
-                title=f"Adverse order book imbalance — {bot_id}",
-                description=(
-                    f"Average bid/ask imbalance ratio is {avg_imbalance:.2f} "
-                    f"(< {effective_imbalance} indicates ask-heavy books). "
-                    f"Entries may face adverse selection. "
-                    f"Consider checking order book depth before entry."
-                ),
-                evidence_days=7,
-                confidence=0.5,
-                detection_context=DetectionContext(
-                    detector_name="microstructure",
-                    bot_id=bot_id,
-                    threshold_name="imbalance_threshold",
-                    threshold_value=effective_imbalance,
-                    observed_value=avg_imbalance,
-                ),
-            ))
-
-        return suggestions
-
     def detect_filter_interactions(
         self,
         bot_id: str,
@@ -605,7 +573,9 @@ class StrategyEngine:
             bot_id: Bot identifier.
             filter_interactions: List of FilterPairInteraction dicts or objects.
         """
-        effective_redundancy = self._get_threshold("filter_interactions", "redundancy_threshold", bot_id, 0.5)
+        effective_redundancy = self._get_threshold(
+            "filter_interactions", "redundancy_threshold", bot_id, 0.5,
+        )
         suggestions: list[StrategySuggestion] = []
 
         for pair in filter_interactions:
@@ -679,7 +649,7 @@ class StrategyEngine:
             wr = factor.get("rolling_30d_win_rate", 0)
             days = factor.get("days_of_data", 0)
 
-            effective_threshold = self._get_threshold("factor_decay", "below_threshold", bot_id, 1.0 if below else 0.0)
+            effective_threshold = 1.0 if below else 0.0
 
             parts = [f"Factor '{name}' on {bot_id}"]
             if trend == "degrading":
@@ -844,7 +814,6 @@ class StrategyEngine:
         signal_health: dict[str, dict] | None = None,
         factor_rolling: dict[str, list[dict]] | None = None,
         filter_interactions: dict[str, list] | None = None,
-        orderbook_stats: dict[str, dict] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -916,12 +885,6 @@ class StrategyEngine:
             for bot_id, interactions in filter_interactions.items():
                 all_suggestions.extend(
                     self.detect_filter_interactions(bot_id, interactions)
-                )
-
-        if orderbook_stats:
-            for bot_id, ob_stats in orderbook_stats.items():
-                all_suggestions.extend(
-                    self.detect_microstructure_issues(bot_id, ob_stats)
                 )
 
         return RefinementReport(

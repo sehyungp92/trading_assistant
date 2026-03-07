@@ -31,12 +31,14 @@ class DeploymentMonitor:
         pr_builder=None,  # PRBuilder (optional to avoid circular imports)
         config_registry=None,  # ConfigRegistry
         event_stream=None,  # EventStream
+        file_change_generator=None,  # FileChangeGenerator
     ) -> None:
         self._path = findings_dir / "deployments.jsonl"
         self._curated_dir = curated_dir
         self._pr_builder = pr_builder
         self._config_registry = config_registry
         self._event_stream = event_stream
+        self._file_change_generator = file_change_generator
 
     def create_deployment(
         self,
@@ -204,17 +206,34 @@ class DeploymentMonitor:
         if record is None or self._pr_builder is None:
             return None
 
-        # Build reverse changes
+        # Build reverse changes using FileChangeGenerator when available
         file_changes = []
+        repo_dir = self._get_repo_dir(record.bot_id)
         for change in record.param_changes:
             param_name = change.get("param_name", "unknown")
             old_value = change.get("old_value")
             new_value = change.get("new_value")
+
+            if self._file_change_generator and self._config_registry:
+                # Use FileChangeGenerator for proper file content reversal
+                param_def = self._config_registry.get_parameter(record.bot_id, param_name)
+                if param_def is not None:
+                    try:
+                        fc = self._file_change_generator.generate_change(
+                            param_def, old_value, repo_dir,
+                        )
+                        file_changes.append(fc)
+                        continue
+                    except Exception:
+                        logger.warning("FileChangeGenerator failed for %s, using fallback", param_name)
+
+            # Fallback: create a descriptive FileChange (won't produce valid diff
+            # but is better than overwriting entire file with a raw value)
             file_changes.append(
                 FileChange(
                     file_path=change.get("file_path", param_name),
-                    original_content=str(new_value),
-                    new_content=str(old_value),
+                    original_content="",
+                    new_content="",
                     diff_preview=f"Revert {param_name}: {new_value} -> {old_value}",
                 )
             )

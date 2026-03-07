@@ -1,10 +1,8 @@
 # skills/file_change_generator.py
-"""File change generator — modifies config files for parameter changes.
+"""File change generator — modifies YAML config files for parameter changes.
 
-Supports three config formats:
-- YAML fields (dotted key paths)
-- Python constants (NAME = value or NAME: type = value)
-- Dataclass fields (field_name: type = default)
+All three active bots use YAML configuration files. Add Python/dataclass
+support when a bot needs it.
 """
 from __future__ import annotations
 
@@ -35,15 +33,11 @@ class FileChangeGenerator:
 
         if param.param_type == ParameterType.YAML_FIELD:
             modified = self._modify_yaml(original, param.yaml_key, new_value)
-        elif param.param_type == ParameterType.PYTHON_CONSTANT:
-            var_name = param.python_path.split(".")[-1] if param.python_path else param.param_name
-            modified = self._modify_python_constant(original, var_name, new_value, param.value_type)
-        elif param.param_type == ParameterType.DATACLASS_FIELD:
-            parts = (param.python_path or param.param_name).rsplit(".", 1)
-            field_name = parts[-1] if len(parts) == 1 else parts[1]
-            modified = self._modify_dataclass_field(original, field_name, new_value, param.value_type)
         else:
-            raise ValueError(f"Unsupported param_type: {param.param_type}")
+            raise ValueError(
+                f"Unsupported param_type: {param.param_type}. "
+                f"Only YAML_FIELD is currently supported."
+            )
 
         diff = "\n".join(difflib.unified_diff(
             original.splitlines(),
@@ -117,71 +111,3 @@ class FileChangeGenerator:
         if isinstance(value, int):
             return str(value)
         return str(value)
-
-    def _modify_python_constant(
-        self, content: str, var_name: str, new_value: Any, value_type: str = "float",
-    ) -> str:
-        """Replace a Python constant assignment."""
-        formatted = self._format_python_value(new_value, value_type)
-        # Match: VAR_NAME = value  or  VAR_NAME: type = value
-        pattern = re.compile(
-            rf"^(\s*)({re.escape(var_name)})\s*(?::\s*\w+\s*)?=\s*(.*)$",
-            re.MULTILINE,
-        )
-        match = pattern.search(content)
-        if match:
-            indent = match.group(1)
-            # Preserve type annotation if present
-            orig_line = match.group(0)
-            annotation_match = re.match(
-                rf"^(\s*{re.escape(var_name)})\s*(:\s*\w+\s*)?=\s*(.*)$",
-                orig_line,
-            )
-            if annotation_match and annotation_match.group(2):
-                replacement = f"{indent}{var_name}{annotation_match.group(2)}= {formatted}"
-            else:
-                replacement = f"{indent}{var_name} = {formatted}"
-            # Preserve inline comment
-            rest = match.group(3)
-            comment_match = re.search(r"\s+#\s+.*$", rest)
-            if comment_match:
-                replacement += comment_match.group()
-            return pattern.sub(replacement, content, count=1)
-        return content
-
-    def _modify_dataclass_field(
-        self, content: str, field_name: str, new_value: Any, value_type: str = "float",
-    ) -> str:
-        """Replace a dataclass field default value."""
-        formatted = self._format_python_value(new_value, value_type)
-        pattern = re.compile(
-            rf"^(\s*)({re.escape(field_name)})\s*:\s*(\w+)\s*=\s*(.*)$",
-            re.MULTILINE,
-        )
-        match = pattern.search(content)
-        if match:
-            indent = match.group(1)
-            type_ann = match.group(3)
-            rest = match.group(4)
-            comment = ""
-            comment_match = re.search(r"\s+#\s+.*$", rest)
-            if comment_match:
-                comment = comment_match.group()
-            return pattern.sub(
-                f"{indent}{field_name}: {type_ann} = {formatted}{comment}",
-                content,
-                count=1,
-            )
-        return content
-
-    @staticmethod
-    def _format_python_value(value: Any, value_type: str = "float") -> str:
-        if value_type == "bool":
-            return "True" if value else "False"
-        if value_type == "int":
-            return str(int(value))
-        if value_type == "float":
-            return str(float(value))
-        if value_type == "str":
-            return repr(str(value))
-        return repr(value)

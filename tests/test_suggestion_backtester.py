@@ -76,7 +76,7 @@ def setup(tmp_path: Path):
 
 class TestSuggestionBacktester:
     @pytest.mark.asyncio
-    async def test_comparison_with_improvement(self, setup):
+    async def test_comparison_with_trades(self, setup):
         _, backtester, tmp_path = setup
         _write_trades(tmp_path, "test_bot", _sample_trades(20))
 
@@ -87,6 +87,8 @@ class TestSuggestionBacktester:
         assert result.context.suggestion_id == "s1"
         assert result.baseline.total_trades > 0
         assert result.proposed.total_trades > 0
+        # Baseline and proposed are identical (honest about limitation)
+        assert result.baseline.total_trades == result.proposed.total_trades
 
     @pytest.mark.asyncio
     async def test_empty_trades_fails_safety(self, setup):
@@ -139,20 +141,17 @@ class TestSuggestionBacktester:
         assert any("Insufficient trades" in n for n in result.safety_notes)
 
     @pytest.mark.asyncio
-    async def test_safety_critical_tighter_dd_threshold(self, setup):
-        _, backtester, _ = setup
-        # Safety critical params use 30% threshold vs 50%
-        baseline = backtester._simulate(
-            _sample_trades(20), "base_risk_pct", 0.02,
+    async def test_safety_critical_requires_more_trades(self, setup):
+        _, backtester, tmp_path = setup
+        # 15 trades — enough for normal, not for safety-critical
+        _write_trades(tmp_path, "test_bot", _sample_trades(15))
+
+        result = await backtester.backtest_suggestion(
+            suggestion_id="s1", bot_id="test_bot",
+            param_name="base_risk_pct", current_value=0.02, proposed_value=0.03,
         )
-        proposed = backtester._simulate(
-            _sample_trades(20), "base_risk_pct", 0.03,
-        )
-        passes_critical, _ = backtester._check_safety(baseline, proposed, is_safety_critical=True)
-        passes_normal, _ = backtester._check_safety(baseline, proposed, is_safety_critical=False)
-        # Both should pass since same data, but the thresholds differ
-        assert isinstance(passes_critical, bool)
-        assert isinstance(passes_normal, bool)
+        assert result.passes_safety is False
+        assert any("Safety-critical" in n for n in result.safety_notes)
 
     @pytest.mark.asyncio
     async def test_trade_count_recorded_in_context(self, setup):
@@ -174,13 +173,13 @@ class TestSuggestionBacktester:
             suggestion_id="s1", bot_id="test_bot",
             param_name="quality_min", current_value=0.6, proposed_value=0.7,
         )
-        # Same data → 0% change
+        # Same data → 0% change (honest)
         assert result.sharpe_change_pct == pytest.approx(0.0)
 
-    def test_simulate_produces_metrics(self, setup):
+    def test_compute_trade_metrics_produces_metrics(self, setup):
         _, backtester, _ = setup
         trades = _sample_trades(20)
-        metrics = backtester._simulate(trades, "x", 0.5)
+        metrics = backtester._compute_trade_metrics(trades)
         assert metrics.total_trades == 20
         assert metrics.win_count > 0
         assert metrics.loss_count > 0
@@ -197,3 +196,14 @@ class TestSuggestionBacktester:
         )
         # With 25 trades and 67% win rate, should pass safety
         assert result.passes_safety is True
+
+    @pytest.mark.asyncio
+    async def test_safety_note_about_limitation(self, setup):
+        _, backtester, tmp_path = setup
+        _write_trades(tmp_path, "test_bot", _sample_trades(25))
+
+        result = await backtester.backtest_suggestion(
+            suggestion_id="s1", bot_id="test_bot",
+            param_name="quality_min", current_value=0.6, proposed_value=0.7,
+        )
+        assert any("data quality" in n for n in result.safety_notes)

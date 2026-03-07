@@ -32,9 +32,6 @@ _CURATED_FILES = [
     "experiment_data.json",
     "signal_health.json",
     "fill_quality.json",
-    "filter_decisions.json",
-    "indicator_snapshots.json",
-    "orderbook_context.json",
 ]
 
 _INSTRUCTIONS = """\
@@ -112,7 +109,7 @@ _INSTRUCTIONS = """\
         {"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}
       ],
       "suggestions": [
-        {"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "..."}
+        {"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}
       ],
       "structural_proposals": [
         {"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high"}

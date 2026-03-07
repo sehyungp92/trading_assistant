@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-from schemas.experiments import ExperimentConfig, ExperimentResult
 from schemas.notifications import (
     ControlPanelState,
     NotificationPayload,
@@ -205,80 +204,6 @@ class TelegramRenderer:
         ]
 
         return text, keyboard
-
-    def render_experiment_proposal(
-        self, config: ExperimentConfig
-    ) -> tuple[str, list[list[dict]]]:
-        """Render experiment proposal with [Start Experiment] [Cancel] buttons."""
-        lines = [
-            "\U0001f9ea *Experiment Proposal*",
-            f"Bot: {_escape_md2(config.bot_id)}",
-            f"Type: {_escape_md2(config.experiment_type.value)}",
-            "",
-            f"*{_escape_md2(config.title)}*",
-            "",
-            "\U0001f4ca *Variants:*",
-        ]
-        for v in config.variants:
-            params_str = ", ".join(f"{k}={val}" for k, val in v.params.items()) if v.params else "default"
-            lines.append(f"\u2022 {_escape_md2(v.name)} \\({v.allocation_pct:.0f}%\\): {_escape_md2(params_str)}")
-
-        lines.extend([
-            "",
-            f"Duration: {config.max_duration_days} days",
-            f"Min trades: {config.min_trades_per_variant}/variant",
-            f"Significance: {config.significance_level}",
-        ])
-
-        text = "\n".join(lines)
-        text = _truncate(text, 4096)
-
-        keyboard = [
-            [
-                {"text": "\U0001f9ea Start Experiment", "callback_data": f"start_experiment_{config.experiment_id}"},
-                {"text": "\u274c Cancel", "callback_data": f"cancel_experiment_{config.experiment_id}"},
-            ],
-        ]
-        return text, keyboard
-
-    def render_experiment_result(self, result: ExperimentResult) -> str:
-        """Render experiment conclusion with variant metrics table."""
-        lines = [
-            "\U0001f4ca *Experiment Result*",
-            f"ID: {_escape_md2(result.experiment_id[:8])}",
-            "",
-        ]
-
-        # Variant metrics table
-        lines.append("*Variant Metrics:*")
-        for vm in result.variant_metrics:
-            lines.append(
-                f"\u2022 {_escape_md2(vm.variant_name)}: "
-                f"{vm.trade_count} trades, "
-                f"PnL ${vm.total_pnl:.0f}, "
-                f"WR {vm.win_rate:.0%}, "
-                f"Sharpe {vm.sharpe:.2f}"
-            )
-
-        lines.append("")
-        if result.p_value is not None:
-            lines.append(f"p\\-value: {result.p_value:.4f}")
-        if result.effect_size is not None:
-            lines.append(f"Effect size: {result.effect_size:.3f}")
-
-        rec_emoji = {
-            "adopt_treatment": "\u2705",
-            "keep_control": "\u26a0\ufe0f",
-            "inconclusive": "\u2753",
-            "extend": "\u23f3",
-        }
-        emoji = rec_emoji.get(result.recommendation, "")
-        lines.append(f"\n{emoji} *Recommendation: {_escape_md2(result.recommendation)}*")
-
-        if result.winner:
-            lines.append(f"Winner: {_escape_md2(result.winner)}")
-
-        return _truncate("\n".join(lines), 4096)
 
     def _render_generic(self, payload: NotificationPayload) -> str:
         text = f"{payload.title}\n\n{payload.body}"
