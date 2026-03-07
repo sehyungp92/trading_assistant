@@ -49,6 +49,7 @@ class Handlers:
         brain: OrchestratorBrain | None = None,
         run_history_path: Path | None = None,
         suggestion_tracker: object | None = None,
+        autonomous_pipeline: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -65,6 +66,7 @@ class Handlers:
         self._brain = brain
         self._run_history_path = run_history_path or (self._runs_dir.parent / "data" / "run_history.jsonl")
         self._suggestion_tracker = suggestion_tracker
+        self._autonomous_pipeline = autonomous_pipeline
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -216,7 +218,10 @@ class Handlers:
                     logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
-                self._record_agent_suggestions(validation, run_id, parsed)
+                agent_suggestion_ids = self._record_agent_suggestions(validation, run_id, parsed)
+
+                # Run autonomous pipeline on recorded suggestions
+                await self._run_autonomous_pipeline(agent_suggestion_ids, run_id)
 
                 # Record predictions
                 self._record_predictions(date, parsed.predictions)
@@ -388,6 +393,9 @@ class Handlers:
             suggestion_ids = self._record_suggestions(
                 getattr(refinement_report, "suggestions", []), run_id,
             )
+
+            # Run autonomous pipeline on recorded suggestions
+            await self._run_autonomous_pipeline(suggestion_ids, run_id)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "simulations", "handler": "weekly_analysis",
@@ -596,7 +604,10 @@ class Handlers:
                     logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
-                self._record_agent_suggestions(validation, run_id, parsed)
+                weekly_agent_ids = self._record_agent_suggestions(validation, run_id, parsed)
+
+                # Run autonomous pipeline on recorded suggestions
+                await self._run_autonomous_pipeline(weekly_agent_ids, run_id)
 
                 # Record predictions
                 self._record_predictions(week_start, parsed.predictions)
@@ -1192,6 +1203,7 @@ class Handlers:
             suggestion_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
 
             category_str = str(getattr(suggestion, "category", "") or "")
+            confidence = float(getattr(suggestion, "confidence", 0.0) or 0.0)
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -1200,6 +1212,7 @@ class Handlers:
                 category=category_str,
                 source_report_id=run_id,
                 description=description,
+                confidence=confidence,
             )
 
             recorded = self._suggestion_tracker.record(record)
@@ -1254,6 +1267,7 @@ class Handlers:
 
             tier = CATEGORY_TO_TIER.get(category, "parameter")
 
+            confidence = float(getattr(suggestion, "confidence", 0.0) or 0.0)
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -1262,6 +1276,7 @@ class Handlers:
                 category=category,
                 source_report_id=run_id,
                 description=suggestion.evidence_summary or "",
+                confidence=confidence,
                 hypothesis_id=hypothesis_map.get(bot_id),
             )
 
@@ -1276,6 +1291,18 @@ class Handlers:
             })
 
         return id_map
+
+    async def _run_autonomous_pipeline(self, suggestion_ids: dict[str, str], run_id: str) -> None:
+        """Run the autonomous pipeline on newly recorded suggestions (if enabled)."""
+        if not self._autonomous_pipeline or not suggestion_ids:
+            return
+        try:
+            await self._autonomous_pipeline.process_new_suggestions(
+                suggestion_ids=list(suggestion_ids.keys()),
+                run_id=run_id,
+            )
+        except Exception:
+            logger.exception("Autonomous pipeline failed — analysis unaffected")
 
     def _record_run(
         self, run_id: str, agent_type: str, status: str,

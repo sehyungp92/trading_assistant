@@ -25,6 +25,9 @@ class AppConfig(BaseModel):
     email_to: str = ""
     data_dir: str = "."
     log_level: str = "INFO"
+    bot_config_dir: str = "data/bot_configs"
+    bot_repo_dir: str = "."
+    autonomous_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -49,4 +52,7 @@ class AppConfig(BaseModel):
             email_to=os.environ.get("EMAIL_TO", ""),
             data_dir=os.environ.get("DATA_DIR", "."),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
+            bot_config_dir=os.environ.get("BOT_CONFIG_DIR", "data/bot_configs"),
+            bot_repo_dir=os.environ.get("BOT_REPO_DIR", "."),
+            autonomous_enabled=os.environ.get("AUTONOMOUS_ENABLED", "false").lower() in ("true", "1", "yes"),
         )

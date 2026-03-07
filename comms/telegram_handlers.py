@@ -14,6 +14,7 @@ _SLASH_MAP: dict[str, str] = {
     "/openprs": "cmd_open_prs",
     "/open_prs": "cmd_open_prs",
     "/approve": "cmd_approve_all",
+    "/pending": "cmd_pending",
     "/settings": "cmd_settings",
 }
 
@@ -32,12 +33,19 @@ class TelegramCallbackRouter:
         self._handlers[callback_data] = handler
 
     async def dispatch(self, callback_data: str, context: dict | None = None) -> str | None:
+        # Try exact match first
         handler = self._handlers.get(callback_data)
-        if handler is None:
-            return None
-        if context is not None:
-            return await handler(context=context)
-        return await handler()
+        if handler is not None:
+            if context is not None:
+                return await handler(context=context)
+            return await handler()
+
+        # Try prefix match — extract suffix as positional arg (e.g. request_id)
+        for prefix, handler in self._handlers.items():
+            if callback_data.startswith(prefix) and prefix != callback_data:
+                suffix = callback_data[len(prefix):]
+                return await handler(suffix)
+        return None
 
     async def dispatch_slash(self, command: str, context: dict | None = None) -> str | None:
         if command == "/help":

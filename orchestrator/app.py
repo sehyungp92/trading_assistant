@@ -100,6 +100,44 @@ def _register_channel_adapters(
     return adapters
 
 
+async def _expire_approvals_with_notification(
+    approval_tracker,
+    telegram_bot,
+    dispatcher,
+    notification_prefs,
+) -> None:
+    """Expire old approvals and send notification for each expired request."""
+    expired_ids = approval_tracker.expire_old(max_age_days=7)
+    if not expired_ids and telegram_bot is None:
+        return
+    for rid in expired_ids:
+        logger.info("Approval request %s expired", rid)
+        if telegram_bot is not None:
+            try:
+                req = approval_tracker.get_by_id(rid)
+                params = ", ".join(
+                    pc.get("param_name", "?") for pc in (req.param_changes if req else [])
+                )
+                text = (
+                    f"\u23f0 Approval Expired: {rid}\n"
+                    f"Bot: {req.bot_id if req else '?'}\n"
+                    f"Params: {params}\n"
+                    f"Request was pending for >7 days."
+                )
+                await telegram_bot.send_message(text)
+                # Also edit the original card if message_id exists
+                if req and req.message_id:
+                    try:
+                        await telegram_bot.edit_message(
+                            req.message_id,
+                            f"Suggestion {rid}\nBot: {req.bot_id}\n\u23f0 EXPIRED — pending >7 days",
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                logger.warning("Failed to send expiry notification for %s", rid)
+
+
 def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> FastAPI:
     """Factory function. Tests inject a temp directory for DB files."""
     if config is None:
@@ -147,6 +185,14 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Register channel adapters from config
     channel_adapters = _register_channel_adapters(config, dispatcher)
 
+    # Extract Telegram adapter reference (needed for autonomous pipeline)
+    telegram_adapter = None
+    for adapter in channel_adapters:
+        from comms.telegram_bot import TelegramBotAdapter as _TBA
+        if isinstance(adapter, _TBA):
+            telegram_adapter = adapter
+            break
+
     # SuggestionTracker — shared path with ContextBuilder (memory/findings/)
     from skills.suggestion_tracker import SuggestionTracker
 
@@ -155,6 +201,92 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Load persisted notification preferences
     prefs_path = db_path / "data" / "notification_prefs.json"
     notification_prefs = _load_notification_prefs(prefs_path)
+
+    # Autonomous pipeline (feature-flagged)
+    autonomous_pipeline = None
+    approval_tracker = None
+    approval_handler = None
+    if config.autonomous_enabled:
+        from skills.approval_handler import ApprovalHandler
+        from skills.approval_tracker import ApprovalTracker
+        from skills.autonomous_pipeline import AutonomousPipeline
+        from skills.config_registry import ConfigRegistry as _ConfigRegistry
+        from skills.file_change_generator import FileChangeGenerator
+        from skills.github_pr import PRBuilder
+        from skills.suggestion_backtester import SuggestionBacktester
+
+        config_registry = _ConfigRegistry(Path(config.bot_config_dir))
+        backtester = SuggestionBacktester(config_registry, db_path)
+        approval_tracker = ApprovalTracker(db_path / "memory" / "findings" / "approvals.jsonl")
+        file_change_gen = FileChangeGenerator()
+        pr_builder = PRBuilder(dry_run=False)
+
+        # Telegram bot/renderer (may be None if not configured)
+        telegram_bot = telegram_adapter  # Extracted from channel_adapters above
+        telegram_renderer = None
+        if config.telegram_bot_token:
+            from comms.telegram_renderer import TelegramRenderer
+            telegram_renderer = TelegramRenderer()
+
+        approval_handler = ApprovalHandler(
+            approval_tracker=approval_tracker,
+            suggestion_tracker=suggestion_tracker,
+            file_change_generator=file_change_gen,
+            pr_builder=pr_builder,
+            config_registry=config_registry,
+            event_stream=event_stream,
+            telegram_bot=telegram_bot,
+        )
+        autonomous_pipeline = AutonomousPipeline(
+            config_registry=config_registry,
+            backtester=backtester,
+            approval_tracker=approval_tracker,
+            suggestion_tracker=suggestion_tracker,
+            telegram_bot=telegram_bot,
+            telegram_renderer=telegram_renderer,
+            event_stream=event_stream,
+        )
+        logger.info("Autonomous pipeline enabled")
+
+    # PR review check function (needs approval_tracker + pr_builder from autonomous block)
+    async def _check_pr_reviews() -> None:
+        """Check PR reviews for approved requests and notify on attention needed."""
+        if approval_tracker is None:
+            return
+        try:
+            from skills.github_pr import PRBuilder as _PRB
+            _pr_builder = pr_builder if config.autonomous_enabled else _PRB(dry_run=True)
+            approved_with_prs = approval_tracker.get_approved_with_prs()
+            for req in approved_with_prs:
+                if not req.pr_url:
+                    continue
+                profile = None
+                if config.autonomous_enabled:
+                    profile = config_registry.get_profile(req.bot_id)
+                repo_dir = Path(profile.repo_dir) if profile else db_path
+                status = await _pr_builder.check_pr_reviews(req.pr_url, repo_dir)
+                if status and status.needs_attention:
+                    msg = (
+                        f"\U0001f50d PR Review Needs Attention\n"
+                        f"PR: {status.pr_url}\n"
+                        f"State: {status.review_state.value}\n"
+                        f"Reviewers: {', '.join(status.reviewers) or 'none'}\n"
+                    )
+                    if status.actionable_comments:
+                        msg += f"Comments: {len(status.actionable_comments)}\n"
+                    if telegram_adapter is not None:
+                        try:
+                            await telegram_adapter.send_message(msg)
+                        except Exception:
+                            logger.warning("Failed to send PR review notification")
+                    if event_stream:
+                        event_stream.broadcast("pr_review_needs_attention", {
+                            "request_id": req.request_id,
+                            "pr_url": req.pr_url,
+                            "review_state": status.review_state.value,
+                        })
+        except Exception:
+            logger.exception("PR review check failed")
 
     handlers = Handlers(
         agent_runner=agent_runner,
@@ -171,6 +303,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         worker=worker,
         brain=brain,
         suggestion_tracker=suggestion_tracker,
+        autonomous_pipeline=autonomous_pipeline,
     )
 
     # Wire handler slots on worker
@@ -187,6 +320,45 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     worker.on_wfo = lambda action: subagent_mgr.spawn(
         "wfo", lambda a=action: handlers.handle_wfo(a))
     worker.on_feedback = handlers.handle_feedback
+
+    # Register Telegram approval callbacks when autonomous pipeline is enabled
+    if approval_handler is not None:
+        from comms.telegram_handlers import TelegramCallbackRouter
+
+        # Get or create callback router
+        callback_router = TelegramCallbackRouter()
+
+        async def _on_approve_callback(request_id: str) -> str:
+            return await approval_handler.handle_approve(request_id)
+
+        async def _on_reject_callback(request_id: str) -> str:
+            return await approval_handler.handle_reject(request_id)
+
+        async def _on_detail_callback(request_id: str) -> str:
+            return await approval_handler.handle_detail(request_id)
+
+        # Register prefix-based callbacks
+        callback_router.register("approve_suggestion_", _on_approve_callback)
+        callback_router.register("reject_suggestion_", _on_reject_callback)
+        callback_router.register("detail_suggestion_", _on_detail_callback)
+
+        # Register /pending command
+        async def _pending_command(**kwargs) -> str:
+            pending = approval_tracker.get_pending()
+            if not pending:
+                return "No pending approval requests"
+            lines = ["Pending approval requests:"]
+            for r in pending:
+                lines.append(f"  [{r.request_id}] {r.bot_id}: {', '.join(pc.get('param_name', '?') for pc in r.param_changes)}")
+            return "\n".join(lines)
+
+        callback_router.register("cmd_pending", _pending_command)
+
+        # Connect callback router to Telegram adapter for incoming updates
+        if telegram_adapter is not None:
+            telegram_adapter.set_callback_router(callback_router)
+
+        logger.info("Telegram approval callbacks registered")
 
     # Relay polling — only active when RELAY_URL is configured
     vps_receiver: VPSReceiver | None = None
@@ -422,6 +594,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         outcome_measurement_fn=_measure_outcomes,
         memory_consolidation_fn=_consolidate_memory,
         transfer_outcome_fn=_measure_transfer_outcomes,
+        approval_expiry_fn=(lambda: _expire_approvals_with_notification(
+            approval_tracker, telegram_adapter, dispatcher, notification_prefs,
+        )) if approval_tracker else None,
+        pr_review_check_fn=_check_pr_reviews if approval_tracker else None,
     )
 
     @asynccontextmanager
@@ -435,6 +611,13 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 await adapter.start()
             except Exception:
                 logger.warning("Failed to start %s adapter", type(adapter).__name__)
+
+        # Start Telegram update polling (for callback queries and slash commands)
+        if telegram_adapter is not None and telegram_adapter._callback_router is not None:
+            try:
+                await telegram_adapter.start_polling()
+            except Exception:
+                logger.warning("Failed to start Telegram polling")
 
         # Start audit trail consumer
         audit_consumer.start(event_stream)
@@ -492,6 +675,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     app.state.audit_consumer = audit_consumer
     app.state.conversation_tracker = conversation_tracker
     app.state.skills_registry = skills_registry
+    app.state.autonomous_pipeline = autonomous_pipeline
+    app.state.approval_tracker = approval_tracker
+    app.state.approval_handler = approval_handler
 
     @app.get("/health")
     async def health():

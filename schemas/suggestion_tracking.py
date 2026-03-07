@@ -35,6 +35,7 @@ class SuggestionRecord(BaseModel):
     )
     resolved_at: Optional[datetime] = None
     rejection_reason: str = ""
+    confidence: float = 0.0
     hypothesis_id: Optional[str] = None
 
 

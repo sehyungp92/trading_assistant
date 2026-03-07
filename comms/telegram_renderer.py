@@ -133,6 +133,78 @@ class TelegramRenderer:
         lines.append(payload.body)
         return _truncate("\n".join(lines))
 
+    def render_approval_request(
+        self, request,
+    ) -> tuple[str, list[list[dict]]]:
+        """Render an approval request card with inline keyboard buttons.
+
+        Args:
+            request: ApprovalRequest with backtest_summary and param_changes.
+
+        Returns:
+            (message_text, inline_keyboard) tuple.
+        """
+        lines: list[str] = []
+        lines.append("\U0001f514 Suggestion Approval Request")
+        lines.append(f"Bot: {_escape_md2(request.bot_id)}")
+        lines.append("")
+
+        # Parameter changes
+        if request.param_changes:
+            lines.append("Parameter Changes:")
+            for pc in request.param_changes:
+                name = pc.get("param_name", "?")
+                current = pc.get("current", "?")
+                proposed = pc.get("proposed", "?")
+                lines.append(f"  {_escape_md2(name)}: {current} -> {proposed}")
+            lines.append("")
+
+        # Backtest results
+        bs = request.backtest_summary
+        if bs is not None:
+            lines.append(f"Backtest Results ({bs.context.data_days}d, {bs.context.trade_count} trades):")
+            lines.append("Metric     | Baseline | Proposed | Change")
+            lines.append(
+                f"Sharpe     | {bs.baseline.sharpe_ratio:.2f}     "
+                f"| {bs.proposed.sharpe_ratio:.2f}     "
+                f"| {bs.sharpe_change_pct:+.1f}%"
+            )
+            lines.append(
+                f"MaxDD      | {bs.baseline.max_drawdown_pct:.1f}%    "
+                f"| {bs.proposed.max_drawdown_pct:.1f}%    "
+                f"| {bs.max_dd_change_pct:+.1f}%"
+            )
+            lines.append(
+                f"ProfitFact | {bs.baseline.profit_factor:.2f}     "
+                f"| {bs.proposed.profit_factor:.2f}     "
+                f"| {bs.profit_factor_change_pct:+.1f}%"
+            )
+            lines.append(
+                f"WinRate    | {bs.baseline.win_rate:.1%}    "
+                f"| {bs.proposed.win_rate:.1%}    "
+                f"| {bs.win_rate_change_pct:+.1f}%"
+            )
+            lines.append("")
+            safety = "\u2705 PASS" if bs.passes_safety else "\u274c FAIL"
+            lines.append(f"Safety: {safety}")
+            if bs.safety_notes:
+                for note in bs.safety_notes:
+                    lines.append(f"  - {_escape_md2(note)}")
+
+        text = _truncate("\n".join(lines))
+
+        keyboard = [
+            [
+                {"text": "\u2705 Approve", "callback_data": f"approve_suggestion_{request.request_id}"},
+                {"text": "\u274c Reject", "callback_data": f"reject_suggestion_{request.request_id}"},
+            ],
+            [
+                {"text": "\U0001f4ca Details", "callback_data": f"detail_suggestion_{request.request_id}"},
+            ],
+        ]
+
+        return text, keyboard
+
     def _render_generic(self, payload: NotificationPayload) -> str:
         text = f"{payload.title}\n\n{payload.body}"
         return _truncate(text)

@@ -1,0 +1,72 @@
+bot_id: swing_trader
+repo_url: git@github.com:user/swing_trader.git
+repo_dir: /repos/swing_trader
+strategies:
+  - daily
+  - hourly
+parameters:
+  - param_name: daily_mult
+    strategy_id: daily
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.daily_mult
+    current_value: 1.0
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: hourly_mult
+    strategy_id: hourly
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.hourly_mult
+    current_value: 0.8
+    valid_range: [0.3, 2.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: base_risk_pct
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.base_risk_pct
+    current_value: 0.01
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: adx_threshold
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.adx_threshold
+    current_value: 25
+    valid_range: [15, 40]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: atr_period
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.atr_period
+    current_value: 14
+    valid_range: [5, 30]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: risk_reward_min
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.risk_reward_min
+    current_value: 2.0
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: adx_on
+    param_type: YAML_FIELD
+    file_path: config/symbol_defaults.yaml
+    yaml_key: defaults.adx_on
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: filter_threshold
+    is_safety_critical: false

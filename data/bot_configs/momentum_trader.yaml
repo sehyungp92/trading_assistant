@@ -1,0 +1,84 @@
+bot_id: momentum_trader
+repo_url: git@github.com:user/momentum_trader.git
+repo_dir: /repos/momentum_trader
+strategies:
+  - macd
+  - rsi
+parameters:
+  - param_name: BASE_RISK_PCT
+    param_type: PYTHON_CONSTANT
+    file_path: config/constants.py
+    python_path: BASE_RISK_PCT
+    current_value: 0.015
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: MACD_FAST
+    strategy_id: macd
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/macd_strategy.py
+    python_path: MACD_FAST
+    current_value: 12
+    valid_range: [5, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: MACD_SLOW
+    strategy_id: macd
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/macd_strategy.py
+    python_path: MACD_SLOW
+    current_value: 26
+    valid_range: [15, 40]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: MACD_SIGNAL
+    strategy_id: macd
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/macd_strategy.py
+    python_path: MACD_SIGNAL
+    current_value: 9
+    valid_range: [5, 15]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: TRAIL_ACTIVATION_R
+    param_type: PYTHON_CONSTANT
+    file_path: config/constants.py
+    python_path: TRAIL_ACTIVATION_R
+    current_value: 1.5
+    valid_range: [0.5, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TRAIL_STEP_R
+    param_type: PYTHON_CONSTANT
+    file_path: config/constants.py
+    python_path: TRAIL_STEP_R
+    current_value: 0.5
+    valid_range: [0.1, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: RSI_OVERSOLD
+    strategy_id: rsi
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/rsi_strategy.py
+    python_path: RSI_OVERSOLD
+    current_value: 30
+    valid_range: [15, 40]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: RSI_OVERBOUGHT
+    strategy_id: rsi
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/rsi_strategy.py
+    python_path: RSI_OVERBOUGHT
+    current_value: 70
+    valid_range: [60, 85]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false

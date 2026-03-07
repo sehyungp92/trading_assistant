@@ -40,6 +40,9 @@ class SchedulerConfig:
     transfer_outcome_day_of_week: str = "sun"
     transfer_outcome_hour: int = 10
     transfer_outcome_minute: int = 30
+    approval_expiry_hour: int = 0
+    approval_expiry_minute: int = 0
+    pr_review_check_interval_seconds: int = 3600
 
 
 def create_scheduler_jobs(
@@ -57,6 +60,8 @@ def create_scheduler_jobs(
     outcome_measurement_fn: Callable[[], Awaitable[None]] | None = None,
     memory_consolidation_fn: Callable[[], Awaitable[None]] | None = None,
     transfer_outcome_fn: Callable[[], Awaitable[None]] | None = None,
+    approval_expiry_fn: Callable[[], Awaitable[None]] | None = None,
+    pr_review_check_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
@@ -172,6 +177,23 @@ def create_scheduler_jobs(
             "day_of_week": config.transfer_outcome_day_of_week,
             "hour": config.transfer_outcome_hour,
             "minute": config.transfer_outcome_minute,
+        })
+
+    if approval_expiry_fn is not None:
+        jobs.append({
+            "name": "approval_expiry",
+            "func": approval_expiry_fn,
+            "trigger": "cron",
+            "hour": config.approval_expiry_hour,
+            "minute": config.approval_expiry_minute,
+        })
+
+    if pr_review_check_fn is not None:
+        jobs.append({
+            "name": "pr_review_check",
+            "func": pr_review_check_fn,
+            "trigger": "interval",
+            "seconds": config.pr_review_check_interval_seconds,
         })
 
     return jobs
