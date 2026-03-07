@@ -29,9 +29,12 @@ _CURATED_FILES = [
     "slippage_stats.json",
     "excursion_stats.json",
     "overlay_state_summary.json",
-    "experiment_breakdown.json",
+    "experiment_data.json",
     "signal_health.json",
     "fill_quality.json",
+    "filter_decisions.json",
+    "indicator_snapshots.json",
+    "orderbook_context.json",
 ]
 
 _INSTRUCTIONS = """\
@@ -57,7 +60,7 @@ _INSTRUCTIONS = """\
    - High MAE on winners suggests stop placement is too tight
    - Low exit_efficiency (<50%) across winners suggests premature exits
    - This is bot-provided intra-trade data and supplements the post-exit proxy in exit_efficiency.json
-8. Experiment breakdown (swing_trader): when experiment_breakdown.json is present,
+8. Experiment breakdown (swing_trader): when experiment_data.json is present,
    compare variant PnL, win_rate, and Sharpe across experiment groups.
    Flag underperforming variants. Note sample sizes — small samples reduce confidence.
 9. Signal health (momentum_trader): when signal_health.json is present,

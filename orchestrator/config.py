@@ -28,6 +28,9 @@ class AppConfig(BaseModel):
     bot_config_dir: str = "data/bot_configs"
     bot_repo_dir: str = "."
     autonomous_enabled: bool = False
+    adaptive_thresholds_enabled: bool = False
+    deployment_monitoring_enabled: bool = False
+    ab_testing_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -55,4 +58,7 @@ class AppConfig(BaseModel):
             bot_config_dir=os.environ.get("BOT_CONFIG_DIR", "data/bot_configs"),
             bot_repo_dir=os.environ.get("BOT_REPO_DIR", "."),
             autonomous_enabled=os.environ.get("AUTONOMOUS_ENABLED", "false").lower() in ("true", "1", "yes"),
+            adaptive_thresholds_enabled=os.environ.get("ADAPTIVE_THRESHOLDS_ENABLED", "false").lower() in ("true", "1", "yes"),
+            deployment_monitoring_enabled=os.environ.get("DEPLOYMENT_MONITORING_ENABLED", "false").lower() in ("true", "1", "yes"),
+            ab_testing_enabled=os.environ.get("AB_TESTING_ENABLED", "false").lower() in ("true", "1", "yes"),
         )

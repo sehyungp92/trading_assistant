@@ -13,6 +13,8 @@ from enum import Enum
 
 from pydantic import BaseModel, computed_field
 
+from schemas.detection_context import DetectionContext
+
 
 class SuggestionTier(str, Enum):
     PARAMETER = "parameter"
@@ -35,6 +37,7 @@ class StrategySuggestion(BaseModel):
     confidence: float = 0.0  # 0–1
     simulation_assumptions: list[str] = []
     requires_human_judgment: bool = False
+    detection_context: DetectionContext | None = None
 
 
 class RefinementReport(BaseModel):

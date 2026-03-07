@@ -447,6 +447,25 @@ class ContextBuilder:
         except Exception:
             return {}
 
+    def load_threshold_profile(self) -> dict:
+        """Load learned threshold profiles from findings/learned_thresholds.jsonl.
+
+        Returns a dict with per-bot threshold data when available.
+        """
+        path = self._memory_dir / "findings" / "learned_thresholds.jsonl"
+        if not path.exists():
+            return {}
+        try:
+            profiles: list[dict] = []
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if line.strip():
+                    profiles.append(json.loads(line))
+            if profiles:
+                return {"profiles": profiles, "count": len(profiles)}
+        except Exception:
+            pass
+        return {}
+
     def load_consolidated_patterns(self) -> str:
         """Load patterns_consolidated.md if it exists."""
         path = self._memory_dir / "findings" / "patterns_consolidated.md"
@@ -507,6 +526,9 @@ class ContextBuilder:
         validation_patterns = self.load_validation_patterns()
         if validation_patterns:
             data["validation_patterns"] = validation_patterns
+        threshold_profile = self.load_threshold_profile()
+        if threshold_profile:
+            data["threshold_profile"] = threshold_profile
         if session_store and agent_type:
             session_history = self.load_session_history(session_store, agent_type)
             if session_history:

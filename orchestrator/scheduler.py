@@ -43,6 +43,11 @@ class SchedulerConfig:
     approval_expiry_hour: int = 0
     approval_expiry_minute: int = 0
     pr_review_check_interval_seconds: int = 3600
+    deployment_check_interval_seconds: int = 1800  # 30 minutes
+    threshold_learning_day_of_week: str = "sun"
+    threshold_learning_hour: int = 9
+    threshold_learning_minute: int = 30
+    experiment_check_interval_hours: int = 6
 
 
 def create_scheduler_jobs(
@@ -62,6 +67,9 @@ def create_scheduler_jobs(
     transfer_outcome_fn: Callable[[], Awaitable[None]] | None = None,
     approval_expiry_fn: Callable[[], Awaitable[None]] | None = None,
     pr_review_check_fn: Callable[[], Awaitable[None]] | None = None,
+    deployment_check_fn: Callable[[], Awaitable[None]] | None = None,
+    threshold_learning_fn: Callable[[], Awaitable[None]] | None = None,
+    experiment_check_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
@@ -194,6 +202,32 @@ def create_scheduler_jobs(
             "func": pr_review_check_fn,
             "trigger": "interval",
             "seconds": config.pr_review_check_interval_seconds,
+        })
+
+    if deployment_check_fn is not None:
+        jobs.append({
+            "name": "deployment_check",
+            "func": deployment_check_fn,
+            "trigger": "interval",
+            "seconds": config.deployment_check_interval_seconds,
+        })
+
+    if threshold_learning_fn is not None:
+        jobs.append({
+            "name": "threshold_learning",
+            "func": threshold_learning_fn,
+            "trigger": "cron",
+            "day_of_week": config.threshold_learning_day_of_week,
+            "hour": config.threshold_learning_hour,
+            "minute": config.threshold_learning_minute,
+        })
+
+    if experiment_check_fn is not None:
+        jobs.append({
+            "name": "experiment_check",
+            "func": experiment_check_fn,
+            "trigger": "interval",
+            "seconds": config.experiment_check_interval_hours * 3600,
         })
 
     return jobs

@@ -1,0 +1,346 @@
+# skills/deployment_monitor.py
+"""Deployment monitor -- tracks post-merge deployments and detects regressions.
+
+Lifecycle: PR created -> merge detected -> bot heartbeat confirms deploy ->
+monitor window (24h) -> regression check -> success or rollback PR.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from schemas.autonomous_pipeline import FileChange, PRRequest, PRResult
+from schemas.deployment_monitoring import (
+    DeploymentMetricsSnapshot,
+    DeploymentRecord,
+    DeploymentStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class DeploymentMonitor:
+    """Monitors post-merge deployments for regressions."""
+
+    def __init__(
+        self,
+        findings_dir: Path,
+        curated_dir: Path,
+        pr_builder=None,  # PRBuilder (optional to avoid circular imports)
+        config_registry=None,  # ConfigRegistry
+        event_stream=None,  # EventStream
+    ) -> None:
+        self._path = findings_dir / "deployments.jsonl"
+        self._curated_dir = curated_dir
+        self._pr_builder = pr_builder
+        self._config_registry = config_registry
+        self._event_stream = event_stream
+
+    def create_deployment(
+        self,
+        deployment_id: str,
+        approval_request_id: str,
+        pr_url: str,
+        bot_id: str,
+        param_changes: list[dict],
+        pr_number: int = 0,
+    ) -> DeploymentRecord:
+        """Create a deployment record when a PR is created."""
+        existing = self.get_by_id(deployment_id)
+        if existing is not None:
+            return existing
+
+        record = DeploymentRecord(
+            deployment_id=deployment_id,
+            approval_request_id=approval_request_id,
+            pr_url=pr_url,
+            pr_number=pr_number,
+            bot_id=bot_id,
+            param_changes=param_changes,
+            status=DeploymentStatus.PENDING_MERGE,
+        )
+        self._append_record(record)
+        return record
+
+    async def check_merge_status(self, deployment_id: str) -> bool:
+        """Check if the PR has been merged via ``gh pr view``.
+
+        Returns True if merge was detected (status changed).
+        """
+        record = self.get_by_id(deployment_id)
+        if record is None or record.status != DeploymentStatus.PENDING_MERGE:
+            return False
+
+        if self._pr_builder is None:
+            return False
+
+        try:
+            returncode, stdout, stderr = await self._pr_builder._run_cmd(
+                ["gh", "pr", "view", record.pr_url, "--json", "state,mergedAt"],
+                cwd=Path("."),
+            )
+            if returncode != 0:
+                logger.warning("Failed to check PR status: %s", stderr)
+                return False
+
+            data = json.loads(stdout)
+            if data.get("state") == "MERGED":
+                record.status = DeploymentStatus.MERGED
+                record.merge_time = datetime.now(timezone.utc)
+                self._update_record(record)
+                if self._event_stream:
+                    self._event_stream.broadcast(
+                        "deployment_pr_merged",
+                        {"deployment_id": deployment_id, "bot_id": record.bot_id},
+                    )
+                return True
+        except (json.JSONDecodeError, Exception) as exc:
+            logger.warning("Error checking merge status: %s", exc)
+
+        return False
+
+    def record_pre_deploy_metrics(
+        self,
+        deployment_id: str,
+        snapshot: DeploymentMetricsSnapshot,
+    ) -> None:
+        """Record pre-deployment metrics for regression baseline."""
+        record = self.get_by_id(deployment_id)
+        if record is None:
+            return
+        record.pre_deploy_metrics = snapshot
+        self._update_record(record)
+
+    def record_post_deploy_metrics(
+        self,
+        deployment_id: str,
+        snapshot: DeploymentMetricsSnapshot,
+    ) -> None:
+        """Record post-deployment metrics for regression comparison."""
+        record = self.get_by_id(deployment_id)
+        if record is None:
+            return
+        record.post_deploy_metrics = snapshot
+        self._update_record(record)
+
+    def mark_deployed(self, deployment_id: str) -> None:
+        """Mark as deployed when bot heartbeat confirms new version."""
+        record = self.get_by_id(deployment_id)
+        if record is None:
+            return
+        record.status = DeploymentStatus.DEPLOYED
+        record.deploy_detected_time = datetime.now(timezone.utc)
+        record.monitoring_end_time = (
+            datetime.now(timezone.utc) + timedelta(hours=record.monitoring_window_hours)
+        )
+        self._update_record(record)
+
+    def check_regression(self, deployment_id: str) -> bool:
+        """Compare pre/post metrics, detect >2 sigma PnL decline.
+
+        Returns True if regression detected.
+        """
+        record = self.get_by_id(deployment_id)
+        if record is None:
+            return False
+        if record.pre_deploy_metrics is None or record.post_deploy_metrics is None:
+            return False
+
+        pre = record.pre_deploy_metrics
+        post = record.post_deploy_metrics
+        regression_reasons: list[str] = []
+
+        # PnL regression: post avg_pnl significantly below pre
+        if pre.avg_pnl != 0:
+            pnl_change_pct = (post.avg_pnl - pre.avg_pnl) / abs(pre.avg_pnl) * 100
+            if pnl_change_pct < -50:  # >50% decline
+                regression_reasons.append(
+                    f"Avg PnL declined {pnl_change_pct:.1f}% "
+                    f"(${pre.avg_pnl:.2f} -> ${post.avg_pnl:.2f})"
+                )
+
+        # Win rate decline > 15 percentage points
+        wr_delta = post.win_rate - pre.win_rate
+        if wr_delta < -0.15:
+            regression_reasons.append(
+                f"Win rate declined {wr_delta:.1%} "
+                f"({pre.win_rate:.1%} -> {post.win_rate:.1%})"
+            )
+
+        # Max drawdown >50% worse
+        if pre.max_drawdown_pct > 0:
+            dd_change = (
+                (post.max_drawdown_pct - pre.max_drawdown_pct) / pre.max_drawdown_pct
+            )
+            if dd_change > 0.5:
+                regression_reasons.append(
+                    f"Max drawdown worsened {dd_change:.0%} "
+                    f"({pre.max_drawdown_pct:.1f}% -> {post.max_drawdown_pct:.1f}%)"
+                )
+
+        if regression_reasons:
+            record.regression_detected = True
+            record.regression_details = "; ".join(regression_reasons)
+            record.status = DeploymentStatus.REGRESSION_DETECTED
+            self._update_record(record)
+            return True
+
+        return False
+
+    def check_monitoring_window_expired(self, deployment_id: str) -> bool:
+        """Check if monitoring window has expired without regression."""
+        record = self.get_by_id(deployment_id)
+        if record is None or record.status != DeploymentStatus.DEPLOYED:
+            return False
+        if record.monitoring_end_time is None:
+            return False
+        return datetime.now(timezone.utc) >= record.monitoring_end_time
+
+    async def create_rollback_pr(self, deployment_id: str) -> PRResult | None:
+        """Create a PR that reverts the parameter change."""
+        record = self.get_by_id(deployment_id)
+        if record is None or self._pr_builder is None:
+            return None
+
+        # Build reverse changes
+        file_changes = []
+        for change in record.param_changes:
+            param_name = change.get("param_name", "unknown")
+            old_value = change.get("old_value")
+            new_value = change.get("new_value")
+            file_changes.append(
+                FileChange(
+                    file_path=change.get("file_path", param_name),
+                    original_content=str(new_value),
+                    new_content=str(old_value),
+                    diff_preview=f"Revert {param_name}: {new_value} -> {old_value}",
+                )
+            )
+
+        pr_request = PRRequest(
+            approval_request_id=record.approval_request_id,
+            suggestion_id=deployment_id,
+            bot_id=record.bot_id,
+            repo_dir=str(self._get_repo_dir(record.bot_id)),
+            branch_name=f"ta/rollback-{deployment_id[:8]}",
+            title=f"[trading-assistant] ROLLBACK: revert changes on {record.bot_id}",
+            body=(
+                f"## Automated Rollback\n\n"
+                f"Regression detected after deployment:\n"
+                f"{record.regression_details}\n\n"
+                f"### Changes Reverted\n"
+                + "\n".join(
+                    f"- `{c.get('param_name')}`: {c.get('new_value')} -> {c.get('old_value')}"
+                    for c in record.param_changes
+                )
+                + f"\n\nOriginal PR: {record.pr_url}"
+            ),
+            file_changes=file_changes,
+        )
+
+        result = await self._pr_builder.create_pr(pr_request)
+        if result.success and result.pr_url:
+            record.rollback_pr_url = result.pr_url
+            record.status = DeploymentStatus.ROLLED_BACK
+            self._update_record(record)
+            if self._event_stream:
+                self._event_stream.broadcast(
+                    "deployment_rolled_back",
+                    {"deployment_id": deployment_id, "rollback_pr": result.pr_url},
+                )
+        return result
+
+    def get_monitoring(self) -> list[DeploymentRecord]:
+        """Return deployments that need active monitoring."""
+        return [
+            d
+            for d in self._load_all()
+            if d.status
+            in (
+                DeploymentStatus.PENDING_MERGE,
+                DeploymentStatus.MERGED,
+                DeploymentStatus.DEPLOYED,
+            )
+        ]
+
+    def get_by_id(self, deployment_id: str) -> DeploymentRecord | None:
+        """Retrieve deployment by ID."""
+        for d in self._load_all():
+            if d.deployment_id == deployment_id:
+                return d
+        return None
+
+    def collect_metrics_snapshot(
+        self, bot_id: str
+    ) -> DeploymentMetricsSnapshot | None:
+        """Collect current bot metrics from most recent curated data."""
+        if not self._curated_dir.exists():
+            return None
+
+        date_dirs = sorted(
+            [d for d in self._curated_dir.iterdir() if d.is_dir()],
+            reverse=True,
+        )
+
+        for date_dir in date_dirs[:7]:  # Check last 7 days
+            bot_dir = date_dir / bot_id
+            summary_path = bot_dir / "summary.json"
+            if summary_path.exists():
+                try:
+                    data = json.loads(summary_path.read_text())
+                    return DeploymentMetricsSnapshot(
+                        bot_id=bot_id,
+                        total_trades=data.get("trade_count", 0),
+                        win_rate=data.get("win_rate", 0.0),
+                        avg_pnl=data.get("avg_pnl", 0.0),
+                        sharpe_rolling_7d=data.get("sharpe_ratio", 0.0),
+                        max_drawdown_pct=data.get("max_drawdown_pct", 0.0),
+                    )
+                except (json.JSONDecodeError, Exception):
+                    continue
+        return None
+
+    def _get_repo_dir(self, bot_id: str) -> Path:
+        """Get repo directory for a bot."""
+        if self._config_registry:
+            profile = self._config_registry.get_profile(bot_id)
+            if profile:
+                return Path(profile.repo_dir)
+        return Path(".")
+
+    def _load_all(self) -> list[DeploymentRecord]:
+        """Load all deployments from JSONL."""
+        if not self._path.exists():
+            return []
+        records = []
+        for line in self._path.read_text().strip().splitlines():
+            try:
+                records.append(DeploymentRecord.model_validate(json.loads(line)))
+            except (json.JSONDecodeError, Exception):
+                continue
+        return records
+
+    def _append_record(self, record: DeploymentRecord) -> None:
+        """Append a single record to JSONL."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._path.open("a") as f:
+            f.write(json.dumps(record.model_dump(), default=str) + "\n")
+
+    def _update_record(self, record: DeploymentRecord) -> None:
+        """Update an existing record in JSONL (full rewrite)."""
+        records = self._load_all()
+        updated = []
+        for r in records:
+            if r.deployment_id == record.deployment_id:
+                updated.append(record)
+            else:
+                updated.append(r)
+        self._save_all(updated)
+
+    def _save_all(self, records: list[DeploymentRecord]) -> None:
+        """Overwrite all records to JSONL."""
+        from skills._atomic_write import atomic_rewrite_jsonl
+
+        atomic_rewrite_jsonl(self._path, records)

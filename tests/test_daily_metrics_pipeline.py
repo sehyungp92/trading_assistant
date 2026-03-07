@@ -712,7 +712,7 @@ class TestExperimentBreakdownPipeline:
         assert snap.experiment_breakdown is None
 
     def test_write_curated_writes_experiment_breakdown(self, tmp_path: Path):
-        """write_curated writes experiment_breakdown.json when snapshot has data."""
+        """write_curated writes experiment_data.json when snapshot has data."""
         trades = [_make_trade("t1", "swing_trader", 100.0)]
         missed: list = []
         snapshot = {
@@ -725,7 +725,7 @@ class TestExperimentBreakdownPipeline:
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_trader")
         output_dir = builder.write_curated(trades, missed, base_dir=tmp_path, daily_snapshot=snapshot)
 
-        exp_path = output_dir / "experiment_breakdown.json"
+        exp_path = output_dir / "experiment_data.json"
         assert exp_path.exists()
         data = json.loads(exp_path.read_text())
         assert "variant_a" in data
@@ -738,7 +738,7 @@ class TestExperimentBreakdownPipeline:
         snapshot = {"per_strategy_summary": {}}
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         output_dir = builder.write_curated(trades, missed, base_dir=tmp_path, daily_snapshot=snapshot)
-        assert not (output_dir / "experiment_breakdown.json").exists()
+        assert not (output_dir / "experiment_data.json").exists()
 
     def test_write_curated_skips_without_snapshot(self, tmp_path: Path):
         """write_curated without snapshot does not write experiment_breakdown."""
@@ -746,21 +746,21 @@ class TestExperimentBreakdownPipeline:
         missed: list = []
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         output_dir = builder.write_curated(trades, missed, base_dir=tmp_path)
-        assert not (output_dir / "experiment_breakdown.json").exists()
+        assert not (output_dir / "experiment_data.json").exists()
 
     def test_prompt_assembler_includes_experiment_breakdown(self):
-        """Verify experiment_breakdown.json is in _CURATED_FILES list."""
+        """Verify experiment_data.json is in _CURATED_FILES list."""
         from analysis.prompt_assembler import _CURATED_FILES
-        assert "experiment_breakdown.json" in _CURATED_FILES
+        assert "experiment_data.json" in _CURATED_FILES
 
     def test_prompt_assembler_loads_experiment_breakdown(self, tmp_path: Path):
-        """DailyPromptAssembler loads experiment_breakdown data when file exists."""
+        """DailyPromptAssembler loads experiment_data when file exists."""
         from analysis.prompt_assembler import DailyPromptAssembler
 
         bot_dir = tmp_path / "curated" / "2026-03-01" / "swing_trader"
         bot_dir.mkdir(parents=True)
         exp_data = {"variant_a": {"trades": 5, "pnl": 200}}
-        (bot_dir / "experiment_breakdown.json").write_text(json.dumps(exp_data))
+        (bot_dir / "experiment_data.json").write_text(json.dumps(exp_data))
 
         memory_dir = tmp_path / "memory"
         policies_dir = memory_dir / "policies" / "v1"
@@ -774,8 +774,8 @@ class TestExperimentBreakdownPipeline:
             curated_dir=tmp_path / "curated", memory_dir=memory_dir,
         )
         pkg = assembler.assemble()
-        assert "experiment_breakdown" in pkg.data["swing_trader"]
-        assert pkg.data["swing_trader"]["experiment_breakdown"]["variant_a"]["pnl"] == 200
+        assert "experiment_data" in pkg.data["swing_trader"]
+        assert pkg.data["swing_trader"]["experiment_data"]["variant_a"]["pnl"] == 200
 
 
 class TestSignalHealthPipeline:

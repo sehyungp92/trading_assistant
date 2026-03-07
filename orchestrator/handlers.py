@@ -50,6 +50,9 @@ class Handlers:
         run_history_path: Path | None = None,
         suggestion_tracker: object | None = None,
         autonomous_pipeline: object | None = None,
+        experiment_manager: object | None = None,
+        deployment_monitor: object | None = None,
+        threshold_learner: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -67,6 +70,9 @@ class Handlers:
         self._run_history_path = run_history_path or (self._runs_dir.parent / "data" / "run_history.jsonl")
         self._suggestion_tracker = suggestion_tracker
         self._autonomous_pipeline = autonomous_pipeline
+        self._experiment_manager = experiment_manager
+        self._deployment_monitor = deployment_monitor
+        self._threshold_learner = threshold_learner
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -359,7 +365,10 @@ class Handlers:
             # Run strategy engine
             from analysis.strategy_engine import StrategyEngine
 
-            engine = StrategyEngine(week_start=week_start, week_end=week_end)
+            engine = StrategyEngine(
+                week_start=week_start, week_end=week_end,
+                threshold_learner=self._threshold_learner,
+            )
             refinement_report = engine.build_report(
                 portfolio_summary.bot_summaries,
                 signal_health=signal_health_data if signal_health_data else None,
@@ -643,6 +652,23 @@ class Handlers:
                     title=f"Weekly Report — {week_start} to {week_end}",
                     body=final_report[:2000],
                 )
+
+            # After weekly analysis, handle experiment lifecycle
+            if self._experiment_manager:
+                try:
+                    active_experiments = self._experiment_manager.get_active()
+                    for exp in active_experiments:
+                        if self._experiment_manager.check_auto_conclusion(exp.experiment_id):
+                            result_exp = self._experiment_manager.analyze_experiment(exp.experiment_id)
+                            self._experiment_manager.conclude_experiment(exp.experiment_id, result_exp)
+                            logger.info("Experiment %s concluded: %s", exp.experiment_id, result_exp.recommendation)
+                            if self._event_stream:
+                                self._event_stream.broadcast(
+                                    "experiment_concluded",
+                                    {"experiment_id": exp.experiment_id, "recommendation": result_exp.recommendation},
+                                )
+                except Exception:
+                    logger.exception("Experiment lifecycle check failed")
 
         except Exception as exc:
             elapsed = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
@@ -1735,3 +1761,22 @@ class Handlers:
 
         logger.info("Loaded %d trades, %d missed for WFO bot %s", len(trades), len(missed), bot_id)
         return (trades, missed)
+
+    async def _check_deployments(self) -> None:
+        """Periodic deployment monitoring check."""
+        if not self._deployment_monitor:
+            return
+        from schemas.deployment_monitoring import DeploymentStatus
+
+        for deployment in self._deployment_monitor.get_monitoring():
+            try:
+                if deployment.status == DeploymentStatus.PENDING_MERGE:
+                    await self._deployment_monitor.check_merge_status(deployment.deployment_id)
+                elif deployment.status == DeploymentStatus.DEPLOYED:
+                    if self._deployment_monitor.check_monitoring_window_expired(deployment.deployment_id):
+                        logger.info("Deployment %s monitoring complete — no regression", deployment.deployment_id)
+                    elif self._deployment_monitor.check_regression(deployment.deployment_id):
+                        logger.warning("Regression detected for deployment %s", deployment.deployment_id)
+                        await self._deployment_monitor.create_rollback_pr(deployment.deployment_id)
+            except Exception:
+                logger.exception("Deployment check failed for %s", deployment.deployment_id)

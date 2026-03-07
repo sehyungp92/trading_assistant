@@ -192,6 +192,35 @@ class OrchestratorBrain:
     def _handle_exit_movement(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_filter_decision(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_indicator_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_orderbook_context(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_parameter_change(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        """Route parameter changes — safety-critical params get immediate alert."""
+        payload = json.loads(event.get("payload", "{}")) if isinstance(event.get("payload"), str) else event.get("payload", {})
+        param_name = payload.get("param_name", "")
+        is_safety_critical = payload.get("is_safety_critical", False)
+
+        _SAFETY_CRITICAL_PARAMS = {
+            "risk_per_trade", "max_position_size", "kill_switch_enabled",
+            "trailing_stop_pct", "max_drawdown_pct", "leverage_limit",
+        }
+
+        if is_safety_critical or param_name in _SAFETY_CRITICAL_PARAMS:
+            return [Action(
+                type=ActionType.ALERT_IMMEDIATE,
+                event_id=event_id,
+                bot_id=bot_id,
+                details={"param_name": param_name, "safety_critical": True, **payload},
+            )]
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
 
@@ -226,4 +255,8 @@ class OrchestratorBrain:
         "market_snapshot": _handle_market_snapshot,
         "exit_movement": _handle_exit_movement,
         "user_feedback": _handle_user_feedback,
+        "filter_decision": _handle_filter_decision,
+        "indicator_snapshot": _handle_indicator_snapshot,
+        "orderbook_context": _handle_orderbook_context,
+        "parameter_change": _handle_parameter_change,
     }

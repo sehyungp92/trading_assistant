@@ -401,6 +401,21 @@ class DailyMetricsBuilder:
             },
         }
 
+    def build_experiment_breakdown(self, snapshot_data: dict) -> dict:
+        """Extract experiment breakdown from DailySnapshot data.
+
+        Args:
+            snapshot_data: Dict containing DailySnapshot fields including
+                optional 'experiment_breakdown' dict.
+
+        Returns:
+            Dict with per-experiment, per-variant daily metrics.
+        """
+        breakdown = snapshot_data.get("experiment_breakdown", {})
+        if not breakdown:
+            return {}
+        return breakdown
+
     def coordinator_impact(self, coordination_events: list[dict]) -> dict:
         """Aggregate coordinator events into a daily summary.
 
@@ -445,6 +460,71 @@ class DailyMetricsBuilder:
             "events": coordination_events,
         }
 
+    def build_filter_decision_summary(self, events: list[dict]) -> dict:
+        """Aggregate per-filter pass/fail rates and margin distributions."""
+        by_filter: dict[str, dict] = {}
+        for e in events:
+            name = e.get("filter_name", "unknown")
+            if name not in by_filter:
+                by_filter[name] = {"total": 0, "passed": 0, "blocked": 0, "margins": []}
+            by_filter[name]["total"] += 1
+            if e.get("passed", False):
+                by_filter[name]["passed"] += 1
+            else:
+                by_filter[name]["blocked"] += 1
+            margin = e.get("margin_pct", 0.0)
+            by_filter[name]["margins"].append(margin)
+
+        result = {}
+        for name, data in by_filter.items():
+            margins = data["margins"]
+            result[name] = {
+                "total_decisions": data["total"],
+                "pass_count": data["passed"],
+                "block_count": data["blocked"],
+                "pass_rate": data["passed"] / data["total"] if data["total"] > 0 else 0.0,
+                "avg_margin_pct": sum(margins) / len(margins) if margins else 0.0,
+                "min_margin_pct": min(margins) if margins else 0.0,
+                "near_threshold_count": sum(1 for m in margins if abs(m) < 5.0),
+            }
+        return result
+
+    def build_indicator_snapshot_summary(self, events: list[dict]) -> dict:
+        """Aggregate indicator value distributions."""
+        indicator_values: dict[str, list[float]] = defaultdict(list)
+        decisions = {"enter": 0, "skip": 0, "exit": 0}
+
+        for e in events:
+            for name, value in e.get("indicators", {}).items():
+                indicator_values[name].append(value)
+            decision = e.get("decision", "skip")
+            decisions[decision] = decisions.get(decision, 0) + 1
+
+        summary: dict = {"decisions": decisions, "indicators": {}}
+        for name, values in indicator_values.items():
+            summary["indicators"][name] = {
+                "count": len(values),
+                "mean": sum(values) / len(values) if values else 0.0,
+                "min": min(values) if values else 0.0,
+                "max": max(values) if values else 0.0,
+            }
+        return summary
+
+    def build_orderbook_summary(self, events: list[dict]) -> dict:
+        """Aggregate spread, depth, imbalance stats."""
+        if not events:
+            return {}
+        spreads = [e.get("spread_bps", 0.0) for e in events]
+        imbalances = [e.get("imbalance_ratio", 0.0) for e in events]
+        return {
+            "event_count": len(events),
+            "avg_spread_bps": sum(spreads) / len(spreads),
+            "max_spread_bps": max(spreads),
+            "avg_imbalance_ratio": sum(imbalances) / len(imbalances),
+            "entry_count": sum(1 for e in events if e.get("trade_context") == "entry"),
+            "exit_count": sum(1 for e in events if e.get("trade_context") == "exit"),
+        }
+
     def write_curated(
         self,
         trades: list[TradeEvent],
@@ -453,6 +533,9 @@ class DailyMetricsBuilder:
         coordination_events: list[dict] | None = None,
         daily_snapshot: dict | None = None,
         findings_dir: Path | None = None,
+        filter_decision_events: list[dict] | None = None,
+        indicator_snapshot_events: list[dict] | None = None,
+        orderbook_context_events: list[dict] | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
@@ -536,11 +619,11 @@ class DailyMetricsBuilder:
             if overlay_summary:
                 self._write_json(output_dir / "overlay_state_summary.json", overlay_summary)
 
-        # 1.4: Write experiment breakdown if present in snapshot
+        # 1.4: Write experiment data if present in snapshot
         if daily_snapshot:
-            experiment_data = daily_snapshot.get("experiment_breakdown")
+            experiment_data = self.build_experiment_breakdown(daily_snapshot)
             if experiment_data:
-                self._write_json(output_dir / "experiment_breakdown.json", experiment_data)
+                self._write_json(output_dir / "experiment_data.json", experiment_data)
 
         # 1.5: Write signal health if any trades carry signal_evolution data
         if any(t.signal_evolution for t in trades):
@@ -555,6 +638,25 @@ class DailyMetricsBuilder:
             analyzer = FillQualityAnalyzer(bot_id=self.bot_id, date=self.date)
             report = analyzer.compute(trades)
             self._write_json(output_dir / "fill_quality.json", report.model_dump(mode="json"))
+
+        # Write enriched event summaries if provided
+        if filter_decision_events:
+            self._write_json(
+                output_dir / "filter_decisions.json",
+                self.build_filter_decision_summary(filter_decision_events),
+            )
+
+        if indicator_snapshot_events:
+            self._write_json(
+                output_dir / "indicator_snapshots.json",
+                self.build_indicator_snapshot_summary(indicator_snapshot_events),
+            )
+
+        if orderbook_context_events:
+            self._write_json(
+                output_dir / "orderbook_context.json",
+                self.build_orderbook_summary(orderbook_context_events),
+            )
 
         return output_dir
 
