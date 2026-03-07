@@ -42,6 +42,19 @@ class FeedbackHandler:
                 raw_text=text,
             )
 
+        # Pattern: Allocation approved / allocation change
+        alloc_match = re.search(
+            r"(?:approv|accept|confirm).*(?:alloc|rebalanc|split)",
+            text,
+            re.IGNORECASE,
+        )
+        if alloc_match:
+            return HumanCorrection(
+                correction_type=CorrectionType.ALLOCATION_CHANGE,
+                original_report_id=self.report_id,
+                raw_text=text,
+            )
+
         # Pattern: Good catch, nice, well done, etc.
         positive_patterns = [
             r"good\s+catch",

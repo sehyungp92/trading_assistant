@@ -307,6 +307,100 @@ class DailyMetricsBuilder:
             total_trades_with_data=total_with_data,
         )
 
+    def build_per_strategy_from_snapshot(
+        self, daily_snapshot: dict,
+    ) -> dict[str, "PerStrategySummary"]:
+        """Map DailySnapshot.per_strategy_summary (loose dict) into typed objects."""
+        from schemas.daily_metrics import PerStrategySummary
+
+        result = {}
+        raw = daily_snapshot.get("per_strategy_summary", {})
+
+        for strategy_id, data in raw.items():
+            if not isinstance(data, dict):
+                continue
+
+            # Normalize win_rate: bots may emit 0-100 or 0-1
+            win_rate = data.get("win_rate", 0.0)
+            if win_rate > 1.0:
+                win_rate = win_rate / 100.0
+
+            result[strategy_id] = PerStrategySummary(
+                strategy_id=strategy_id,
+                trades=data.get("trades", 0),
+                win_count=data.get("win_count", 0),
+                loss_count=data.get("loss_count", 0),
+                gross_pnl=data.get("gross_pnl", 0.0),
+                net_pnl=data.get("net_pnl", 0.0),
+                win_rate=win_rate,
+                avg_win=data.get("avg_win", 0.0),
+                avg_loss=data.get("avg_loss", 0.0),
+                best_trade_pnl=data.get("best_trade_pnl", 0.0),
+                worst_trade_pnl=data.get("worst_trade_pnl", 0.0),
+                avg_entry_slippage_bps=data.get("avg_entry_slippage_bps"),
+            )
+
+        return result
+
+    def build_excursion_stats(self, trades: list[TradeEvent]) -> dict:
+        """Build aggregate excursion statistics from trades with MFE/MAE data."""
+        excursion_trades = [t for t in trades if t.mfe_pct is not None and t.mae_pct is not None]
+
+        if not excursion_trades:
+            return {"coverage": 0, "total_trades": len(trades), "stats": {}}
+
+        mfe_pcts = [t.mfe_pct for t in excursion_trades]
+        mae_pcts = [t.mae_pct for t in excursion_trades]
+        efficiencies = [t.exit_efficiency for t in excursion_trades if t.exit_efficiency is not None]
+        mfe_rs = [t.mfe_r for t in excursion_trades if t.mfe_r is not None]
+        mae_rs = [t.mae_r for t in excursion_trades if t.mae_r is not None]
+
+        def _stats(values: list[float]) -> dict:
+            if not values:
+                return {}
+            s = sorted(values)
+            n = len(s)
+            return {
+                "mean": sum(s) / n,
+                "median": s[n // 2],
+                "p25": s[max(0, n // 4)],
+                "p75": s[max(0, 3 * n // 4)],
+                "min": s[0],
+                "max": s[-1],
+            }
+
+        # Winners vs losers breakdown
+        winners = [t for t in excursion_trades if t.pnl > 0]
+        losers = [t for t in excursion_trades if t.pnl <= 0]
+
+        return {
+            "coverage": len(excursion_trades),
+            "total_trades": len(trades),
+            "coverage_pct": len(excursion_trades) / len(trades) * 100 if trades else 0,
+            "stats": {
+                "mfe_pct": _stats(mfe_pcts),
+                "mae_pct": _stats(mae_pcts),
+                "exit_efficiency": _stats(efficiencies),
+                "mfe_r": _stats(mfe_rs),
+                "mae_r": _stats(mae_rs),
+            },
+            "winners": {
+                "count": len(winners),
+                "avg_mfe_pct": sum(t.mfe_pct for t in winners) / len(winners) if winners else 0,
+                "avg_mae_pct": sum(t.mae_pct for t in winners) / len(winners) if winners else 0,
+                "avg_exit_efficiency": (
+                    sum(t.exit_efficiency for t in winners if t.exit_efficiency is not None)
+                    / sum(1 for t in winners if t.exit_efficiency is not None)
+                    if any(t.exit_efficiency is not None for t in winners) else 0
+                ),
+            },
+            "losers": {
+                "count": len(losers),
+                "avg_mfe_pct": sum(t.mfe_pct for t in losers) / len(losers) if losers else 0,
+                "avg_mae_pct": sum(t.mae_pct for t in losers) / len(losers) if losers else 0,
+            },
+        }
+
     def coordinator_impact(self, coordination_events: list[dict]) -> dict:
         """Aggregate coordinator events into a daily summary.
 
@@ -325,6 +419,7 @@ class DailyMetricsBuilder:
                 "by_action": {},
                 "by_rule": {},
                 "symbols_affected": [],
+                "events": [],
             }
 
         by_action: dict[str, int] = defaultdict(int)
@@ -347,6 +442,7 @@ class DailyMetricsBuilder:
             "by_action": dict(by_action),
             "by_rule": dict(by_rule),
             "symbols_affected": sorted(symbols),
+            "events": coordination_events,
         }
 
     def write_curated(
@@ -355,12 +451,21 @@ class DailyMetricsBuilder:
         missed: list[MissedOpportunityEvent],
         base_dir: Path,
         coordination_events: list[dict] | None = None,
+        daily_snapshot: dict | None = None,
+        findings_dir: Path | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         summary = self.build_summary(trades)
+
+        # Enrich summary with per-strategy data from snapshot
+        if daily_snapshot:
+            per_strategy = self.build_per_strategy_from_snapshot(daily_snapshot)
+            if per_strategy:
+                summary.per_strategy_summary = per_strategy
+
         winners = self.top_winners(trades)
         losers = self.top_losers(trades)
         failures = self.process_failures(trades)
@@ -379,8 +484,39 @@ class DailyMetricsBuilder:
         self._write_json(output_dir / "root_cause_summary.json", root_causes.model_dump(mode="json"))
         self._write_json(output_dir / "hourly_performance.json", self.hourly_performance(trades))
         self._write_json(output_dir / "slippage_stats.json", self.slippage_stats(trades))
-        self._write_json(output_dir / "factor_attribution.json", self.factor_attribution(trades).model_dump(mode="json"))
+        factor_attr = self.factor_attribution(trades)
+        self._write_json(output_dir / "factor_attribution.json", factor_attr.model_dump(mode="json"))
         self._write_json(output_dir / "exit_efficiency.json", self.exit_efficiency(trades).model_dump(mode="json"))
+
+        # Record factor history for rolling analysis
+        if findings_dir is not None:
+            try:
+                from schemas.signal_factor_history import DailyFactorSnapshot, FactorDayStats
+                from skills.signal_factor_tracker import SignalFactorTracker
+
+                snapshot = DailyFactorSnapshot(
+                    date=self.date,
+                    bot_id=self.bot_id,
+                    factors=[
+                        FactorDayStats(
+                            factor_name=f.factor_name,
+                            trade_count=f.trade_count,
+                            win_rate=f.win_rate,
+                            avg_pnl=f.avg_pnl,
+                            total_pnl=f.total_pnl,
+                            avg_contribution=f.avg_contribution,
+                        )
+                        for f in factor_attr.factors
+                    ],
+                )
+                SignalFactorTracker(findings_dir).record_daily(snapshot)
+            except Exception:
+                pass  # Don't block pipeline on history recording failure
+
+        # Write excursion stats if any trades carry MFE/MAE data
+        excursion = self.build_excursion_stats(trades)
+        if excursion["coverage"] > 0:
+            self._write_json(output_dir / "excursion_stats.json", excursion)
 
         # Write regime→bps mapping for WFO cost model
         from skills.slippage_analyzer import SlippageAnalyzer as _SlipAnalyzer
@@ -393,6 +529,32 @@ class DailyMetricsBuilder:
                 output_dir / "coordinator_impact.json",
                 self.coordinator_impact(coordination_events),
             )
+
+        # Write overlay state summary if present in snapshot
+        if daily_snapshot:
+            overlay_summary = daily_snapshot.get("overlay_state_summary")
+            if overlay_summary:
+                self._write_json(output_dir / "overlay_state_summary.json", overlay_summary)
+
+        # 1.4: Write experiment breakdown if present in snapshot
+        if daily_snapshot:
+            experiment_data = daily_snapshot.get("experiment_breakdown")
+            if experiment_data:
+                self._write_json(output_dir / "experiment_breakdown.json", experiment_data)
+
+        # 1.5: Write signal health if any trades carry signal_evolution data
+        if any(t.signal_evolution for t in trades):
+            from skills.signal_health_analyzer import SignalHealthAnalyzer
+            analyzer = SignalHealthAnalyzer(bot_id=self.bot_id, date=self.date)
+            report = analyzer.compute(trades)
+            self._write_json(output_dir / "signal_health.json", report.model_dump(mode="json"))
+
+        # 2.6: Write fill quality if any trades carry fill detail data
+        if any(t.entry_fill_details or t.exit_fill_details for t in trades):
+            from skills.fill_quality_analyzer import FillQualityAnalyzer
+            analyzer = FillQualityAnalyzer(bot_id=self.bot_id, date=self.date)
+            report = analyzer.compute(trades)
+            self._write_json(output_dir / "fill_quality.json", report.model_dump(mode="json"))
 
         return output_dir
 

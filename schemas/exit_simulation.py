@@ -41,3 +41,12 @@ class ExitSimulationResult(BaseModel):
     @property
     def improvement(self) -> float:
         return self.simulated_pnl - self.baseline_pnl
+
+
+class ExitSweepResult(BaseModel):
+    bot_id: str
+    configs_tested: int = 0
+    baseline_pnl: float = 0.0
+    results: list[ExitSimulationResult] = []
+    best_strategy: ExitStrategyConfig | None = None
+    best_improvement: float = 0.0

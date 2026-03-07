@@ -72,6 +72,20 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert actions[0].type == ActionType.UPDATE_HEARTBEAT
 
+    def test_coordinator_action_queued_for_daily(self, brain: OrchestratorBrain):
+        event = {
+            "event_id": "ca001",
+            "bot_id": "swing_trader",
+            "event_type": "coordinator_action",
+            "source_strategy": "ATRSS",
+            "target_strategy": "Helix",
+            "action": "tighten_stops",
+        }
+        actions = brain.decide(event)
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].bot_id == "swing_trader"
+
     def test_unknown_event_type_logged(self, brain: OrchestratorBrain):
         event = {
             "event_id": "u001",

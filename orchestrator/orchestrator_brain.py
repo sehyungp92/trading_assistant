@@ -154,6 +154,15 @@ class OrchestratorBrain:
     def _handle_notification_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.SEND_NOTIFICATION, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_coordinator_action(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        """Route coordinator action events to daily analysis queue.
+
+        Coordinator events describe strategy interactions (tighten/loosen stops,
+        sizing adjustments) and are consumed by the daily metrics pipeline to
+        produce coordinator_impact.json.
+        """
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
 
@@ -178,4 +187,5 @@ class OrchestratorBrain:
         "weekly_summary_trigger": _handle_weekly_summary_trigger,
         "wfo_trigger": _handle_wfo_trigger,
         "notification_trigger": _handle_notification_trigger,
+        "coordinator_action": _handle_coordinator_action,
     }

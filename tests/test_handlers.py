@@ -98,6 +98,12 @@ class TestDailyAnalysis:
                 (bot_dir / f).write_text("{}")
         # Portfolio risk card
         (tmp_path / "data" / "curated" / date / "portfolio_risk_card.json").write_text("{}")
+        # Trade data so minimum-data threshold passes
+        for bot in ["bot1", "bot2"]:
+            bot_dir = tmp_path / "data" / "curated" / date / bot
+            (bot_dir / "trades.jsonl").write_text(
+                '{"trade_id":"t1"}\n{"trade_id":"t2"}\n'
+            )
         # Memory dir needs to exist for context builder
         (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
 
@@ -111,12 +117,21 @@ class TestDailyAnalysis:
 
     @pytest.mark.asyncio
     async def test_quality_gate_degraded_still_invokes_claude(
-        self, handlers: Handlers, mock_agent_runner, mock_dispatcher, event_stream: EventStream
+        self, handlers: Handlers, mock_agent_runner, mock_dispatcher, event_stream: EventStream,
+        tmp_path: Path,
     ):
         """Quality gate FAIL (degraded) -> still invoke Claude with available data."""
-        action = _make_action(ActionType.SPAWN_DAILY_ANALYSIS, details={"date": "2026-03-02"})
+        date = "2026-03-02"
+        # Create trade data to pass minimum-data threshold
+        for bot in ["bot1", "bot2"]:
+            bot_dir = tmp_path / "data" / "curated" / date / bot
+            bot_dir.mkdir(parents=True, exist_ok=True)
+            (bot_dir / "trades.jsonl").write_text(
+                '{"trade_id":"t1"}\n{"trade_id":"t2"}\n'
+            )
+        action = _make_action(ActionType.SPAWN_DAILY_ANALYSIS, details={"date": date})
 
-        # No curated data -> quality gate will report degraded but can_proceed=True
+        # No curated JSON files -> quality gate will report degraded but can_proceed=True
         await handlers.handle_daily_analysis(action)
 
         # Agent SHOULD be invoked (graceful degradation)
@@ -348,6 +363,73 @@ class TestNotification:
         assert payload.priority == NotificationPriority.HIGH
 
 
+class TestLoadCoordinatorEvents:
+    def test_loads_events_from_coordinator_impact_json(self, handlers: Handlers, tmp_path: Path):
+        """Write coordinator_impact.json with events list, verify parsed CoordinatorAction objects."""
+        date = "2026-03-01"
+        coord_dir = tmp_path / "data" / "curated" / date / "swing_trader"
+        coord_dir.mkdir(parents=True)
+        events_data = {
+            "total_events": 2,
+            "by_action": {"tighten_stop_be": 1, "size_boost": 1},
+            "by_rule": {"rule_1": 2},
+            "symbols_affected": ["BTCUSDT"],
+            "events": [
+                {
+                    "action": "tighten_stop_be",
+                    "trigger_strategy": "strat_a",
+                    "target_strategy": "strat_b",
+                    "symbol": "BTCUSDT",
+                    "rule": "rule_1",
+                    "timestamp": "2026-03-01T12:00:00Z",
+                },
+                {
+                    "action": "size_boost",
+                    "trigger_strategy": "strat_c",
+                    "target_strategy": "strat_d",
+                    "symbol": "BTCUSDT",
+                    "rule": "rule_1",
+                    "timestamp": "2026-03-01T13:00:00Z",
+                },
+            ],
+        }
+        (coord_dir / "coordinator_impact.json").write_text(json.dumps(events_data))
+
+        result = handlers._load_coordinator_events(date, date)
+        assert len(result) == 2
+        assert result[0].action == "tighten_stop_be"
+        assert result[1].action == "size_boost"
+
+    def test_returns_empty_when_no_files(self, handlers: Handlers):
+        """No files exist -> empty list."""
+        result = handlers._load_coordinator_events("2026-01-01", "2026-01-07")
+        assert result == []
+
+    def test_skips_malformed_events(self, handlers: Handlers, tmp_path: Path):
+        """Some valid, some malformed entries -> only valid returned."""
+        date = "2026-03-01"
+        coord_dir = tmp_path / "data" / "curated" / date / "swing_trader"
+        coord_dir.mkdir(parents=True)
+        events_data = {
+            "events": [
+                {"action": "tighten_stop_be", "rule": "rule_1"},
+                {"not_a_valid_field_only": 123},  # missing required 'action'
+                {"action": "size_boost", "rule": "rule_2"},
+            ],
+        }
+        (coord_dir / "coordinator_impact.json").write_text(json.dumps(events_data))
+
+        result = handlers._load_coordinator_events(date, date)
+        # CoordinatorAction requires 'action' field; the malformed one without it should be skipped
+        # Actually, checking the schema: action is required (no default), so the middle one should fail
+        # But wait - it has no 'action' key but all others have defaults. Let me check...
+        # The second entry {"not_a_valid_field_only": 123} has no 'action', which is required.
+        # So it should be skipped. The first and third are valid.
+        assert len(result) == 2
+        assert result[0].action == "tighten_stop_be"
+        assert result[1].action == "size_boost"
+
+
 class TestErrorEmission:
     @pytest.mark.asyncio
     async def test_handler_error_emits_sse(
@@ -373,6 +455,11 @@ class TestErrorEmission:
             ]:
                 (bot_dir / f).write_text("{}")
         (curated_dir / date / "portfolio_risk_card.json").write_text("{}")
+        # Trade data so minimum-data threshold passes
+        for bot in ["bot1", "bot2"]:
+            (curated_dir / date / bot / "trades.jsonl").write_text(
+                '{"trade_id":"t1"}\n{"trade_id":"t2"}\n'
+            )
         handlers._memory_dir.mkdir(parents=True, exist_ok=True)
 
         action = _make_action(ActionType.SPAWN_DAILY_ANALYSIS, details={"date": date})

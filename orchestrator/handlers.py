@@ -24,6 +24,10 @@ from schemas.notifications import (
 
 logger = logging.getLogger(__name__)
 
+# Minimum total trades across all bots to justify a full Claude analysis invocation.
+# Days with fewer trades get a deterministic summary instead.
+_MIN_TRADES_FOR_ANALYSIS = 3
+
 
 class Handlers:
     """Handler implementations for all worker action types."""
@@ -111,6 +115,37 @@ class Handlers:
                     "blocking_issues": checklist.blocking_issues,
                     "data_completeness": checklist.data_completeness,
                 })
+
+            # Minimum-data threshold: skip Claude if insufficient data
+            total_trades = self._count_daily_trades(date)
+            if total_trades < _MIN_TRADES_FOR_ANALYSIS:
+                logger.info(
+                    "Only %d trades on %s (min %d) — producing deterministic summary",
+                    total_trades, date, _MIN_TRADES_FOR_ANALYSIS,
+                )
+                completeness = getattr(checklist, "data_completeness", 0.0)
+                try:
+                    completeness_str = f"{completeness:.0%}"
+                except (TypeError, ValueError):
+                    completeness_str = str(completeness)
+                body = (
+                    f"Daily summary for {date}: {total_trades} trade(s) across {len(self._bots)} bot(s). "
+                    f"Insufficient data for full analysis (minimum {_MIN_TRADES_FOR_ANALYSIS} trades required). "
+                    f"Data completeness: {completeness_str}."
+                )
+                self._record_run(
+                    run_id, "daily_analysis", "skipped",
+                    started_at=start_time.isoformat(),
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    duration_ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
+                )
+                await self._notify(
+                    notification_type="daily_report",
+                    priority=NotificationPriority.LOW,
+                    title=f"Daily Summary — {date} (light day)",
+                    body=body,
+                )
+                return
 
             # Collect event batching counts
             event_counts: dict = {}
@@ -248,11 +283,44 @@ class Handlers:
                 "run_id": run_id, "stage": "metrics_build", "handler": "weekly_analysis",
             })
 
+            # Load most recent signal_health.json per bot from the week
+            signal_health_data: dict[str, dict] = {}
+            from datetime import timedelta as _td
+            start_dt = datetime.strptime(week_start, "%Y-%m-%d")
+            dates_in_week = [(start_dt + _td(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+            for bot in self._bots:
+                for date_str in reversed(dates_in_week):  # most recent first
+                    sh_path = self._curated_dir / date_str / bot / "signal_health.json"
+                    if sh_path.exists():
+                        signal_health_data[bot] = json.loads(sh_path.read_text())
+                        break
+
+            # Load factor rolling data per bot
+            factor_rolling_data: dict[str, list[dict]] = {}
+            findings_dir = self._memory_dir / "findings"
+            if findings_dir.exists():
+                try:
+                    from skills.signal_factor_tracker import SignalFactorTracker
+
+                    tracker = SignalFactorTracker(findings_dir)
+                    for bot in self._bots:
+                        report = tracker.compute_rolling(bot, week_end)
+                        if report.factors:
+                            factor_rolling_data[bot] = [
+                                f.model_dump(mode="json") for f in report.factors
+                            ]
+                except Exception:
+                    logger.warning("Failed to load factor rolling data", exc_info=True)
+
             # Run strategy engine
             from analysis.strategy_engine import StrategyEngine
 
             engine = StrategyEngine(week_start=week_start, week_end=week_end)
-            refinement_report = engine.build_report(portfolio_summary.bot_summaries)
+            refinement_report = engine.build_report(
+                portfolio_summary.bot_summaries,
+                signal_health=signal_health_data if signal_health_data else None,
+                factor_rolling=factor_rolling_data if factor_rolling_data else None,
+            )
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "strategy_engine", "handler": "weekly_analysis",
@@ -301,6 +369,43 @@ class Handlers:
             # Inject allocation analysis results
             if allocation_results:
                 package.data.update({"allocation_analysis": allocation_results})
+
+            # Weekly retrospective — compare last week's predictions to actual outcomes
+            try:
+                from skills.retrospective_builder import RetrospectiveBuilder
+
+                retro_builder = RetrospectiveBuilder(
+                    runs_dir=self._runs_dir,
+                    curated_dir=self._curated_dir,
+                    memory_dir=self._memory_dir,
+                )
+                retrospective = retro_builder.build(week_start, week_end)
+                if retrospective.predictions_reviewed > 0:
+                    package.data["weekly_retrospective"] = retrospective.model_dump(mode="json")
+            except Exception:
+                logger.warning("Retrospective builder failed — skipping")
+
+            # Correction pattern extraction — surface recurring human correction patterns
+            try:
+                from skills.correction_pattern_extractor import CorrectionPatternExtractor
+
+                ctx = ContextBuilder(self._memory_dir)
+                corrections = ctx.load_corrections()
+                if corrections:
+                    extractor = CorrectionPatternExtractor(min_occurrences=2)
+                    pattern_report = extractor.extract(corrections)
+                    if pattern_report.patterns:
+                        package.data["correction_patterns"] = [
+                            p.model_dump(mode="json") for p in pattern_report.patterns
+                        ]
+                        # Persist to findings for use in future base_package()
+                        patterns_path = self._memory_dir / "findings" / "correction_patterns.jsonl"
+                        patterns_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(patterns_path, "w", encoding="utf-8") as f:
+                            for p in pattern_report.patterns:
+                                f.write(json.dumps(p.model_dump(mode="json")) + "\n")
+            except Exception:
+                logger.warning("Correction pattern extraction failed — skipping")
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "weekly_analysis",
@@ -602,12 +707,52 @@ class Handlers:
         corrections_path = self._memory_dir / "findings" / "corrections.jsonl"
         handler.write_correction(correction, corrections_path)
 
+        # Record allocation changes when user approves allocation recommendations
+        from schemas.corrections import CorrectionType
+
+        if correction.correction_type == CorrectionType.ALLOCATION_CHANGE:
+            self._record_allocation_change(correction, details)
+
         await self._notify(
             notification_type="feedback_received",
             priority=NotificationPriority.LOW,
             title="Feedback recorded",
             body=f"Correction type: {correction.correction_type.value}",
         )
+
+    def _record_allocation_change(self, correction, details: dict) -> None:
+        """Persist an approved allocation change via AllocationTracker."""
+        try:
+            from skills.allocation_tracker import AllocationTracker
+            from schemas.allocation_history import AllocationRecord, AllocationSource
+
+            tracker = AllocationTracker(self._memory_dir / "findings")
+
+            # Extract allocation details from the action payload if provided
+            allocations = details.get("allocations", [])
+            date = details.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+            if allocations:
+                for alloc in allocations:
+                    tracker.record(AllocationRecord(
+                        date=date,
+                        bot_id=alloc.get("bot_id", ""),
+                        strategy_id=alloc.get("strategy_id", ""),
+                        allocation_pct=alloc.get("allocation_pct", 0.0),
+                        source=AllocationSource.MANUAL,
+                        reason=f"Approved via feedback: {correction.raw_text[:100]}",
+                    ))
+            else:
+                # Record the approval event even without specific allocations
+                tracker.record(AllocationRecord(
+                    date=date,
+                    bot_id=details.get("bot_id", "unknown"),
+                    allocation_pct=0.0,
+                    source=AllocationSource.MANUAL,
+                    reason=f"Allocation approved: {correction.raw_text[:200]}",
+                ))
+        except Exception:
+            logger.warning("Failed to record allocation change from feedback")
 
     # --- Private helpers ---
 
@@ -670,11 +815,16 @@ class Handlers:
         week_start: str,
         week_end: str,
     ) -> dict:
-        """Run simulation skills based on strategy engine findings.
+        """Run simulation skills for all bots unconditionally.
 
-        Runs FilterSensitivityAnalyzer and CounterfactualSimulator for bots
-        with detected issues. Runs ExitStrategySimulator when exit timing
-        issues are flagged.
+        Runs FilterSensitivityAnalyzer, CounterfactualSimulator, and
+        ExitStrategySimulator for every bot that has data, regardless of
+        whether the strategy engine flagged specific issues. This ensures
+        healthy bots still get proactive "what if" analysis.
+
+        Strategy engine suggestions are used to enrich context (e.g. extracting
+        a specific regime for counterfactual analysis) but do NOT gate whether
+        simulations run.
         """
         results: dict = {}
 
@@ -682,70 +832,70 @@ class Handlers:
             from skills.filter_sensitivity_analyzer import FilterSensitivityAnalyzer
             from skills.counterfactual_simulator import CounterfactualSimulator
             from skills.exit_strategy_simulator import ExitStrategySimulator
-            from schemas.exit_simulation import ExitStrategyConfig, ExitStrategyType
+            from schemas.exit_simulation import ExitStrategyConfig, ExitStrategyType, ExitSweepResult
 
             suggestions = getattr(refinement_report, "suggestions", [])
             counterfactual = CounterfactualSimulator()
             exit_sim = ExitStrategySimulator()
 
-            # Collect bots that have issues
-            bots_with_filter_issues: set[str] = set()
-            bots_with_regime_issues: dict[str, str] = {}  # bot_id -> regime
-            bots_with_exit_issues: set[str] = set()
-
+            # Extract regime hints from suggestions (used to enrich counterfactual, not to gate)
+            regime_hints: dict[str, str] = {}
             for suggestion in suggestions:
                 bot_id = getattr(suggestion, "bot_id", None) or ""
                 title = getattr(suggestion, "title", "") or ""
-                title_lower = title.lower()
-                if "filter" in title_lower:
-                    bots_with_filter_issues.add(bot_id)
-                if "regime" in title_lower:
-                    # Extract regime name from suggestion if available
-                    regime = getattr(suggestion, "regime", None) or "ranging"
-                    bots_with_regime_issues[bot_id] = regime
-                if "exit" in title_lower or "stop" in title_lower:
-                    bots_with_exit_issues.add(bot_id)
+                if "regime" in title.lower() and bot_id:
+                    regime_hints[bot_id] = getattr(suggestion, "regime", None) or "ranging"
 
-            # Run FilterSensitivity for bots with filter issues
-            for bot_id in bots_with_filter_issues:
-                if not bot_id:
-                    continue
-                try:
-                    _, missed = self._load_trades_for_week(bot_id, week_start, week_end)
-                    if missed:
+            # Run all simulations for every known bot
+            for bot_id in self._bots:
+                trades, missed = self._load_trades_for_week(bot_id, week_start, week_end)
+
+                # FilterSensitivity — needs missed opportunities
+                if missed:
+                    try:
                         analyzer = FilterSensitivityAnalyzer(bot_id=bot_id, date=week_start)
                         report = analyzer.analyze(missed)
                         results[f"filter_sensitivity_{bot_id}"] = report.model_dump(mode="json")
-                except Exception:
-                    logger.warning("FilterSensitivity failed for %s", bot_id)
+                    except Exception:
+                        logger.warning("FilterSensitivity failed for %s", bot_id)
 
-            # Run Counterfactual for bots with regime issues
-            for bot_id, regime in bots_with_regime_issues.items():
-                if not bot_id:
-                    continue
-                try:
-                    trades, missed = self._load_trades_for_week(bot_id, week_start, week_end)
-                    if trades or missed:
-                        result = counterfactual.simulate_regime_gate(trades, missed, regime)
-                        results[f"counterfactual_{bot_id}"] = result.model_dump(mode="json")
-                except Exception:
-                    logger.warning("Counterfactual failed for %s", bot_id)
+                # Counterfactual — needs trades or missed
+                if trades or missed:
+                    try:
+                        regime = regime_hints.get(bot_id, "ranging")
+                        sim_result = counterfactual.simulate_regime_gate(trades, missed, regime)
+                        results[f"counterfactual_{bot_id}"] = sim_result.model_dump(mode="json")
+                    except Exception:
+                        logger.warning("Counterfactual failed for %s", bot_id)
 
-            # Run ExitStrategy for bots with exit issues
-            for bot_id in bots_with_exit_issues:
-                if not bot_id:
-                    continue
-                try:
-                    trades, _ = self._load_trades_for_week(bot_id, week_start, week_end)
-                    if trades:
-                        config = ExitStrategyConfig(
-                            strategy_type=ExitStrategyType.TRAILING_STOP,
-                            params={"trail_pct": 2.0},
+                # ExitStrategy sweep — test all 12 default configs
+                if trades:
+                    try:
+                        sweep_results = exit_sim.sweep(trades)
+                        best = max(sweep_results, key=lambda r: r.improvement)
+                        sweep_out = ExitSweepResult(
+                            bot_id=bot_id,
+                            configs_tested=len(sweep_results),
+                            baseline_pnl=best.baseline_pnl,
+                            results=sweep_results,
+                            best_strategy=best.strategy,
+                            best_improvement=best.improvement,
                         )
-                        result = exit_sim.simulate(trades, config)
-                        results[f"exit_simulation_{bot_id}"] = result.model_dump(mode="json")
-                except Exception:
-                    logger.warning("ExitStrategy failed for %s", bot_id)
+                        results[f"exit_sweep_{bot_id}"] = sweep_out.model_dump(mode="json")
+                    except Exception:
+                        logger.warning("ExitStrategy sweep failed for %s", bot_id)
+
+                # FilterInteraction — analyze filter pair co-activation patterns
+                if trades or missed:
+                    try:
+                        from skills.filter_interaction_analyzer import FilterInteractionAnalyzer
+
+                        fi_analyzer = FilterInteractionAnalyzer(bot_id=bot_id, date=week_start)
+                        fi_report = fi_analyzer.analyze(trades, missed)
+                        if fi_report.pairs:
+                            results[f"filter_interaction_{bot_id}"] = fi_report.model_dump(mode="json")
+                    except Exception:
+                        logger.warning("FilterInteraction failed for %s", bot_id)
 
         except Exception:
             logger.warning("Simulation skills import failed — skipping simulations")
@@ -771,14 +921,7 @@ class Handlers:
             if not bot_summaries:
                 return results
 
-            # 1. Portfolio allocation (cross-bot)
-            allocator = PortfolioAllocator(week_start, week_end)
-            n_bots = len(bot_summaries)
-            current = {bid: 100.0 / n_bots for bid in bot_summaries} if n_bots > 0 else {}
-            alloc_report = allocator.compute(bot_summaries, current)
-            results["portfolio_allocation"] = alloc_report.model_dump(mode="json")
-
-            # 2. Synergy analysis (cross-strategy)
+            # 1. Synergy analysis first (we need the correlation matrix for allocation)
             per_strat = {
                 bid: s.per_strategy_summary
                 for bid, s in bot_summaries.items()
@@ -786,6 +929,45 @@ class Handlers:
             synergy = SynergyAnalyzer(week_start, week_end)
             synergy_report = synergy.compute(per_strat)
             results["synergy_analysis"] = synergy_report.model_dump(mode="json")
+
+            # Also compute intra-bot synergy for each bot with multiple strategies
+            intra_bot_results: dict = {}
+            for bid, strats in per_strat.items():
+                if len(strats) >= 2:
+                    intra_report = synergy.compute_intra_bot(bid, strats)
+                    intra_bot_results[bid] = intra_report.model_dump(mode="json")
+            if intra_bot_results:
+                results["intra_bot_synergy"] = intra_bot_results
+
+            # 2. Portfolio allocation (cross-bot) with correlation matrix from synergy
+            from skills.allocation_tracker import AllocationTracker
+            from skills.drift_analyzer import DriftAnalyzer
+
+            allocator = PortfolioAllocator(week_start, week_end)
+            n_bots = len(bot_summaries)
+            tracker = AllocationTracker(self._memory_dir / "findings")
+            latest_actuals = tracker.get_latest_actuals()
+            if latest_actuals:
+                default_pct = 100.0 / n_bots if n_bots > 0 else 0.0
+                current = {bid: latest_actuals.get(bid, default_pct) for bid in bot_summaries}
+                total = sum(current.values())
+                if total > 0 and abs(total - 100.0) > 0.1:
+                    current = {bid: pct / total * 100.0 for bid, pct in current.items()}
+            else:
+                current = {bid: 100.0 / n_bots for bid in bot_summaries} if n_bots > 0 else {}
+            bot_correlation = synergy.compute_bot_correlation_matrix(per_strat)
+            alloc_report = allocator.compute(bot_summaries, current, correlation_matrix=bot_correlation)
+            results["portfolio_allocation"] = alloc_report.model_dump(mode="json")
+
+            # Record allocation snapshot and compute drift trend
+            snapshot = DriftAnalyzer.compute_snapshot(alloc_report, current)
+            tracker.record_snapshot(snapshot)
+            all_snapshots = tracker.load_snapshots()
+            drift_trend = DriftAnalyzer.compute_drift_trend(all_snapshots)
+            results["allocation_drift"] = {
+                "current_snapshot": snapshot.model_dump(mode="json"),
+                "trend": drift_trend,
+            }
 
             # 3. Proportion optimization (intra-bot)
             optimizer = StrategyProportionOptimizer(week_start, week_end)
@@ -807,6 +989,12 @@ class Handlers:
                 _json.dumps(results["structural_analysis"], indent=2, default=str),
                 encoding="utf-8",
             )
+
+            if "allocation_drift" in results:
+                (weekly_dir / "allocation_drift.json").write_text(
+                    _json.dumps(results["allocation_drift"], indent=2, default=str),
+                    encoding="utf-8",
+                )
 
             # 5. Regime-conditional metrics
             from analysis.strategy_engine import StrategyEngine as _SE
@@ -900,15 +1088,19 @@ class Handlers:
             date_str = current.strftime("%Y-%m-%d")
             coord_file = self._curated_dir / date_str / "swing_trader" / "coordinator_impact.json"
             if not coord_file.exists():
-                # Also check for raw coordination JSONL
-                coord_jsonl = self._curated_dir.parent / "data" / "coordination" / f"coordination_{date_str}.jsonl"
-                if coord_jsonl.exists():
-                    for line in coord_jsonl.read_text(encoding="utf-8").splitlines():
-                        if line.strip():
-                            try:
-                                events.append(CoordinatorAction(**json.loads(line)))
-                            except Exception:
-                                pass
+                current += timedelta(days=1)
+                continue
+
+            try:
+                data = json.loads(coord_file.read_text())
+                for evt in data.get("events", []):
+                    try:
+                        events.append(CoordinatorAction(**evt))
+                    except Exception:
+                        logger.warning("Skipping malformed coordinator event in %s", coord_file)
+            except (json.JSONDecodeError, OSError):
+                logger.warning("Could not read coordinator file %s", coord_file)
+
             current += timedelta(days=1)
 
         return events
@@ -930,6 +1122,21 @@ class Handlers:
                 except (json.JSONDecodeError, Exception):
                     logger.warning("Could not load daily summary for %s on %s", bot_id, date_str)
         return dailies
+
+    def _count_daily_trades(self, date: str) -> int:
+        """Count total trades across all bots for a given date."""
+        count = 0
+        for bot_id in self._bots:
+            trades_file = self._curated_dir / date / bot_id / "trades.jsonl"
+            if trades_file.exists():
+                try:
+                    count += sum(
+                        1 for line in trades_file.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    )
+                except OSError:
+                    pass
+        return count
 
     def _load_trades_for_wfo(
         self, bot_id: str, date_start: str = "", date_end: str = "",

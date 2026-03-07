@@ -26,6 +26,19 @@ def _parse_timestamp(entry: dict) -> datetime | None:
     return None
 
 
+def _filter_by_bot(entries: list[dict], bot_id: str) -> list[dict]:
+    """Filter entries by bot_id. Keeps entries that match or have no bot_id field."""
+    if not bot_id:
+        return entries
+    result = []
+    for entry in entries:
+        entry_bot = entry.get("bot_id", "") or entry.get("target_id", "")
+        # Keep entries that match the bot_id or are bot-agnostic (no bot_id field)
+        if not entry_bot or bot_id in entry_bot:
+            result.append(entry)
+    return result
+
+
 def _apply_temporal_window(
     entries: list[dict],
     max_age_days: int = _FINDINGS_MAX_AGE_DAYS,
@@ -76,10 +89,11 @@ class ContextBuilder:
                 parts.append(f"--- {name} ---\n{path.read_text()}")
         return "\n\n".join(parts)
 
-    def load_corrections(self) -> list[dict]:
+    def load_corrections(self, bot_id: str = "") -> list[dict]:
         """Load manual corrections from findings/corrections.jsonl.
 
         Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
+        If bot_id is provided, only returns corrections relevant to that bot.
         """
         corrections_path = self._memory_dir / "findings" / "corrections.jsonl"
         if not corrections_path.exists():
@@ -88,12 +102,14 @@ class ContextBuilder:
         for line in corrections_path.read_text().strip().splitlines():
             if line.strip():
                 corrections.append(json.loads(line))
-        return _apply_temporal_window(corrections)
+        filtered = _filter_by_bot(corrections, bot_id) if bot_id else corrections
+        return _apply_temporal_window(filtered)
 
-    def load_failure_log(self) -> list[dict]:
+    def load_failure_log(self, bot_id: str = "") -> list[dict]:
         """Load failure log entries from findings/failure-log.jsonl.
 
         Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
+        If bot_id is provided, only returns entries relevant to that bot.
         """
         path = self._memory_dir / "findings" / "failure-log.jsonl"
         if not path.exists():
@@ -102,7 +118,8 @@ class ContextBuilder:
         for line in path.read_text().strip().split("\n"):
             if line.strip():
                 entries.append(json.loads(line))
-        return _apply_temporal_window(entries)
+        filtered = _filter_by_bot(entries, bot_id) if bot_id else entries
+        return _apply_temporal_window(filtered)
 
     def load_rejected_suggestions(self) -> list[dict]:
         """Load rejected suggestions from findings/suggestions.jsonl."""
@@ -203,6 +220,73 @@ class ContextBuilder:
             lines.append(f"- {s.get('date', '?')}: {duration}ms — {summary}")
         return "\n".join(lines)
 
+    def load_pattern_library(self, bot_id: str = "") -> list[dict]:
+        """Load cross-bot pattern library entries.
+
+        If bot_id is provided, only returns patterns relevant to that bot.
+        """
+        try:
+            from skills.pattern_library import PatternLibrary
+
+            lib = PatternLibrary(self._memory_dir / "findings")
+            if bot_id:
+                entries = lib.load_for_bot(bot_id)
+            else:
+                entries = lib.load_active()
+            return [e.model_dump(mode="json") for e in entries]
+        except Exception:
+            return []
+
+    def load_contradictions(
+        self, date: str, bots: list[str], curated_dir: Path,
+    ) -> list[dict]:
+        """Load temporal contradictions across recent daily reports.
+
+        Returns list of ContradictionItem dicts for prompt injection.
+        """
+        try:
+            from skills.contradiction_detector import ContradictionDetector
+
+            detector = ContradictionDetector(
+                date=date, bots=bots, curated_dir=curated_dir,
+            )
+            report = detector.detect()
+            return [item.model_dump(mode="json") for item in report.items]
+        except Exception:
+            return []
+
+    def load_signal_factor_history(
+        self, bot_id: str, date: str, findings_dir: Path,
+    ) -> dict:
+        """Load rolling signal factor analysis for a bot.
+
+        Returns SignalFactorRollingReport as dict, or empty dict if insufficient data.
+        """
+        try:
+            from skills.signal_factor_tracker import SignalFactorTracker
+
+            tracker = SignalFactorTracker(findings_dir)
+            report = tracker.compute_rolling(bot_id, date)
+            if not report.factors:
+                return {}
+            return report.model_dump(mode="json")
+        except Exception:
+            return {}
+
+    def load_correction_patterns(self) -> list[dict]:
+        """Load extracted correction patterns from findings/correction_patterns.jsonl."""
+        path = self._memory_dir / "findings" / "correction_patterns.jsonl"
+        if not path.exists():
+            return []
+        patterns: list[dict] = []
+        for line in path.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                try:
+                    patterns.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return patterns
+
     def load_consolidated_patterns(self) -> str:
         """Load patterns_consolidated.md if it exists."""
         path = self._memory_dir / "findings" / "patterns_consolidated.md"
@@ -236,6 +320,12 @@ class ContextBuilder:
             data["allocation_history"] = allocation_history
         if consolidated_patterns:
             data["consolidated_patterns"] = consolidated_patterns
+        pattern_library = self.load_pattern_library()
+        if pattern_library:
+            data["pattern_library"] = pattern_library
+        correction_patterns = self.load_correction_patterns()
+        if correction_patterns:
+            data["correction_patterns"] = correction_patterns
         if session_store and agent_type:
             session_history = self.load_session_history(session_store, agent_type)
             if session_history:

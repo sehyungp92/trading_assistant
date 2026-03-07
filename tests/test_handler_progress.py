@@ -39,6 +39,14 @@ def handlers_with_stream(tmp_path, event_stream):
     # Create needed dirs
     (tmp_path / "memory" / "policies" / "v1").mkdir(parents=True)
     (tmp_path / "memory" / "findings").mkdir(parents=True)
+    # Create trade data so minimum-data threshold passes for daily analysis tests
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    bot_dir = tmp_path / "data" / "curated" / today / "bot1"
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "trades.jsonl").write_text(
+        '{"trade_id":"t1"}\n{"trade_id":"t2"}\n{"trade_id":"t3"}\n'
+    )
     return handlers
 
 

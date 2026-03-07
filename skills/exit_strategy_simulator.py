@@ -18,6 +18,40 @@ from schemas.exit_simulation import (
 class ExitStrategySimulator:
     """Simulate alternative exit strategies using post-exit price snapshots."""
 
+    def sweep(
+        self, trades: list[TradeEvent], configs: list[ExitStrategyConfig] | None = None,
+    ) -> list[ExitSimulationResult]:
+        """Run simulate() across multiple configs and return all results."""
+        if configs is None:
+            configs = self.default_sweep_configs()
+        return [self.simulate(trades, c) for c in configs]
+
+    @staticmethod
+    def default_sweep_configs() -> list[ExitStrategyConfig]:
+        """12 configs: 4 types x 3 parameter values."""
+        configs: list[ExitStrategyConfig] = []
+        for stop_pct in [1.0, 2.0, 3.0]:
+            configs.append(ExitStrategyConfig(
+                strategy_type=ExitStrategyType.FIXED_STOP,
+                params={"stop_pct": stop_pct},
+            ))
+        for trail_pct in [1.0, 2.0, 3.0]:
+            configs.append(ExitStrategyConfig(
+                strategy_type=ExitStrategyType.TRAILING_STOP,
+                params={"trail_pct": trail_pct},
+            ))
+        for atr_mult in [1.0, 2.0, 3.0]:
+            configs.append(ExitStrategyConfig(
+                strategy_type=ExitStrategyType.ATR_STOP,
+                params={"atr_multiplier": atr_mult},
+            ))
+        for hold_hours in [1, 4, 24]:
+            configs.append(ExitStrategyConfig(
+                strategy_type=ExitStrategyType.TIME_BASED,
+                params={"hold_hours": hold_hours},
+            ))
+        return configs
+
     def simulate(
         self, trades: list[TradeEvent], strategy: ExitStrategyConfig
     ) -> ExitSimulationResult:

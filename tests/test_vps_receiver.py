@@ -83,10 +83,11 @@ def relay_app(fake_relay):
 
 
 @pytest.fixture
-async def local_queue(tmp_path) -> EventQueue:
+async def local_queue(tmp_path):
     q = EventQueue(db_path=str(tmp_path / "local.db"))
     await q.initialize()
-    return q
+    yield q
+    await q.close()
 
 
 def _make_receiver(relay_app, local_queue: EventQueue, **kwargs) -> VPSReceiver:

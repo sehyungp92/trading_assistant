@@ -70,7 +70,28 @@ _WEEKLY_INSTRUCTIONS = """\
     Review the interaction_analysis data and:
     a. Assess net coordinator benefit — is the coordination system net positive?
     b. For each rule: evaluate whether the tightening/boosting parameters are optimal
-    c. Assess overlay regime impact — should overlay signals gate more/fewer strategies?"""
+    c. Assess overlay regime impact — should overlay signals gate more/fewer strategies?
+19. ALLOCATION DRIFT ANALYSIS
+    Review the allocation_drift data and:
+    a. If total_drift_pct > 10%: flag as material drift requiring attention
+    b. For persistent_drifters: assess whether drift is intentional or neglect
+    c. If trend_direction is "increasing": warn that allocations are diverging
+    d. Compare current recommended vs actual — highlight the largest gaps
+    e. If drift has been stable and low (<5%), confirm allocations are well-tracked
+20. CORRECTION PATTERNS
+    Review correction_patterns data (if present): these are recurring human corrections
+    clustered by type and target. Avoid repeating these mistakes in your analysis.
+    For each pattern, acknowledge what was repeatedly corrected and adapt accordingly.
+21. FILTER INTERACTION ANALYSIS
+    Review filter_interaction data (if present): identify redundant filter pairs
+    (high co-activation + similar blocking patterns) and recommend consolidation.
+    Flag complementary pairs that together cover different failure modes.
+22. EXIT STRATEGY SWEEP
+    Review exit_sweep data (if present in simulation_results): compare the 12 exit
+    configurations tested against baseline. Highlight the best-performing exit strategy
+    per bot with expected improvement. Flag if the current exit mechanism is suboptimal
+    (best alternative improvement > 10%). Note: these are proxy calculations using
+    post-exit prices, not full backtests."""
 
 
 class WeeklyPromptAssembler:
@@ -150,6 +171,11 @@ class WeeklyPromptAssembler:
         if interaction_path.exists():
             data["interaction_analysis"] = json.loads(interaction_path.read_text())
 
+        # Load allocation drift analysis if present
+        drift_path = weekly_dir / "allocation_drift.json"
+        if drift_path.exists():
+            data["allocation_drift"] = json.loads(drift_path.read_text())
+
         return data
 
     def _load_daily_reports(self) -> list[dict]:
@@ -179,6 +205,7 @@ class WeeklyPromptAssembler:
             "weekly_summary.json", "refinement_report.json", "week_over_week.json",
             "allocation_analysis.json", "structural_analysis.json",
             "regime_conditional_analysis.json", "interaction_analysis.json",
+            "allocation_drift.json",
         ]:
             path = weekly_dir / name
             if path.exists():

@@ -96,6 +96,101 @@ class SynergyAnalyzer:
             total_strategies=len(flat),
         )
 
+    def compute_intra_bot(
+        self,
+        bot_id: str,
+        strategies: dict[str, StrategyWeeklySummary],
+    ) -> SynergyReport:
+        """Compute synergy analysis for strategies within a single bot.
+
+        Unlike compute() which flattens across bots, this focuses on
+        intra-bot strategy relationships to answer: are any strategies
+        redundant within this bot? Which provide genuine diversification?
+        """
+        if len(strategies) < 2:
+            return SynergyReport(
+                week_start=self.week_start,
+                week_end=self.week_end,
+                total_strategies=len(strategies),
+            )
+
+        # Build flat map with just strategy_id keys (no bot prefix needed)
+        flat: dict[str, StrategyWeeklySummary] = {}
+        for strat_id, summary in strategies.items():
+            flat[f"{bot_id}:{strat_id}"] = summary
+
+        keys = list(flat.keys())
+        all_dates = self._collect_dates(flat)
+        series = self._build_aligned_series(flat, all_dates)
+
+        pairs: list[StrategyPairAnalysis] = []
+        redundant_pairs: list[str] = []
+        complementary_pairs: list[str] = []
+
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                a, b = keys[i], keys[j]
+                pair = self._analyze_pair(a, b, series, flat)
+                pairs.append(pair)
+                if pair.classification in ("redundant", "cannibalistic"):
+                    redundant_pairs.append(f"{a} vs {b}")
+                elif pair.classification == "complementary":
+                    complementary_pairs.append(f"{a} vs {b}")
+
+        contributions = self._compute_marginal_contributions(flat, series, all_dates)
+
+        return SynergyReport(
+            week_start=self.week_start,
+            week_end=self.week_end,
+            strategy_pairs=pairs,
+            marginal_contributions=contributions,
+            redundant_pairs=redundant_pairs,
+            complementary_pairs=complementary_pairs,
+            total_strategies=len(flat),
+        )
+
+    def compute_bot_correlation_matrix(
+        self,
+        per_strategy_summaries: dict[str, dict[str, StrategyWeeklySummary]],
+    ) -> dict[str, float]:
+        """Compute bot-level correlation matrix for PortfolioAllocator.
+
+        Aggregates per-strategy daily PnL into per-bot daily PnL, then
+        computes pairwise Pearson correlation between bots.
+
+        Returns:
+            Dict of "botA_botB" → correlation coefficient.
+        """
+        # Collect all dates across all strategies
+        all_dates: set[str] = set()
+        for strategies in per_strategy_summaries.values():
+            for summary in strategies.values():
+                all_dates.update(summary.daily_pnl.keys())
+        sorted_dates = sorted(all_dates)
+
+        if not sorted_dates:
+            return {}
+
+        # Build per-bot aggregated daily PnL
+        bot_series: dict[str, list[float]] = {}
+        for bot_id, strategies in per_strategy_summaries.items():
+            daily = []
+            for d in sorted_dates:
+                day_pnl = sum(s.daily_pnl.get(d, 0.0) for s in strategies.values())
+                daily.append(day_pnl)
+            bot_series[bot_id] = daily
+
+        # Pairwise correlation
+        bot_ids = list(bot_series.keys())
+        matrix: dict[str, float] = {}
+        for i in range(len(bot_ids)):
+            for j in range(i + 1, len(bot_ids)):
+                a, b = bot_ids[i], bot_ids[j]
+                corr = self._pearson(bot_series[a], bot_series[b])
+                matrix[f"{a}_{b}"] = round(corr, 4)
+
+        return matrix
+
     def _collect_dates(self, flat: dict[str, StrategyWeeklySummary]) -> list[str]:
         """Collect union of all dates across strategies."""
         dates: set[str] = set()

@@ -79,31 +79,42 @@ class TestEventBatchingConsumption:
         worker = MagicMock()
         worker.get_and_reset_daily_counts = MagicMock(return_value={"bot1": 15})
 
-        handlers = Handlers(
-            agent_runner=mock_runner,
-            event_stream=mock_stream,
-            dispatcher=mock_dispatcher,
-            notification_prefs=MagicMock(),
-            curated_dir="/tmp/curated",
-            memory_dir="/tmp/memory",
-            runs_dir="/tmp/runs",
-            source_root="/tmp/src",
-            bots=[],
-            worker=worker,
-        )
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from pathlib import Path as _P
+            curated = _P(tmpdir) / "curated"
+            # Create trade data so minimum-data threshold passes
+            bot_dir = curated / "2026-03-04" / "bot1"
+            bot_dir.mkdir(parents=True)
+            (bot_dir / "trades.jsonl").write_text(
+                '{"trade_id":"t1"}\n{"trade_id":"t2"}\n{"trade_id":"t3"}\n'
+            )
 
-        action = Action(
-            type=ActionType.SPAWN_DAILY_ANALYSIS,
-            event_id="e1", bot_id="system",
-            details={"date": "2026-03-04"},
-        )
+            handlers = Handlers(
+                agent_runner=mock_runner,
+                event_stream=mock_stream,
+                dispatcher=mock_dispatcher,
+                notification_prefs=MagicMock(),
+                curated_dir=str(curated),
+                memory_dir=str(_P(tmpdir) / "memory"),
+                runs_dir=str(_P(tmpdir) / "runs"),
+                source_root=str(_P(tmpdir) / "src"),
+                bots=["bot1"],
+                worker=worker,
+            )
 
-        # Quality gate will fail with no bots (returns early), which is fine —
-        # what matters is that we test the flow. Let's mock the quality gate.
-        with patch("analysis.quality_gate.QualityGate") as MockGate:
-            mock_checklist = MagicMock()
-            mock_checklist.overall = "PASS"
-            MockGate.return_value.run.return_value = mock_checklist
-            await handlers.handle_daily_analysis(action)
+            action = Action(
+                type=ActionType.SPAWN_DAILY_ANALYSIS,
+                event_id="e1", bot_id="system",
+                details={"date": "2026-03-04"},
+            )
+
+            # Quality gate will fail with no bots (returns early), which is fine —
+            # what matters is that we test the flow. Let's mock the quality gate.
+            with patch("analysis.quality_gate.QualityGate") as MockGate:
+                mock_checklist = MagicMock()
+                mock_checklist.overall = "PASS"
+                MockGate.return_value.run.return_value = mock_checklist
+                await handlers.handle_daily_analysis(action)
 
         worker.get_and_reset_daily_counts.assert_called_once()

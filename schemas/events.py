@@ -107,6 +107,21 @@ class TradeEvent(BaseModel):
     post_exit_1h_price: float | None = None
     post_exit_4h_price: float | None = None
 
+    # Intra-trade excursion tracking (populated by bots that implement bar-by-bar MFE/MAE)
+    mfe_price: float | None = None
+    mae_price: float | None = None
+    mfe_pct: float | None = None
+    mae_pct: float | None = None
+    mfe_r: float | None = None
+    mae_r: float | None = None
+    exit_efficiency: float | None = None  # actual_pnl_pct / mfe_pct
+
+    # 1.5: momentum_trader per-bar signal component values
+    signal_evolution: list[dict] | None = None
+    # 2.6: momentum_trader order fill details
+    entry_fill_details: dict | None = None
+    exit_fill_details: dict | None = None
+
 
 class MissedOpportunityEvent(BaseModel):
     event_metadata: Optional[EventMetadata] = None
@@ -152,3 +167,4 @@ class DailySnapshot(BaseModel):
     root_cause_distribution: dict = {}
     per_strategy_summary: dict = {}
     overlay_state_summary: dict | None = None
+    experiment_breakdown: dict | None = None  # 1.4: swing_trader per-experiment A/B stats

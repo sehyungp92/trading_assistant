@@ -371,6 +371,142 @@ class StrategyEngine:
             requires_human_judgment=True,
         )]
 
+    def detect_component_signal_decay(
+        self,
+        bot_id: str,
+        signal_health_data: dict,
+        stability_threshold: float = 0.3,
+        correlation_threshold: float = 0.05,
+        min_trades: int = 5,
+    ) -> list[StrategySuggestion]:
+        """Tier 4: Detect degraded signal components from signal_health data."""
+        components = signal_health_data.get("components", [])
+        degraded: list[str] = []
+
+        for comp in components:
+            trade_count = comp.get("trade_count", 0)
+            if trade_count < min_trades:
+                continue
+            stability = comp.get("stability", 1.0)
+            win_corr = abs(comp.get("win_correlation", 1.0))
+            if stability < stability_threshold or win_corr < correlation_threshold:
+                degraded.append(comp.get("component_name", "unknown"))
+
+        if not degraded:
+            return []
+
+        return [StrategySuggestion(
+            tier=SuggestionTier.HYPOTHESIS,
+            bot_id=bot_id,
+            title=f"Signal component decay — {bot_id}",
+            description=(
+                f"Degraded signal components detected: {', '.join(degraded)}. "
+                f"These components show low stability (<{stability_threshold}) or "
+                f"near-zero win correlation (<{correlation_threshold}). "
+                f"Review whether these signals still carry predictive value."
+            ),
+            evidence_days=7,
+            confidence=0.5,
+            requires_human_judgment=True,
+        )]
+
+    def detect_filter_interactions(
+        self,
+        bot_id: str,
+        filter_interactions: list,
+    ) -> list[StrategySuggestion]:
+        """Tier 2: Generate suggestions from filter interaction analysis.
+
+        Args:
+            bot_id: Bot identifier.
+            filter_interactions: List of FilterPairInteraction dicts or objects.
+        """
+        suggestions: list[StrategySuggestion] = []
+
+        for pair in filter_interactions:
+            itype = pair.get("interaction_type", "") if isinstance(pair, dict) else getattr(pair, "interaction_type", "")
+            if itype == "independent":
+                continue
+
+            if isinstance(pair, dict):
+                fa = pair.get("filter_a", "")
+                fb = pair.get("filter_b", "")
+                rec = pair.get("recommendation", "")
+                redundancy = pair.get("redundancy_score", 0.0)
+            else:
+                fa = getattr(pair, "filter_a", "")
+                fb = getattr(pair, "filter_b", "")
+                rec = getattr(pair, "recommendation", "")
+                redundancy = getattr(pair, "redundancy_score", 0.0)
+
+            if itype == "redundant":
+                suggestions.append(StrategySuggestion(
+                    tier=SuggestionTier.FILTER,
+                    bot_id=bot_id,
+                    title=f"Redundant filters: {fa} + {fb} on {bot_id}",
+                    description=(
+                        f"Filters {fa} and {fb} are redundant "
+                        f"(overlap score: {redundancy:.0%}). {rec}"
+                    ),
+                    evidence_days=7,
+                    confidence=min(0.9, redundancy),
+                    requires_human_judgment=True,
+                ))
+            elif itype == "complementary":
+                suggestions.append(StrategySuggestion(
+                    tier=SuggestionTier.FILTER,
+                    bot_id=bot_id,
+                    title=f"Complementary filters: {fa} + {fb} on {bot_id}",
+                    description=(
+                        f"Filters {fa} and {fb} are complementary. {rec}"
+                    ),
+                    evidence_days=7,
+                    confidence=0.5,
+                ))
+
+        return suggestions
+
+    def detect_factor_correlation_decay(
+        self,
+        bot_id: str,
+        factor_rolling_data: list[dict],
+    ) -> list[StrategySuggestion]:
+        """Tier 4: Detect degrading signal factors from rolling 30d analysis.
+
+        Produces HYPOTHESIS suggestions for factors with degrading trend + below_threshold.
+        """
+        suggestions: list[StrategySuggestion] = []
+
+        for factor in factor_rolling_data:
+            trend = factor.get("win_rate_trend", "stable")
+            below = factor.get("below_threshold", False)
+            if trend != "degrading" and not below:
+                continue
+
+            name = factor.get("factor_name", "unknown")
+            wr = factor.get("rolling_30d_win_rate", 0)
+            days = factor.get("days_of_data", 0)
+
+            parts = [f"Factor '{name}' on {bot_id}"]
+            if trend == "degrading":
+                parts.append("shows degrading win rate trend over 30d window")
+            if below:
+                parts.append(f"(rolling win rate {wr:.0%} is below threshold)")
+            parts.append(f"Based on {days} days of data.")
+            parts.append("Consider recalibrating or replacing this signal factor.")
+
+            suggestions.append(StrategySuggestion(
+                tier=SuggestionTier.HYPOTHESIS,
+                bot_id=bot_id,
+                title=f"Factor decay — {name} on {bot_id}",
+                description=" ".join(parts),
+                evidence_days=days,
+                confidence=0.5,
+                requires_human_judgment=True,
+            ))
+
+        return suggestions
+
     def compute_regime_conditional_metrics(
         self,
         per_strategy_summaries: dict[str, dict[str, StrategyWeeklySummary]],
@@ -504,6 +640,9 @@ class StrategyEngine:
         hourly_buckets: dict[str, list] | None = None,
         correlation_summaries: list | None = None,
         drawdown_data: dict[str, dict] | None = None,
+        signal_health: dict[str, dict] | None = None,
+        factor_rolling: dict[str, list[dict]] | None = None,
+        filter_interactions: dict[str, list] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -558,6 +697,24 @@ class StrategyEngine:
                     avg_loss_pct=abs(summary.avg_loss),
                     win_rate=summary.win_rate,
                 ))
+
+        if signal_health:
+            for bot_id, sh_data in signal_health.items():
+                all_suggestions.extend(
+                    self.detect_component_signal_decay(bot_id, sh_data)
+                )
+
+        if factor_rolling:
+            for bot_id, factors in factor_rolling.items():
+                all_suggestions.extend(
+                    self.detect_factor_correlation_decay(bot_id, factors)
+                )
+
+        if filter_interactions:
+            for bot_id, interactions in filter_interactions.items():
+                all_suggestions.extend(
+                    self.detect_filter_interactions(bot_id, interactions)
+                )
 
         return RefinementReport(
             week_start=self.week_start,

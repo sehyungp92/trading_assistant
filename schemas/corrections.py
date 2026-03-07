@@ -17,6 +17,7 @@ class CorrectionType(str, Enum):
     TRADE_RECLASSIFY = "trade_reclassify"
     REGIME_OVERRIDE = "regime_override"
     POSITIVE_REINFORCEMENT = "positive_reinforcement"
+    ALLOCATION_CHANGE = "allocation_change"
     FREE_TEXT = "free_text"
 
 
