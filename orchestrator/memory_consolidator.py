@@ -221,7 +221,81 @@ class MemoryConsolidator:
                 lines.append(f"- {p.key}: {p.count}")
             lines.append("")
 
+        # Add actionable insights
+        insights = self._generate_insights(summary)
+        if insights:
+            lines.append("## Actionable Insights")
+            for insight in insights:
+                lines.append(f"- {insight}")
+            lines.append("")
+
         path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _generate_insights(self, summary: ConsolidationSummary) -> list[str]:
+        """Convert descriptive counts to prescriptive recommendations.
+
+        Also auto-generates hypothesis candidates for systemic patterns.
+        """
+        insights: list[str] = []
+
+        # Concentration: if top bot > 40% of entries
+        if summary.top_bots and summary.total_entries > 0:
+            top_bot = summary.top_bots[0]
+            pct = top_bot.count / summary.total_entries
+            if pct > 0.40:
+                insights.append(
+                    f"Concentration alert: {top_bot.key} accounts for {pct:.0%} of entries. "
+                    f"Prioritize analysis quality for this bot."
+                )
+
+        # Recurring: if top root cause > 10 occurrences
+        if summary.top_root_causes:
+            for rc in summary.top_root_causes[:3]:
+                if rc.count > 10:
+                    insights.append(
+                        f"Systemic pattern: '{rc.key}' occurred {rc.count} times - "
+                        f"structural investigation needed, not just parameter tuning."
+                    )
+                    # Auto-generate hypothesis candidate
+                    self._maybe_create_hypothesis_candidate(rc.key, rc.count)
+
+        # Error patterns: top 3 error types with > 5 occurrences
+        if summary.top_error_types:
+            for et in summary.top_error_types[:3]:
+                if et.count > 5:
+                    insights.append(
+                        f"Blind spot: '{et.key}' recurred {et.count} times - "
+                        f"adapt analysis approach to address this pattern."
+                    )
+
+        return insights
+
+    def _maybe_create_hypothesis_candidate(self, root_cause: str, count: int) -> None:
+        """Create a hypothesis candidate if no matching hypothesis exists."""
+        try:
+            from skills.hypothesis_library import HypothesisLibrary
+
+            lib = HypothesisLibrary(self._findings_dir)
+            existing = lib.get_all_records()
+
+            # Check if root cause already maps to an existing hypothesis
+            rc_lower = root_cause.lower()
+            for h in existing:
+                if rc_lower in h.title.lower() or rc_lower in h.description.lower():
+                    return  # already covered
+
+            lib.add_candidate(
+                title=f"Address systemic {root_cause} pattern",
+                category=root_cause,
+                description=(
+                    f"Root cause '{root_cause}' has occurred {count} times in consolidated findings. "
+                    f"This suggests a structural issue that may need investigation beyond parameter tuning."
+                ),
+                evidence=f"{count} occurrences in findings",
+            )
+            logger.info("Auto-generated hypothesis candidate for root cause: %s", root_cause)
+        except Exception:
+            logger.warning("Failed to generate hypothesis candidate for %s", root_cause)
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

@@ -85,7 +85,37 @@ _INSTRUCTIONS = """\
     be explicitly called out as candidates for recalibration. Compare against today's
     factor_attribution data.
 17. Correction patterns: If 'correction_patterns' data is present, review recurring human
-    corrections. Avoid repeating these mistakes — adapt your analysis to address known blind spots."""
+    corrections. Avoid repeating these mistakes — adapt your analysis to address known blind spots.
+18. Reference outcome_measurements (if present) when making suggestions. Only make
+    high-confidence suggestions for approaches with proven POSITIVE track records.
+19. Review active_suggestions (if present). Don't contradict IMPLEMENTED suggestions.
+    For PROPOSED suggestions, note any supporting or contradicting evidence from today.
+20. Review category_scorecard (if present). Categories with win_rate < 30% and sample_size >= 5
+    require exceptional new evidence to justify suggestions in that category.
+21. Review prediction_accuracy_by_metric (if present). For metrics where accuracy < 40%,
+    explicitly caveat predictions and lower confidence.
+22. Review failure_log (if present). Avoid analysis approaches that have previously failed.
+23. Review consolidated_patterns (if present). These are systemic patterns discovered across
+    findings — use them to ground your structural analysis.
+24. Review hypothesis_track_record (if present). Prioritize hypotheses with positive
+    effectiveness. Do not propose retired hypotheses.
+25. Review validation_patterns (if present). These are recurring blocked suggestion categories —
+    avoid proposing suggestions in categories that are consistently blocked.
+26. STRUCTURED OUTPUT (REQUIRED): At the END of your analysis, emit a structured data block.
+    This block is machine-parsed — do NOT omit it.
+    <!-- STRUCTURED_OUTPUT
+    {
+      "predictions": [
+        {"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}
+      ],
+      "suggestions": [
+        {"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "..."}
+      ],
+      "structural_proposals": [
+        {"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high"}
+      ]
+    }
+    -->"""
 
 
 class DailyPromptAssembler:

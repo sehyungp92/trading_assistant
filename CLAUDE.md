@@ -7,7 +7,7 @@ trading bots across VPSes.
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/               # 740+ tests, all should pass
+pytest tests/               # 1576+ tests, all should pass
 uvicorn orchestrator.app:app --reload   # start orchestrator on :8000
 ```
 
@@ -45,6 +45,32 @@ See `orchestrator/config.py` for all settings.
 ```
 VPS Bot → Relay VPS → (poll) → EventQueue → Brain → Worker → Handler → Claude CLI → Notification
 ```
+
+## Feedback Loop Flow
+
+```
+Strategy Engine → StrategySuggestion → _record_suggestions() → SuggestionTracker (suggestions.jsonl)
+                                                                        ↓
+User: "approve suggestion #abc123"  →  FeedbackHandler.parse()  →  SUGGESTION_ACCEPT
+                                                                        ↓
+                                     SuggestionTracker.implement()  →  status = IMPLEMENTED
+                                                                        ↓
+AutoOutcomeMeasurer (Sun 10:00 UTC)  →  measures IMPLEMENTED  →  outcomes.jsonl
+                                                                        ↓
+ForecastTracker.record_week()  →  forecast_history.jsonl  →  meta-analysis (calibration)
+                                                                        ↓
+ContextBuilder.base_package()  →  outcome_measurements + forecast_meta_analysis in next prompt
+```
+
+Key files:
+- `skills/suggestion_tracker.py` — JSONL-backed lifecycle (proposed → accepted → implemented → measured)
+- `skills/forecast_tracker.py` — rolling accuracy meta-analysis and confidence calibration
+- `skills/hypothesis_library.py` — adaptive JSONL-backed hypothesis catalog with lifecycle tracking
+- `skills/transfer_proposal_builder.py` — cross-bot pattern transfer with outcome measurement
+- `skills/prediction_tracker.py` — structured prediction recording and evaluation
+- `skills/suggestion_scorer.py` — per-category success rates from outcomes
+- `analysis/response_parser.py` — extracts structured JSON from Claude's markdown responses
+- `analysis/response_validator.py` — strips blocked suggestions, enforces calibration constraints
 
 ## Test Commands
 

@@ -37,6 +37,9 @@ class SchedulerConfig:
     memory_consolidation_day_of_week: str = "sun"
     memory_consolidation_hour: int = 9
     memory_consolidation_minute: int = 0
+    transfer_outcome_day_of_week: str = "sun"
+    transfer_outcome_hour: int = 10
+    transfer_outcome_minute: int = 30
 
 
 def create_scheduler_jobs(
@@ -53,6 +56,7 @@ def create_scheduler_jobs(
     evening_report_fn: Callable[[], Awaitable[None]] | None = None,
     outcome_measurement_fn: Callable[[], Awaitable[None]] | None = None,
     memory_consolidation_fn: Callable[[], Awaitable[None]] | None = None,
+    transfer_outcome_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
@@ -158,6 +162,16 @@ def create_scheduler_jobs(
             "day_of_week": config.memory_consolidation_day_of_week,
             "hour": config.memory_consolidation_hour,
             "minute": config.memory_consolidation_minute,
+        })
+
+    if transfer_outcome_fn is not None:
+        jobs.append({
+            "name": "transfer_outcome_measurement",
+            "func": transfer_outcome_fn,
+            "trigger": "cron",
+            "day_of_week": config.transfer_outcome_day_of_week,
+            "hour": config.transfer_outcome_hour,
+            "minute": config.transfer_outcome_minute,
         })
 
     return jobs

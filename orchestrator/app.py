@@ -147,6 +147,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Register channel adapters from config
     channel_adapters = _register_channel_adapters(config, dispatcher)
 
+    # SuggestionTracker — shared path with ContextBuilder (memory/findings/)
+    from skills.suggestion_tracker import SuggestionTracker
+
+    suggestion_tracker = SuggestionTracker(store_dir=db_path / "memory" / "findings")
+
     # Load persisted notification preferences
     prefs_path = db_path / "data" / "notification_prefs.json"
     notification_prefs = _load_notification_prefs(prefs_path)
@@ -165,6 +170,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         failure_log_path=db_path / "data" / "failure_log.jsonl",
         worker=worker,
         brain=brain,
+        suggestion_tracker=suggestion_tracker,
     )
 
     # Wire handler slots on worker
@@ -180,6 +186,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         "weekly_analysis", lambda a=action: handlers.handle_weekly_analysis(a))
     worker.on_wfo = lambda action: subagent_mgr.spawn(
         "wfo", lambda a=action: handlers.handle_wfo(a))
+    worker.on_feedback = handlers.handle_feedback
 
     # Relay polling — only active when RELAY_URL is configured
     vps_receiver: VPSReceiver | None = None
@@ -220,7 +227,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             if summary_path.exists():
                 try:
                     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-                    pnl = summary.get("total_pnl", 0)
+                    pnl = summary.get("net_pnl", 0)
                     if pnl < 0:
                         unusual_losses.append({
                             "bot_id": bot_id,
@@ -257,14 +264,17 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     # AutoOutcomeMeasurer — runs weekly to measure suggestion outcomes
     from skills.auto_outcome_measurer import AutoOutcomeMeasurer
-    from skills.suggestion_tracker import SuggestionTracker
     from schemas.suggestion_tracking import SuggestionStatus
 
     outcome_measurer = AutoOutcomeMeasurer(curated_dir=curated_dir)
-    suggestion_tracker = SuggestionTracker(store_dir=db_path / "data" / "findings")
+
+    # HypothesisLibrary — shared for outcome linking
+    from skills.hypothesis_library import HypothesisLibrary
+
+    hypothesis_library = HypothesisLibrary(db_path / "memory" / "findings")
 
     async def _measure_outcomes() -> None:
-        """Measure outcomes of implemented suggestions."""
+        """Measure outcomes of implemented suggestions and link to hypotheses."""
         suggestions = suggestion_tracker.load_all()
         implemented = [
             s for s in suggestions
@@ -294,8 +304,68 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         drawdown_delta_7d=result.drawdown_after - result.drawdown_before,
                     )
                     suggestion_tracker.record_outcome(outcome)
+
+                    # Link hypothesis outcome if suggestion has hypothesis_id
+                    hyp_id = s.get("hypothesis_id")
+                    if hyp_id:
+                        try:
+                            hypothesis_library.record_outcome(hyp_id, positive=outcome.net_positive_7d)
+                        except Exception:
+                            logger.warning("Failed to record hypothesis outcome for %s", hyp_id)
+
+                    # Promote linked patterns on positive outcome
+                    if outcome.net_positive_7d:
+                        try:
+                            from skills.pattern_library import PatternLibrary
+                            from schemas.pattern_library import PatternStatus as _PS
+                            pat_lib = PatternLibrary(db_path / "memory" / "findings")
+                            for p in pat_lib.load_all():
+                                if p.linked_suggestion_id == sid and p.status == _PS.PROPOSED:
+                                    pat_lib.validate_pattern(p.pattern_id)
+                                    logger.info("Promoted pattern %s to VALIDATED", p.pattern_id)
+                        except Exception:
+                            logger.warning("Failed to promote pattern for suggestion %s", sid)
             except Exception:
                 logger.warning("Outcome measurement failed for %s", sid)
+
+        # Evaluate predictions against actual curated data
+        try:
+            from skills.prediction_tracker import PredictionTracker
+
+            pred_tracker = PredictionTracker(db_path / "memory" / "findings")
+            predictions = pred_tracker.load_predictions()
+            if predictions:
+                # Get unique weeks and evaluate un-evaluated ones
+                weeks = {p.week for p in predictions}
+                for week in sorted(weeks):
+                    evaluation = pred_tracker.evaluate_predictions(week, curated_dir)
+                    if evaluation.total > 0:
+                        logger.info(
+                            "Prediction evaluation for %s: %d/%d correct (%.0f%%)",
+                            week, evaluation.correct, evaluation.total, evaluation.accuracy * 100,
+                        )
+        except Exception:
+            logger.warning("Prediction evaluation failed during outcome measurement")
+
+    # TransferOutcomeMeasurer — runs weekly to measure cross-bot transfer outcomes
+    async def _measure_transfer_outcomes() -> None:
+        """Measure outcomes of cross-bot pattern transfers."""
+        try:
+            from skills.pattern_library import PatternLibrary
+            from skills.transfer_proposal_builder import TransferProposalBuilder
+
+            lib = PatternLibrary(db_path / "memory" / "findings")
+            builder = TransferProposalBuilder(
+                pattern_library=lib,
+                curated_dir=curated_dir,
+                bots=config.bot_ids,
+                findings_dir=db_path / "memory" / "findings",
+            )
+            outcomes = builder.measure_transfer_outcomes()
+            if outcomes:
+                logger.info("Measured %d transfer outcomes", len(outcomes))
+        except Exception:
+            logger.exception("Transfer outcome measurement failed")
 
     # MemoryConsolidator — rebuilds index.json and consolidates old findings
     consolidator = MemoryConsolidator(
@@ -311,6 +381,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 consolidator.consolidate("corrections.jsonl")
             if consolidator.needs_consolidation("failure-log.jsonl"):
                 consolidator.consolidate("failure-log.jsonl")
+            # Promote candidate hypotheses that have been proposed multiple times
+            promoted = hypothesis_library.promote_candidates()
+            if promoted:
+                logger.info("Promoted %d candidate hypotheses to active", promoted)
         except Exception:
             logger.exception("Memory consolidation failed")
 
@@ -347,6 +421,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         evening_report_fn=_evening_report,
         outcome_measurement_fn=_measure_outcomes,
         memory_consolidation_fn=_consolidate_memory,
+        transfer_outcome_fn=_measure_transfer_outcomes,
     )
 
     @asynccontextmanager
@@ -526,6 +601,29 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         # Persist to disk
         _save_notification_prefs(prefs, prefs_path)
         return prefs.model_dump()
+
+    @app.post("/feedback")
+    async def submit_feedback(body: dict):
+        """Submit user feedback (approve/reject suggestions, corrections).
+
+        Enqueues a user_feedback event that flows through brain → worker → handle_feedback.
+        """
+        text = body.get("text", "")
+        if not text:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="'text' field is required")
+        import secrets
+        feedback_event = {
+            "event_type": "user_feedback",
+            "bot_id": body.get("bot_id", "user"),
+            "event_id": f"feedback-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}",
+            "payload": json.dumps({
+                "text": text,
+                "report_id": body.get("report_id", "unknown"),
+            }),
+        }
+        inserted = await queue.enqueue(feedback_event)
+        return {"inserted": inserted, "event_id": feedback_event["event_id"]}
 
     @app.get("/sessions")
     async def list_sessions(agent_type: str | None = None, date: str | None = None):

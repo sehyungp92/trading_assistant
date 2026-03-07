@@ -41,6 +41,7 @@ class Worker:
         self.on_weekly_analysis: Callable[[Action], Awaitable[None]] | None = None
         self.on_wfo: Callable[[Action], Awaitable[None]] | None = None
         self.on_notification: Callable[[Action], Awaitable[None]] | None = None
+        self.on_feedback: Callable[[Action], Awaitable[None]] | None = None
 
         self.daily_queue_counts: dict[str, int] = {}
         self.weekly_queue_counts: dict[str, int] = {}
@@ -159,6 +160,12 @@ class Worker:
                 await self.on_notification(action)
             else:
                 logger.info("Notification triggered but no handler set: %s", action.event_id)
+
+        elif action.type == ActionType.PROCESS_FEEDBACK:
+            if self.on_feedback:
+                await self.on_feedback(action)
+            else:
+                logger.info("Feedback received but no handler set: %s", action.event_id)
 
         elif action.type == ActionType.QUEUE_FOR_DAILY:
             self._record_queued_event(action.bot_id, action.type)

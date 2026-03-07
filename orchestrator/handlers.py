@@ -48,6 +48,7 @@ class Handlers:
         worker: Worker | None = None,
         brain: OrchestratorBrain | None = None,
         run_history_path: Path | None = None,
+        suggestion_tracker: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -63,6 +64,7 @@ class Handlers:
         self._worker = worker
         self._brain = brain
         self._run_history_path = run_history_path or (self._runs_dir.parent / "data" / "run_history.jsonl")
+        self._suggestion_tracker = suggestion_tracker
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -182,6 +184,43 @@ class Handlers:
                 run_id=run_id,
             )
 
+            # Parse structured response
+            final_report = result.response
+            if result.success:
+                from analysis.response_parser import parse_response
+
+                parsed = parse_response(result.response)
+                # Save parsed analysis alongside raw response
+                try:
+                    run_dir = result.run_dir or (self._runs_dir / run_id)
+                    Path(run_dir).mkdir(parents=True, exist_ok=True)
+                    (Path(run_dir) / "parsed_analysis.json").write_text(
+                        parsed.model_dump_json(indent=2), encoding="utf-8",
+                    )
+                except Exception:
+                    logger.error("Failed to save parsed analysis for %s", run_id, exc_info=True)
+
+                if not parsed.parse_success:
+                    logger.warning("No structured output block found in %s response", run_id)
+
+                # Validate and annotate response
+                final_report, validation = self._validate_and_annotate(parsed, date)
+
+                # Fallback: if validation failed but we have suggestions, record them unvalidated
+                if validation is None and parsed.suggestions:
+                    from analysis.response_validator import ValidationResult
+                    validation = ValidationResult(
+                        approved_suggestions=parsed.suggestions,
+                        approved_predictions=parsed.predictions,
+                    )
+                    logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
+
+                # Record approved agent suggestions to tracker
+                self._record_agent_suggestions(validation, run_id, parsed)
+
+                # Record predictions
+                self._record_predictions(date, parsed.predictions)
+
             # Record completion timestamp
             if self._brain:
                 self._brain.record_daily_analysis(datetime.now(timezone.utc).isoformat())
@@ -208,7 +247,7 @@ class Handlers:
                     notification_type="daily_report",
                     priority=NotificationPriority.NORMAL,
                     title=f"Daily Report — {date}",
-                    body=result.response[:2000],
+                    body=final_report[:2000],
                 )
             else:
                 await self._notify(
@@ -345,6 +384,11 @@ class Handlers:
                 encoding="utf-8",
             )
 
+            # Record suggestions from strategy engine to SuggestionTracker
+            suggestion_ids = self._record_suggestions(
+                getattr(refinement_report, "suggestions", []), run_id,
+            )
+
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "simulations", "handler": "weekly_analysis",
             })
@@ -370,6 +414,10 @@ class Handlers:
             if allocation_results:
                 package.data.update({"allocation_analysis": allocation_results})
 
+            # Inject suggestion ID mapping so Claude can reference them in the report
+            if suggestion_ids:
+                package.metadata["suggestion_ids"] = suggestion_ids
+
             # Weekly retrospective — compare last week's predictions to actual outcomes
             try:
                 from skills.retrospective_builder import RetrospectiveBuilder
@@ -384,6 +432,39 @@ class Handlers:
                     package.data["weekly_retrospective"] = retrospective.model_dump(mode="json")
             except Exception:
                 logger.warning("Retrospective builder failed — skipping")
+
+            # Record forecast data and compute meta-analysis
+            try:
+                from skills.forecast_tracker import ForecastTracker
+                from schemas.forecast_tracking import ForecastRecord
+
+                forecast_tracker = ForecastTracker(self._memory_dir / "findings")
+                retro_data = package.data.get("weekly_retrospective")
+                if retro_data:
+                    by_bot = {}
+                    by_type: dict[str, list[int]] = {}
+                    for pred in retro_data.get("predictions", []):
+                        bid = pred.get("bot_id", "")
+                        if bid:
+                            by_bot.setdefault(bid, []).append(1 if pred.get("correct") else 0)
+                        metric = pred.get("metric", "")
+                        if metric:
+                            by_type.setdefault(metric, []).append(1 if pred.get("correct") else 0)
+                    forecast_record = ForecastRecord(
+                        week_start=week_start,
+                        week_end=week_end,
+                        predictions_reviewed=retro_data.get("predictions_reviewed", 0),
+                        correct_predictions=retro_data.get("correct_predictions", 0),
+                        accuracy=retro_data.get("accuracy", 0.0),
+                        by_bot={b: sum(v) / len(v) for b, v in by_bot.items() if v},
+                        by_type={m: sum(v) / len(v) for m, v in by_type.items() if v},
+                    )
+                    forecast_tracker.record_week(forecast_record)
+                meta = forecast_tracker.compute_meta_analysis()
+                if meta.weeks_analyzed > 0:
+                    package.data["forecast_meta_analysis"] = meta.model_dump(mode="json")
+            except Exception:
+                logger.error("Forecast tracking failed — skipping", exc_info=True)
 
             # Correction pattern extraction — surface recurring human correction patterns
             try:
@@ -405,7 +486,73 @@ class Handlers:
                             for p in pattern_report.patterns:
                                 f.write(json.dumps(p.model_dump(mode="json")) + "\n")
             except Exception:
-                logger.warning("Correction pattern extraction failed — skipping")
+                logger.error("Correction pattern extraction failed — skipping", exc_info=True)
+
+            # Structural hypotheses — JSONL-backed library with adaptive lifecycle
+            try:
+                from skills.hypothesis_library import HypothesisLibrary, get_relevant as _get_relevant_legacy
+
+                hypothesis_lib = HypothesisLibrary(self._memory_dir / "findings")
+                active_hypotheses = hypothesis_lib.get_active()
+
+                # Keyword-match from strategy suggestions (same logic as legacy)
+                suggestions_list = getattr(refinement_report, "suggestions", [])
+                keyword_map = {
+                    "signal": "signal_decay", "decay": "signal_decay", "alpha": "signal_decay",
+                    "filter": "filter_over_blocking", "block": "filter_over_blocking",
+                    "exit": "exit_timing", "premature": "exit_timing", "stop": "exit_timing",
+                    "slippage": "adverse_fills", "fill": "adverse_fills",
+                    "regime": "regime_breakdown",
+                    "correlation": "correlation_crowding", "crowding": "correlation_crowding",
+                    "diversif": "correlation_crowding",
+                }
+                matched_categories: set[str] = set()
+                for suggestion in suggestions_list:
+                    title = (getattr(suggestion, "title", "") or "").lower()
+                    description = (getattr(suggestion, "description", "") or "").lower()
+                    text = f"{title} {description}"
+                    for keyword, category in keyword_map.items():
+                        if keyword in text:
+                            matched_categories.add(category)
+
+                # Merge: keyword-matched + high-effectiveness active hypotheses
+                seen_ids: set[str] = set()
+                merged: list[dict] = []
+                for h in active_hypotheses:
+                    if h.category in matched_categories or h.effectiveness > 0.3 or h.status == "candidate":
+                        if h.id not in seen_ids:
+                            seen_ids.add(h.id)
+                            merged.append({
+                                "id": h.id, "title": h.title, "category": h.category,
+                                "description": h.description, "evidence_required": h.evidence_required,
+                                "reversibility": h.reversibility, "estimated_complexity": h.estimated_complexity,
+                                "effectiveness": round(h.effectiveness, 3),
+                                "times_proposed": h.times_proposed,
+                            })
+                if merged:
+                    package.data["structural_hypotheses"] = merged
+            except Exception:
+                logger.error("Hypothesis library matching failed — skipping", exc_info=True)
+
+            # Cross-bot transfer proposals
+            try:
+                from skills.pattern_library import PatternLibrary
+                from skills.transfer_proposal_builder import TransferProposalBuilder
+
+                lib = PatternLibrary(self._memory_dir / "findings")
+                builder = TransferProposalBuilder(
+                    pattern_library=lib,
+                    curated_dir=self._curated_dir,
+                    bots=self._bots,
+                    findings_dir=self._memory_dir / "findings",
+                )
+                proposals = builder.build_proposals()
+                if proposals:
+                    package.data["transfer_proposals"] = [
+                        p.model_dump(mode="json") for p in proposals
+                    ]
+            except Exception:
+                logger.error("Transfer proposal building failed — skipping", exc_info=True)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "weekly_analysis",
@@ -417,6 +564,48 @@ class Handlers:
                 prompt_package=package,
                 run_id=run_id,
             )
+
+            # Parse structured response
+            final_report = result.response
+            if result.success:
+                from analysis.response_parser import parse_response
+
+                parsed = parse_response(result.response)
+                try:
+                    run_dir = result.run_dir or (self._runs_dir / run_id)
+                    Path(run_dir).mkdir(parents=True, exist_ok=True)
+                    (Path(run_dir) / "parsed_analysis.json").write_text(
+                        parsed.model_dump_json(indent=2), encoding="utf-8",
+                    )
+                except Exception:
+                    logger.error("Failed to save parsed analysis for %s", run_id, exc_info=True)
+
+                if not parsed.parse_success:
+                    logger.warning("No structured output block found in %s response", run_id)
+
+                # Validate and annotate response
+                final_report, validation = self._validate_and_annotate(parsed, week_start)
+
+                # Fallback: if validation failed but we have suggestions, record them unvalidated
+                if validation is None and parsed.suggestions:
+                    from analysis.response_validator import ValidationResult
+                    validation = ValidationResult(
+                        approved_suggestions=parsed.suggestions,
+                        approved_predictions=parsed.predictions,
+                    )
+                    logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
+
+                # Record approved agent suggestions to tracker
+                self._record_agent_suggestions(validation, run_id, parsed)
+
+                # Record predictions
+                self._record_predictions(week_start, parsed.predictions)
+
+                # Wire hypothesis lifecycle for structural proposals
+                self._update_hypothesis_lifecycle(parsed, suggestion_ids)
+
+                # Extract and record patterns for cross-bot transfer
+                self._extract_and_record_patterns(parsed, self._bots, suggestion_ids)
 
             # Record completion timestamp
             if self._brain:
@@ -441,7 +630,7 @@ class Handlers:
                     notification_type="weekly_report",
                     priority=NotificationPriority.NORMAL,
                     title=f"Weekly Report — {week_start} to {week_end}",
-                    body=result.response[:2000],
+                    body=final_report[:2000],
                 )
 
         except Exception as exc:
@@ -713,6 +902,27 @@ class Handlers:
         if correction.correction_type == CorrectionType.ALLOCATION_CHANGE:
             self._record_allocation_change(correction, details)
 
+        # Route suggestion accept/reject to SuggestionTracker
+        if self._suggestion_tracker and correction.target_id:
+            if correction.correction_type == CorrectionType.SUGGESTION_ACCEPT:
+                self._suggestion_tracker.implement(correction.target_id)
+                self._event_stream.broadcast("suggestion_accepted", {
+                    "suggestion_id": correction.target_id,
+                })
+                # Link hypothesis lifecycle
+                self._update_hypothesis_from_feedback(
+                    correction.target_id, accepted=True,
+                )
+            elif correction.correction_type == CorrectionType.SUGGESTION_REJECT:
+                self._suggestion_tracker.reject(correction.target_id, text[:200])
+                self._event_stream.broadcast("suggestion_rejected", {
+                    "suggestion_id": correction.target_id,
+                })
+                # Link hypothesis lifecycle
+                self._update_hypothesis_from_feedback(
+                    correction.target_id, accepted=False,
+                )
+
         await self._notify(
             notification_type="feedback_received",
             priority=NotificationPriority.LOW,
@@ -752,9 +962,320 @@ class Handlers:
                     reason=f"Allocation approved: {correction.raw_text[:200]}",
                 ))
         except Exception:
-            logger.warning("Failed to record allocation change from feedback")
+            logger.error("Failed to record allocation change from feedback", exc_info=True)
+
+    def _extract_and_record_patterns(
+        self, parsed, bots: list[str], suggestion_ids: dict[str, str] | None = None,
+    ) -> None:
+        """Extract patterns from structural proposals and record in PatternLibrary."""
+        if not parsed.structural_proposals:
+            return
+        try:
+            from schemas.pattern_library import PatternCategory
+            from skills.pattern_library import PatternLibrary, PatternEntry, PatternStatus
+
+            lib = PatternLibrary(self._memory_dir / "findings")
+
+            # Map proposal categories to PatternCategory
+            category_map = {
+                "signal": PatternCategory.ENTRY_SIGNAL,
+                "signal_decay": PatternCategory.ENTRY_SIGNAL,
+                "filter": PatternCategory.FILTER,
+                "filter_over_blocking": PatternCategory.FILTER,
+                "exit_timing": PatternCategory.EXIT_RULE,
+                "exit": PatternCategory.EXIT_RULE,
+                "adverse_fills": PatternCategory.RISK_MANAGEMENT,
+                "regime_breakdown": PatternCategory.REGIME_GATE,
+                "regime": PatternCategory.REGIME_GATE,
+                "correlation_crowding": PatternCategory.COORDINATION,
+                "position_sizing": PatternCategory.POSITION_SIZING,
+                "structural": PatternCategory.ENTRY_SIGNAL,
+            }
+
+            existing = lib.load_all()
+            existing_titles = {e.title for e in existing}
+
+            for proposal in parsed.structural_proposals:
+                # Dedup by title
+                if proposal.title in existing_titles:
+                    continue
+
+                # Determine category from proposal fields
+                raw_cat = ""
+                if proposal.hypothesis_id:
+                    # Try to infer from hypothesis category
+                    try:
+                        from skills.hypothesis_library import HypothesisLibrary
+                        hyp_lib = HypothesisLibrary(self._memory_dir / "findings")
+                        for h in hyp_lib.get_all_records():
+                            if h.id == proposal.hypothesis_id:
+                                raw_cat = h.category
+                                break
+                    except Exception:
+                        pass
+                if not raw_cat:
+                    # Infer from title keywords
+                    title_lower = proposal.title.lower()
+                    for keyword, cat_str in [
+                        ("filter", "filter"), ("exit", "exit"),
+                        ("signal", "signal"), ("regime", "regime"),
+                        ("sizing", "position_sizing"), ("stop", "exit"),
+                    ]:
+                        if keyword in title_lower:
+                            raw_cat = cat_str
+                            break
+
+                cat = category_map.get(raw_cat, PatternCategory.ENTRY_SIGNAL)
+                target_bots = [b for b in bots if b != proposal.bot_id]
+
+                # Find linked suggestion_id for this bot from suggestion_ids mapping
+                linked_sid = ""
+                if suggestion_ids:
+                    for sid, stitle in suggestion_ids.items():
+                        # Link if the suggestion title is similar to the proposal
+                        if stitle and proposal.title and stitle.lower() in proposal.title.lower():
+                            linked_sid = sid
+                            break
+
+                entry = PatternEntry(
+                    title=proposal.title,
+                    category=cat,
+                    status=PatternStatus.PROPOSED,
+                    source_bot=proposal.bot_id,
+                    target_bots=target_bots,
+                    description=proposal.description,
+                    evidence=proposal.evidence,
+                    linked_suggestion_id=linked_sid,
+                )
+                lib.add(entry)
+                existing_titles.add(proposal.title)
+                logger.info("Recorded pattern from structural proposal: %s", proposal.title)
+        except Exception:
+            logger.error("Failed to extract and record patterns", exc_info=True)
+
+    def _update_hypothesis_from_feedback(
+        self, suggestion_id: str, accepted: bool,
+    ) -> None:
+        """Update HypothesisLibrary when a suggestion linked to a hypothesis is accepted/rejected."""
+        if not self._suggestion_tracker:
+            return
+        try:
+            from skills.hypothesis_library import HypothesisLibrary
+
+            # Find the suggestion to get its hypothesis_id
+            all_suggestions = self._suggestion_tracker.load_all()
+            hypothesis_id = None
+            for s in all_suggestions:
+                if s.get("suggestion_id") == suggestion_id:
+                    hypothesis_id = s.get("hypothesis_id")
+                    break
+
+            if not hypothesis_id:
+                return
+
+            lib = HypothesisLibrary(self._memory_dir / "findings")
+            if accepted:
+                lib.record_acceptance(hypothesis_id)
+            else:
+                lib.record_rejection(hypothesis_id)
+        except Exception:
+            logger.error("Failed to update hypothesis lifecycle for suggestion %s", suggestion_id, exc_info=True)
 
     # --- Private helpers ---
+
+    def _validate_and_annotate(self, parsed, date_or_week: str):
+        """Run response validation and return annotated report text + validation result.
+
+        Returns:
+            tuple[str, ValidationResult | None]: (annotated_report, validation_result)
+        """
+        try:
+            from analysis.response_validator import ResponseValidator
+            from skills.suggestion_scorer import SuggestionScorer
+
+            ctx = ContextBuilder(self._memory_dir, curated_dir=self._curated_dir)
+            rejected = ctx.load_rejected_suggestions()
+            forecast_meta = ctx.load_forecast_meta()
+
+            scorer = SuggestionScorer(self._memory_dir / "findings")
+            scorecard = scorer.compute_scorecard()
+
+            validator = ResponseValidator(
+                rejected_suggestions=rejected,
+                forecast_meta=forecast_meta,
+                category_scorecard=scorecard,
+            )
+            validation = validator.validate(parsed)
+
+            final_report = parsed.raw_report
+            if validation.validator_notes:
+                final_report += "\n\n---\n## Validator Notes\n" + validation.validator_notes
+
+            # Log validation results (with blocked details for learning signal)
+            try:
+                log_path = self._memory_dir / "findings" / "validation_log.jsonl"
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                blocked_details = [
+                    {
+                        "title": b.suggestion.title,
+                        "reason": b.reason,
+                        "bot_id": b.suggestion.bot_id,
+                    }
+                    for b in validation.blocked_suggestions
+                ]
+                entry = {
+                    "date": date_or_week,
+                    "approved_count": len(validation.approved_suggestions),
+                    "blocked_count": len(validation.blocked_suggestions),
+                    "blocked_details": blocked_details,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps(entry) + "\n")
+            except Exception:
+                logger.error("Failed to log validation results", exc_info=True)
+
+            return final_report, validation
+        except Exception:
+            logger.warning("Response validation failed — using raw report")
+            return parsed.raw_report, None
+
+    def _record_predictions(self, date_or_week: str, predictions: list) -> None:
+        """Record structured predictions from a parsed response."""
+        if not predictions:
+            return
+        try:
+            from skills.prediction_tracker import PredictionTracker
+
+            tracker = PredictionTracker(self._memory_dir / "findings")
+            tracker.record_predictions(date_or_week, predictions)
+        except Exception:
+            logger.error("Failed to record predictions for %s", date_or_week, exc_info=True)
+
+    def _update_hypothesis_lifecycle(self, parsed, suggestion_ids: dict) -> None:
+        """Update hypothesis lifecycle based on parsed structural proposals."""
+        if not parsed.structural_proposals:
+            return
+        try:
+            from skills.hypothesis_library import HypothesisLibrary
+
+            lib = HypothesisLibrary(self._memory_dir / "findings")
+            for proposal in parsed.structural_proposals:
+                if proposal.hypothesis_id:
+                    lib.record_proposal(proposal.hypothesis_id)
+        except Exception:
+            logger.error("Failed to update hypothesis lifecycle", exc_info=True)
+
+    def _record_suggestions(
+        self, suggestions: list, run_id: str,
+    ) -> dict[str, str]:
+        """Convert StrategySuggestions to SuggestionRecords and persist via tracker.
+
+        Returns a mapping of suggestion_id → title for metadata injection.
+        """
+        if not self._suggestion_tracker or not suggestions:
+            return {}
+
+        import hashlib
+        from schemas.suggestion_tracking import SuggestionRecord
+
+        id_map: dict[str, str] = {}
+        for idx, suggestion in enumerate(suggestions):
+            title = getattr(suggestion, "title", "") or ""
+            bot_id = getattr(suggestion, "bot_id", "") or ""
+            tier = getattr(suggestion, "tier", "parameter")
+            description = getattr(suggestion, "description", "") or ""
+
+            # Deterministic ID: SHA256(run_id + index + title)[:12]
+            raw = f"{run_id}:{idx}:{title}"
+            suggestion_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+            category_str = str(getattr(suggestion, "category", "") or "")
+            record = SuggestionRecord(
+                suggestion_id=suggestion_id,
+                bot_id=bot_id,
+                title=title,
+                tier=str(tier.value) if hasattr(tier, "value") else str(tier),
+                category=category_str,
+                source_report_id=run_id,
+                description=description,
+            )
+
+            recorded = self._suggestion_tracker.record(record)
+            if recorded is not False:  # record() returns None (old) or bool (new)
+                id_map[suggestion_id] = title
+                logger.info("Recorded suggestion %s: %s", suggestion_id, title)
+
+        if id_map:
+            self._event_stream.broadcast("suggestions_recorded", {
+                "run_id": run_id, "count": len(id_map),
+            })
+
+        return id_map
+
+    def _record_agent_suggestions(
+        self, validation_result, run_id: str, parsed=None,
+    ) -> dict[str, str]:
+        """Record Claude's approved suggestions from validation into SuggestionTracker.
+
+        Maps AgentSuggestion → SuggestionRecord with deterministic IDs and hypothesis linking.
+        Only approved (not blocked) suggestions are recorded.
+
+        Returns a mapping of suggestion_id → title.
+        """
+        if not self._suggestion_tracker or validation_result is None:
+            return {}
+        if not validation_result.approved_suggestions:
+            return {}
+
+        import hashlib
+        from schemas.suggestion_tracking import SuggestionRecord
+
+        # Build hypothesis_id map from structural proposals
+        hypothesis_map: dict[str, str] = {}
+        if parsed and parsed.structural_proposals:
+            for proposal in parsed.structural_proposals:
+                if proposal.hypothesis_id and proposal.bot_id:
+                    hypothesis_map[proposal.bot_id] = proposal.hypothesis_id
+
+        id_map: dict[str, str] = {}
+        for idx, suggestion in enumerate(validation_result.approved_suggestions):
+            title = suggestion.title or ""
+            bot_id = suggestion.bot_id or ""
+            category = suggestion.category or "parameter"
+
+            # Deterministic ID: SHA256(run_id + index + title)[:12]
+            raw = f"{run_id}:agent:{idx}:{title}"
+            suggestion_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+            # Map category to tier using shared mapping
+            from schemas.agent_response import CATEGORY_TO_TIER
+
+            tier = CATEGORY_TO_TIER.get(category, "parameter")
+
+            record = SuggestionRecord(
+                suggestion_id=suggestion_id,
+                bot_id=bot_id,
+                title=title,
+                tier=tier,
+                category=category,
+                source_report_id=run_id,
+                description=suggestion.evidence_summary or "",
+                hypothesis_id=hypothesis_map.get(bot_id),
+            )
+
+            recorded = self._suggestion_tracker.record(record)
+            if recorded is not False:
+                id_map[suggestion_id] = title
+                logger.info("Recorded agent suggestion %s: %s", suggestion_id, title)
+
+        if id_map:
+            self._event_stream.broadcast("agent_suggestions_recorded", {
+                "run_id": run_id, "count": len(id_map),
+            })
+
+        return id_map
 
     def _record_run(
         self, run_id: str, agent_type: str, status: str,

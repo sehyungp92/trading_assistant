@@ -26,6 +26,7 @@ class SuggestionRecord(BaseModel):
     bot_id: str
     title: str
     tier: str  # parameter | filter | strategy_variant | hypothesis
+    category: str = ""  # original category (exit_timing, filter_threshold, etc.)
     source_report_id: str
     description: str = ""
     status: SuggestionStatus = SuggestionStatus.PROPOSED
@@ -34,6 +35,7 @@ class SuggestionRecord(BaseModel):
     )
     resolved_at: Optional[datetime] = None
     rejection_reason: str = ""
+    hypothesis_id: Optional[str] = None
 
 
 class SuggestionOutcome(BaseModel):

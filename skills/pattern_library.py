@@ -60,6 +60,9 @@ class PatternLibrary:
         for entry in entries:
             if entry.pattern_id == pattern_id:
                 entry.status = status
+                if status == PatternStatus.VALIDATED and not entry.validated_at:
+                    from datetime import date
+                    entry.validated_at = date.today().isoformat()
                 found = True
                 break
 
@@ -67,9 +70,12 @@ class PatternLibrary:
             self._rewrite(entries)
         return found
 
+    def validate_pattern(self, pattern_id: str) -> bool:
+        """Promote a pattern to VALIDATED and set validated_at. Returns True if found."""
+        return self.update_status(pattern_id, PatternStatus.VALIDATED)
+
     def _rewrite(self, entries: list[PatternEntry]) -> None:
-        """Rewrite the entire JSONL file."""
-        self._findings_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(json.dumps(entry.model_dump(mode="json"), default=str) + "\n")
+        """Rewrite the entire JSONL file (atomic write)."""
+        from skills._atomic_write import atomic_rewrite_jsonl
+
+        atomic_rewrite_jsonl(self._path, entries)

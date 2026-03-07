@@ -72,8 +72,9 @@ def _apply_temporal_window(
 class ContextBuilder:
     """Loads shared context (policies, corrections, metadata) used by all assemblers."""
 
-    def __init__(self, memory_dir: Path) -> None:
+    def __init__(self, memory_dir: Path, curated_dir: Path | None = None) -> None:
         self._memory_dir = memory_dir
+        self._curated_dir = curated_dir
 
     @property
     def memory_dir(self) -> Path:
@@ -287,6 +288,165 @@ class ContextBuilder:
                     pass
         return patterns
 
+    def load_forecast_meta(self) -> dict:
+        """Load forecast meta-analysis from findings/forecast_history.jsonl."""
+        try:
+            from skills.forecast_tracker import ForecastTracker
+
+            tracker = ForecastTracker(self._memory_dir / "findings")
+            records = tracker.load_all()
+            if not records:
+                return {}
+            meta = tracker.compute_meta_analysis()
+            return meta.model_dump(mode="json")
+        except Exception:
+            return {}
+
+    def load_active_suggestions(self) -> list[dict]:
+        """Load non-rejected suggestions from findings/suggestions.jsonl.
+
+        Returns suggestions with status in (proposed, accepted, implemented),
+        applying temporal window (90d, 30-entry cap).
+        """
+        path = self._memory_dir / "findings" / "suggestions.jsonl"
+        if not path.exists():
+            return []
+        active: list[dict] = []
+        for line in path.read_text().strip().split("\n"):
+            if line.strip():
+                rec = json.loads(line)
+                status = rec.get("status", "")
+                if status in ("proposed", "accepted", "implemented"):
+                    active.append(rec)
+        return _apply_temporal_window(active, max_entries=30)
+
+    def load_category_scorecard(self) -> dict:
+        """Load category-level suggestion success rates."""
+        try:
+            from skills.suggestion_scorer import SuggestionScorer
+
+            scorer = SuggestionScorer(self._memory_dir / "findings")
+            scorecard = scorer.compute_scorecard()
+            if scorecard.scores:
+                return scorecard.model_dump(mode="json")
+        except Exception:
+            pass
+        return {}
+
+    def load_prediction_accuracy(self) -> dict:
+        """Load per-metric prediction accuracy from the prediction tracker.
+
+        When curated_dir is available, computes real accuracy by evaluating predictions
+        against actual curated data. Otherwise returns prediction count metadata.
+        """
+        try:
+            from skills.prediction_tracker import PredictionTracker
+
+            tracker = PredictionTracker(self._memory_dir / "findings")
+            if not (self._memory_dir / "findings" / "predictions.jsonl").exists():
+                return {}
+            predictions = tracker.load_predictions()
+            if not predictions:
+                return {}
+
+            # When curated_dir available, compute real per-metric accuracy
+            if self._curated_dir and self._curated_dir.exists():
+                accuracy_by_metric = tracker.get_accuracy_by_metric(self._curated_dir)
+                if accuracy_by_metric:
+                    return {
+                        "has_predictions": True,
+                        "count": len(predictions),
+                        "accuracy_by_metric": accuracy_by_metric,
+                    }
+
+            return {"has_predictions": True, "count": len(predictions)}
+        except Exception:
+            return {}
+
+    def load_hypothesis_track_record(self) -> dict:
+        """Load hypothesis effectiveness scores for prompt injection."""
+        try:
+            from skills.hypothesis_library import HypothesisLibrary
+
+            lib = HypothesisLibrary(self._memory_dir / "findings")
+            track = lib.get_track_record()
+            if track:
+                return track
+        except Exception:
+            pass
+        return {}
+
+    def load_transfer_track_record(self) -> dict:
+        """Load transfer outcome success rates for prompt injection."""
+        try:
+            from skills.transfer_proposal_builder import TransferProposalBuilder
+
+            return TransferProposalBuilder.load_track_record_from_file(
+                self._memory_dir / "findings",
+            )
+        except Exception:
+            return {}
+
+    def load_validation_patterns(self) -> dict:
+        """Load aggregated validation patterns from findings/validation_log.jsonl.
+
+        Groups blocked suggestions by category over the last 30 days.
+        Returns summary dict: {"category": {"blocked_count": N, "common_reasons": [...]}}
+        """
+        path = self._memory_dir / "findings" / "validation_log.jsonl"
+        if not path.exists():
+            return {}
+        try:
+            from collections import defaultdict
+
+            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+            category_blocks: dict[str, list[str]] = defaultdict(list)
+
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                ts = entry.get("timestamp", "")
+                if ts:
+                    try:
+                        entry_time = datetime.fromisoformat(ts)
+                        if entry_time.tzinfo is None:
+                            entry_time = entry_time.replace(tzinfo=timezone.utc)
+                        if entry_time < cutoff:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                for detail in entry.get("blocked_details", []):
+                    bot_id = detail.get("bot_id", "")
+                    reason = detail.get("reason", "")
+                    # Infer category from reason or title
+                    title = detail.get("title", "").lower()
+                    for keyword, cat in [
+                        ("exit", "exit_timing"), ("filter", "filter_threshold"),
+                        ("stop", "stop_loss"), ("signal", "signal"),
+                        ("regime", "regime_gate"), ("sizing", "position_sizing"),
+                    ]:
+                        if keyword in title:
+                            category_blocks[cat].append(reason)
+                            break
+                    else:
+                        category_blocks["other"].append(reason)
+
+            if not category_blocks:
+                return {}
+
+            result: dict = {}
+            for cat, reasons in category_blocks.items():
+                # Deduplicate and count
+                unique_reasons = list(set(reasons))[:5]
+                result[cat] = {
+                    "blocked_count": len(reasons),
+                    "common_reasons": unique_reasons,
+                }
+            return result
+        except Exception:
+            return {}
+
     def load_consolidated_patterns(self) -> str:
         """Load patterns_consolidated.md if it exists."""
         path = self._memory_dir / "findings" / "patterns_consolidated.md"
@@ -326,6 +486,27 @@ class ContextBuilder:
         correction_patterns = self.load_correction_patterns()
         if correction_patterns:
             data["correction_patterns"] = correction_patterns
+        forecast_meta = self.load_forecast_meta()
+        if forecast_meta:
+            data["forecast_meta_analysis"] = forecast_meta
+        active_suggestions = self.load_active_suggestions()
+        if active_suggestions:
+            data["active_suggestions"] = active_suggestions
+        category_scorecard = self.load_category_scorecard()
+        if category_scorecard:
+            data["category_scorecard"] = category_scorecard
+        prediction_accuracy = self.load_prediction_accuracy()
+        if prediction_accuracy:
+            data["prediction_accuracy_by_metric"] = prediction_accuracy
+        hypothesis_track_record = self.load_hypothesis_track_record()
+        if hypothesis_track_record:
+            data["hypothesis_track_record"] = hypothesis_track_record
+        transfer_track_record = self.load_transfer_track_record()
+        if transfer_track_record:
+            data["transfer_track_record"] = transfer_track_record
+        validation_patterns = self.load_validation_patterns()
+        if validation_patterns:
+            data["validation_patterns"] = validation_patterns
         if session_store and agent_type:
             session_history = self.load_session_history(session_store, agent_type)
             if session_history:

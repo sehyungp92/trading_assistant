@@ -23,6 +23,7 @@ class ActionType(str, Enum):
     QUEUE_FOR_WEEKLY = "queue_for_weekly"
     SEND_NOTIFICATION = "send_notification"
     UPDATE_HEARTBEAT = "update_heartbeat"
+    PROCESS_FEEDBACK = "process_feedback"
     LOG_UNKNOWN = "log_unknown"
 
 
@@ -154,6 +155,10 @@ class OrchestratorBrain:
     def _handle_notification_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.SEND_NOTIFICATION, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_user_feedback(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        payload = json.loads(event.get("payload", "{}"))
+        return [Action(type=ActionType.PROCESS_FEEDBACK, event_id=event_id, bot_id=bot_id, details=payload)]
+
     def _handle_coordinator_action(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         """Route coordinator action events to daily analysis queue.
 
@@ -220,4 +225,5 @@ class OrchestratorBrain:
         "portfolio_rule": _handle_portfolio_rule,
         "market_snapshot": _handle_market_snapshot,
         "exit_movement": _handle_exit_movement,
+        "user_feedback": _handle_user_feedback,
     }

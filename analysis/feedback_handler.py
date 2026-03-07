@@ -55,6 +55,32 @@ class FeedbackHandler:
                 raw_text=text,
             )
 
+        # Pattern: accept/approve suggestion #<id>
+        accept_match = re.search(
+            r"(?:approv|accept|implement)\w*\s+(?:suggestion|recommendation)\s*#?(\w+)",
+            text, re.IGNORECASE,
+        )
+        if accept_match:
+            return HumanCorrection(
+                correction_type=CorrectionType.SUGGESTION_ACCEPT,
+                original_report_id=self.report_id,
+                target_id=accept_match.group(1),
+                raw_text=text,
+            )
+
+        # Pattern: reject/decline suggestion #<id>
+        reject_match = re.search(
+            r"(?:reject|decline|skip)\w*\s+(?:suggestion|recommendation)\s*#?(\w+)",
+            text, re.IGNORECASE,
+        )
+        if reject_match:
+            return HumanCorrection(
+                correction_type=CorrectionType.SUGGESTION_REJECT,
+                original_report_id=self.report_id,
+                target_id=reject_match.group(1),
+                raw_text=text,
+            )
+
         # Pattern: Good catch, nice, well done, etc.
         positive_patterns = [
             r"good\s+catch",

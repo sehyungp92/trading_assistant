@@ -42,3 +42,5 @@ class PatternEntry(BaseModel):
     implementation_notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    validated_at: str = ""  # YYYY-MM-DD when promoted to VALIDATED
+    linked_suggestion_id: str = ""

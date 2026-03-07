@@ -1,0 +1,47 @@
+# schemas/prediction_tracking.py
+"""Prediction tracking schemas — record and evaluate structured predictions."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class PredictionRecord(BaseModel):
+    """A single recorded prediction from Claude's structured output."""
+
+    bot_id: str
+    metric: str
+    direction: str
+    confidence: float
+    timeframe_days: int = 7
+    reasoning: str = ""
+    week: str = ""
+    recorded_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class PredictionVerdict(BaseModel):
+    """Verdict on a single prediction after evaluation."""
+
+    bot_id: str
+    metric: str
+    predicted_direction: str
+    actual_direction: str = ""
+    correct: bool = False
+    confidence: float = 0.0
+    status: Literal["correct", "incorrect", "insufficient_data"] = "insufficient_data"
+
+
+class PredictionEvaluation(BaseModel):
+    """Evaluation of a batch of predictions for a given week."""
+
+    week: str
+    verdicts: list[PredictionVerdict] = []
+    total: int = 0
+    correct: int = 0
+    accuracy: float = 0.0
+    confidence_weighted_accuracy: float = 0.0
+    accuracy_by_metric: dict[str, float] = {}

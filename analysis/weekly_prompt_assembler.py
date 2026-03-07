@@ -91,7 +91,60 @@ _WEEKLY_INSTRUCTIONS = """\
     configurations tested against baseline. Highlight the best-performing exit strategy
     per bot with expected improvement. Flag if the current exit mechanism is suboptimal
     (best alternative improvement > 10%). Note: these are proxy calculations using
-    post-exit prices, not full backtests."""
+    post-exit prices, not full backtests.
+23. SUGGESTION IDS: Every suggestion in the weekly report MUST include its suggestion_id
+    in brackets, e.g. "[#abc123] Widen stop loss on bot1". Users respond with
+    "approve suggestion #abc123" to accept or "reject suggestion #abc123" to decline.
+    Suggestion IDs are provided in metadata["suggestion_ids"].
+24. RETROSPECTIVE REVIEW: Review weekly_retrospective data (if present) showing last
+    week's prediction accuracy. Acknowledge accuracy rate. For incorrect predictions,
+    explain what went wrong. If accuracy < 50%, flag this and lower confidence levels.
+25. SUGGESTION OUTCOMES: Review outcome_measurements data (if present). For NEGATIVE
+    outcomes, do NOT re-suggest similar approaches. For POSITIVE outcomes, reference
+    as evidence for similar suggestions on other bots. Adjust confidence calibration
+    based on track record.
+26. FORECAST CALIBRATION: Review forecast_meta_analysis (if present). If rolling_accuracy_4w
+    < 50%, apply a confidence haircut. For bots where accuracy < 40%, cap max confidence
+    at 0.5. If calibration_adjustment is negative, you've been over-confident — lower scores.
+27. STRUCTURAL HYPOTHESES: Review structural_hypotheses (if present). When proposing
+    structural changes, you MUST check if any existing hypothesis matches your proposal.
+    If a match exists, set hypothesis_id to that hypothesis's "id" field in your
+    structured output. This is critical for tracking which hypotheses lead to improvements.
+    The available hypothesis IDs and their effectiveness scores are listed in
+    structural_hypotheses. Propose at most 2 structural changes per week. Each must
+    include: expected impact, reversibility, minimum data needed.
+    Check rejected_suggestions before proposing.
+28. CROSS-BOT TRANSFER: Review transfer_proposals (if present). For proposals with
+    compatibility > 0.7, recommend transfer with implementation notes. For 0.4-0.7,
+    flag as "worth investigating". Propose new patterns for the library based on
+    this week's findings.
+29. CATEGORY SCORECARD: Review category_scorecard (if present). Categories with
+    win_rate < 30% and sample_size >= 5 require exceptional new evidence to justify
+    suggestions. Reference track record when proposing suggestions.
+30. PREDICTION ACCURACY: Review prediction_accuracy_by_metric (if present). For metrics
+    where accuracy < 40%, explicitly caveat predictions and lower confidence.
+31. HYPOTHESIS TRACK RECORD: Review hypothesis_track_record (if present). Prioritize
+    hypotheses with positive effectiveness scores. Do not propose retired hypotheses.
+32. TRANSFER TRACK RECORD: Review transfer_track_record (if present). Favor patterns
+    with proven cross-bot success. Avoid patterns with negative track record.
+33. VALIDATION PATTERNS: Review validation_patterns (if present). These show which
+    suggestion categories are consistently blocked by the validator. Avoid proposing
+    suggestions in categories with high blocked_count unless you have strong new evidence.
+34. STRUCTURED OUTPUT (REQUIRED): At the END of your analysis, emit a structured data block.
+    This block is machine-parsed — do NOT omit it.
+    <!-- STRUCTURED_OUTPUT
+    {
+      "predictions": [
+        {"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}
+      ],
+      "suggestions": [
+        {"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "..."}
+      ],
+      "structural_proposals": [
+        {"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high"}
+      ]
+    }
+    -->"""
 
 
 class WeeklyPromptAssembler:

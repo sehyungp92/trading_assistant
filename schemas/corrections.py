@@ -18,6 +18,8 @@ class CorrectionType(str, Enum):
     REGIME_OVERRIDE = "regime_override"
     POSITIVE_REINFORCEMENT = "positive_reinforcement"
     ALLOCATION_CHANGE = "allocation_change"
+    SUGGESTION_ACCEPT = "suggestion_accept"
+    SUGGESTION_REJECT = "suggestion_reject"
     FREE_TEXT = "free_text"
 
 
