@@ -12,6 +12,7 @@ class AppConfig(BaseModel):
     bot_ids: list[str] = []
     relay_url: str = ""
     relay_hmac_secret: str = ""
+    relay_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_bot_token: str = ""
@@ -35,6 +36,7 @@ class AppConfig(BaseModel):
             bot_ids=bot_ids,
             relay_url=os.environ.get("RELAY_URL", ""),
             relay_hmac_secret=os.environ.get("RELAY_HMAC_SECRET", ""),
+            relay_api_key=os.environ.get("RELAY_API_KEY", ""),
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
             discord_bot_token=os.environ.get("DISCORD_BOT_TOKEN", ""),

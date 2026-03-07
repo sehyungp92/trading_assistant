@@ -30,6 +30,7 @@ class VPSReceiver:
         min_poll_seconds: int = 10,
         max_poll_seconds: int = 300,
         *,
+        api_key: str = "",
         latency_tracker=None,
         _client_factory: Callable[[], Any] | None = None,
     ) -> None:
@@ -37,6 +38,7 @@ class VPSReceiver:
         self._queue = local_queue
         self._watermark_key = watermark_key
         self._timeout = timeout
+        self._api_key = api_key
         self._client_factory = _client_factory
         self._latency_tracker = latency_tracker
         self._consecutive_failures: int = 0
@@ -47,7 +49,10 @@ class VPSReceiver:
     def _make_client(self) -> httpx.AsyncClient:
         if self._client_factory:
             return self._client_factory()
-        return httpx.AsyncClient(base_url=self._relay_url, timeout=self._timeout)
+        headers = {}
+        if self._api_key:
+            headers["X-Api-Key"] = self._api_key
+        return httpx.AsyncClient(base_url=self._relay_url, timeout=self._timeout, headers=headers)
 
     def adapt_interval(self, events_received: int) -> None:
         """Adjust poll interval based on recent activity."""

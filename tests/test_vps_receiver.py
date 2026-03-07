@@ -242,6 +242,104 @@ class TestLatencyRecording:
         assert stats.sample_count == 2
 
 
+class TestApiKeyAuth:
+    async def test_api_key_sent_in_headers(self, fake_relay, local_queue):
+        """When api_key is set, X-Api-Key header is included in requests."""
+        fake_relay.seed(count=1)
+        captured_headers: dict = {}
+
+        async def capture_handler(request: Request) -> JSONResponse:
+            captured_headers.update(dict(request.headers))
+            return await fake_relay.handle_get_events(request)
+
+        capture_app = Starlette(routes=[
+            Route("/events", capture_handler),
+            Route("/ack", fake_relay.handle_ack, methods=["POST"]),
+        ])
+        transport = ASGITransport(app=capture_app)
+
+        receiver = VPSReceiver(
+            relay_url="http://relay",
+            local_queue=local_queue,
+            api_key="test-key-123",
+            _client_factory=lambda: AsyncClient(transport=transport, base_url="http://relay",
+                                                headers={"X-Api-Key": "test-key-123"}),
+        )
+        await receiver.pull_and_store()
+        assert captured_headers.get("x-api-key") == "test-key-123"
+
+    async def test_no_api_key_when_empty(self, fake_relay, local_queue):
+        """When api_key is empty, no X-Api-Key header is sent."""
+        fake_relay.seed(count=1)
+        captured_headers: dict = {}
+
+        async def capture_handler(request: Request) -> JSONResponse:
+            captured_headers.update(dict(request.headers))
+            return await fake_relay.handle_get_events(request)
+
+        capture_app = Starlette(routes=[
+            Route("/events", capture_handler),
+            Route("/ack", fake_relay.handle_ack, methods=["POST"]),
+        ])
+        transport = ASGITransport(app=capture_app)
+
+        receiver = VPSReceiver(
+            relay_url="http://relay",
+            local_queue=local_queue,
+            api_key="",
+            _client_factory=lambda: AsyncClient(transport=transport, base_url="http://relay"),
+        )
+        await receiver.pull_and_store()
+        assert "x-api-key" not in captured_headers
+
+    async def test_401_triggers_poll_failure(self, local_queue):
+        """Relay returning 401 is handled gracefully by poll()."""
+
+        async def unauthorized_handler(request):
+            return PlainTextResponse("Unauthorized", status_code=401)
+
+        error_app = Starlette(routes=[Route("/events", unauthorized_handler)])
+        transport = ASGITransport(app=error_app)
+
+        receiver = VPSReceiver(
+            relay_url="http://relay",
+            local_queue=local_queue,
+            api_key="wrong-key",
+            _client_factory=lambda: AsyncClient(transport=transport, base_url="http://relay"),
+        )
+        result = await receiver.poll()
+        assert result == 0
+        assert receiver._consecutive_failures == 1
+
+    async def test_make_client_includes_api_key(self):
+        """_make_client() sets X-Api-Key header when api_key is provided."""
+        from unittest.mock import MagicMock
+
+        queue_mock = MagicMock()
+        receiver = VPSReceiver(
+            relay_url="http://relay.example.com",
+            local_queue=queue_mock,
+            api_key="my-secret-key",
+        )
+        client = receiver._make_client()
+        assert client.headers.get("x-api-key") == "my-secret-key"
+        await client.aclose()
+
+    async def test_make_client_no_api_key_header_when_empty(self):
+        """_make_client() does not set X-Api-Key when api_key is empty."""
+        from unittest.mock import MagicMock
+
+        queue_mock = MagicMock()
+        receiver = VPSReceiver(
+            relay_url="http://relay.example.com",
+            local_queue=queue_mock,
+            api_key="",
+        )
+        client = receiver._make_client()
+        assert "x-api-key" not in client.headers
+        await client.aclose()
+
+
 class TestDrain:
     async def test_drain_pulls_multiple_batches(self, fake_relay, relay_app, local_queue):
         """Seeds 5 events, drains with batch_size=2 — should pull all in 3 batches."""

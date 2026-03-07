@@ -187,6 +187,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         vps_receiver = VPSReceiver(
             relay_url=config.relay_url,
             local_queue=queue,
+            api_key=config.relay_api_key,
             latency_tracker=latency_tracker,
         )
 

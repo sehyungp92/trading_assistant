@@ -163,6 +163,30 @@ class OrchestratorBrain:
         """
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_daily_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_order(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_process_quality(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_bot_error(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return self._handle_error(event_id, bot_id, event)
+
+    def _handle_post_exit(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_portfolio_rule(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_market_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_exit_movement(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]
 
@@ -188,4 +212,12 @@ class OrchestratorBrain:
         "wfo_trigger": _handle_wfo_trigger,
         "notification_trigger": _handle_notification_trigger,
         "coordinator_action": _handle_coordinator_action,
+        "daily_snapshot": _handle_daily_snapshot,
+        "order": _handle_order,
+        "process_quality": _handle_process_quality,
+        "bot_error": _handle_bot_error,
+        "post_exit": _handle_post_exit,
+        "portfolio_rule": _handle_portfolio_rule,
+        "market_snapshot": _handle_market_snapshot,
+        "exit_movement": _handle_exit_movement,
     }
