@@ -170,13 +170,24 @@ class ContextBuilder:
                 files.append(str(path))
         return files
 
-    def runtime_metadata(self) -> dict:
-        """Return runtime metadata for the prompt package."""
+    def runtime_metadata(self, bot_configs: dict | None = None) -> dict:
+        """Return runtime metadata for the prompt package.
+
+        Args:
+            bot_configs: Optional dict of ``{bot_id: BotConfig}`` to include
+                per-bot timezone information in the metadata.
+        """
         now = datetime.now(timezone.utc)
-        return {
+        meta: dict = {
             "assembled_at": now.isoformat(),
             "timezone": "UTC",
         }
+        if bot_configs:
+            meta["bot_timezones"] = {
+                bid: cfg.timezone if hasattr(cfg, "timezone") else "UTC"
+                for bid, cfg in bot_configs.items()
+            }
+        return meta
 
     @staticmethod
     def check_data_availability(
@@ -476,12 +487,18 @@ class ContextBuilder:
         except OSError:
             return ""
 
-    def base_package(self, session_store=None, agent_type: str = "") -> PromptPackage:
+    def base_package(
+        self,
+        session_store=None,
+        agent_type: str = "",
+        bot_configs: dict | None = None,
+    ) -> PromptPackage:
         """Build a PromptPackage pre-filled with system prompt, corrections, and metadata.
 
         Args:
             session_store: Optional SessionStore for loading session history.
             agent_type: Agent type for session history filtering.
+            bot_configs: Optional ``{bot_id: BotConfig}`` for timezone metadata.
         """
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
@@ -537,6 +554,6 @@ class ContextBuilder:
             system_prompt=self.build_system_prompt(),
             corrections=self.load_corrections(),
             context_files=self.list_policy_files(),
-            metadata=self.runtime_metadata(),
+            metadata=self.runtime_metadata(bot_configs=bot_configs),
             data=data,
         )

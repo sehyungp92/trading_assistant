@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -34,7 +34,12 @@ from orchestrator.skills_registry import SkillsRegistry
 from orchestrator.subagent import SubagentManager
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.worker import Worker
-from schemas.notifications import NotificationChannel, NotificationPreferences
+from schemas.notifications import (
+    NotificationChannel,
+    NotificationPayload,
+    NotificationPreferences,
+    NotificationPriority,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +362,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         threshold_learner=threshold_learner,
         experiment_manager=experiment_manager,
         experiment_config_gen=experiment_config_gen,
+        bot_configs=config.bot_configs,
     )
 
     # Wire handler slots on worker
@@ -484,11 +490,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     scanner = ProactiveScanner()
     curated_dir = db_path / "data" / "curated"
 
-    async def _morning_scan() -> None:
+    async def _morning_scan(bot_ids: list[str] | None = None) -> None:
         """Gather overnight data and dispatch morning scan notifications."""
+        from orchestrator.tz_utils import bot_trading_date
         from datetime import timedelta
 
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        scan_bots = bot_ids or config.bot_ids
         errors: list[dict] = []
         unusual_losses: list[dict] = []
 
@@ -501,8 +508,14 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.warning("Morning scan: could not read dead-letter queue")
 
-        # Check yesterday's curated data for unusual losses
-        for bot_id in config.bot_ids:
+        # Check each bot's most recent completed trading day (per-bot timezone)
+        for bot_id in scan_bots:
+            if config.bot_configs and bot_id in config.bot_configs:
+                tz = config.bot_configs[bot_id].timezone
+            else:
+                tz = "UTC"
+            # "yesterday" in the bot's local timezone
+            yesterday = bot_trading_date(tz, datetime.now(timezone.utc) - timedelta(days=1))
             summary_path = curated_dir / yesterday / bot_id / "summary.json"
             if summary_path.exists():
                 try:
@@ -526,13 +539,23 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             except Exception:
                 logger.exception("Morning scan dispatch failed")
 
-    async def _evening_report() -> None:
+    async def _evening_report(bot_ids: list[str] | None = None) -> None:
         """Check if daily report is ready and send evening notification."""
+        from orchestrator.tz_utils import bot_trading_date
+
+        scan_bots = bot_ids or config.bot_ids
+        daily_report_ready = False
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        daily_report_ready = any(
-            (curated_dir / date / bot_id / "summary.json").exists()
-            for bot_id in config.bot_ids
-        ) if config.bot_ids else False
+        if scan_bots:
+            for bot_id in scan_bots:
+                if config.bot_configs and bot_id in config.bot_configs:
+                    tz = config.bot_configs[bot_id].timezone
+                else:
+                    tz = "UTC"
+                bot_date = bot_trading_date(tz)
+                if (curated_dir / bot_date / bot_id / "summary.json").exists():
+                    daily_report_ready = True
+                    break
 
         result = scanner.evening_scan(date=date, daily_report_ready=daily_report_ready)
         hour_utc = datetime.now(timezone.utc).hour
@@ -703,6 +726,99 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # AuditTrailConsumer — persists SSE events to JSONL
     audit_consumer = AuditTrailConsumer(log_dir=db_path / "logs")
 
+    # Build per-timezone daily analysis triggers
+    daily_analysis_fns: list[dict] | None = None
+    _default_daily_fn = None
+    tz_groups: dict[str, list[str]] = {}
+
+    if config.bot_configs:
+        from orchestrator.tz_utils import group_bots_by_analysis_time, bot_trading_date
+
+        tz_groups = group_bots_by_analysis_time(config.bot_configs)
+        if len(tz_groups) > 1:
+            # Multiple timezone groups — create per-group triggers
+            daily_analysis_fns = []
+            for time_key, bot_list in tz_groups.items():
+                h, m = (int(x) for x in time_key.split(":"))
+                # Capture bot_list in closure
+                def _make_trigger(bots: list[str]):
+                    async def _trigger() -> None:
+                        tz_name = config.bot_configs[bots[0]].timezone
+                        date = bot_trading_date(tz_name)
+                        await queue.enqueue({
+                            "event_type": "daily_analysis_trigger",
+                            "bot_id": "system",
+                            "event_id": f"daily-trigger-{date}-{bots[0]}",
+                            "payload": json.dumps({"bots": bots, "date": date}),
+                        })
+                    return _trigger
+                daily_analysis_fns.append({
+                    "fn": _make_trigger(bot_list),
+                    "hour": h,
+                    "minute": m,
+                    "name_suffix": time_key.replace(":", ""),
+                })
+        else:
+            # All bots in same timezone group — use single trigger
+            _default_daily_fn = lambda: queue.enqueue({
+                "event_type": "daily_analysis_trigger",
+                "bot_id": "system",
+                "event_id": f"daily-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+                "payload": "{}",
+            })
+    else:
+        _default_daily_fn = lambda: queue.enqueue({
+            "event_type": "daily_analysis_trigger",
+            "bot_id": "system",
+            "event_id": f"daily-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+            "payload": "{}",
+        })
+
+    # Build per-timezone morning/evening scan triggers
+    morning_scan_fns: list[dict] | None = None
+    evening_report_fns: list[dict] | None = None
+    _default_morning_fn = _morning_scan
+    _default_evening_fn = _evening_report
+
+    if config.bot_configs and daily_analysis_fns and len(daily_analysis_fns) > 1:
+        # Multiple timezone groups — create per-group scanner triggers
+        from orchestrator.tz_utils import market_close_utc as _market_close_utc
+
+        morning_scan_fns = []
+        evening_report_fns = []
+        for time_key, bot_list in tz_groups.items():
+            cfg0 = config.bot_configs[bot_list[0]]
+            close_utc = _market_close_utc(cfg0.timezone, cfg0.market_close_local)
+            # Morning scan: 9 hours before market close (e.g. ~7 AM local)
+            morning_utc = close_utc - timedelta(hours=9)
+            # Evening report: 1 hour after market close
+            evening_utc = close_utc + timedelta(hours=1)
+
+            def _make_morning(bots: list[str]):
+                async def _trigger() -> None:
+                    await _morning_scan(bot_ids=bots)
+                return _trigger
+
+            def _make_evening(bots: list[str]):
+                async def _trigger() -> None:
+                    await _evening_report(bot_ids=bots)
+                return _trigger
+
+            morning_scan_fns.append({
+                "fn": _make_morning(bot_list),
+                "hour": morning_utc.hour,
+                "minute": morning_utc.minute,
+                "name_suffix": time_key.replace(":", ""),
+            })
+            evening_report_fns.append({
+                "fn": _make_evening(bot_list),
+                "hour": evening_utc.hour,
+                "minute": evening_utc.minute,
+                "name_suffix": time_key.replace(":", ""),
+            })
+        _default_morning_fn = None
+        _default_evening_fn = None
+
     # Build scheduler jobs
     scheduler_config = SchedulerConfig()
     scheduler_jobs = create_scheduler_jobs(
@@ -710,12 +826,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         worker_fn=lambda: worker.process_batch(),
         monitoring_fn=lambda: monitoring_loop.run_all(),
         relay_fn=vps_receiver.poll if vps_receiver else _noop_relay,
-        daily_analysis_fn=lambda: queue.enqueue({
-            "event_type": "daily_analysis_trigger",
-            "bot_id": "system",
-            "event_id": f"daily-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-            "payload": "{}",
-        }),
+        daily_analysis_fn=_default_daily_fn,
+        daily_analysis_fns=daily_analysis_fns,
         weekly_analysis_fn=lambda: queue.enqueue({
             "event_type": "weekly_summary_trigger",
             "bot_id": "system",
@@ -729,8 +841,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             "payload": "{}",
         }),
         stale_event_recovery_fn=lambda: queue.recover_stale(),
-        morning_scan_fn=_morning_scan,
-        evening_report_fn=_evening_report,
+        morning_scan_fn=_default_morning_fn,
+        evening_report_fn=_default_evening_fn,
+        morning_scan_fns=morning_scan_fns,
+        evening_report_fns=evening_report_fns,
         outcome_measurement_fn=_measure_outcomes,
         memory_consolidation_fn=_consolidate_memory,
         transfer_outcome_fn=_measure_transfer_outcomes,
@@ -748,36 +862,79 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await queue.initialize()
-        await registry.initialize()
+        try:
+            await queue.initialize()
+            await registry.initialize()
 
-        # Start channel adapters
-        for adapter in channel_adapters:
+            # Validate bot timezones (fail fast on invalid IANA zones)
+            for bid, cfg in (config.bot_configs or {}).items():
+                try:
+                    from zoneinfo import ZoneInfo
+                    ZoneInfo(cfg.timezone)
+                except Exception:
+                    raise ValueError(f"Invalid timezone '{cfg.timezone}' for bot '{bid}'")
+
+            # Start channel adapters
+            for adapter in channel_adapters:
+                try:
+                    await adapter.start()
+                except Exception:
+                    logger.warning("Failed to start %s adapter", type(adapter).__name__)
+
+            # Start Telegram update polling (for callback queries and slash commands)
+            if telegram_adapter is not None and telegram_adapter._callback_router is not None:
+                try:
+                    await telegram_adapter.start_polling()
+                except Exception:
+                    logger.warning("Failed to start Telegram polling")
+
+            # Start audit trail consumer
+            audit_consumer.start(event_stream)
+
+            # Catch up on events buffered while PC was off
+            if vps_receiver:
+                try:
+                    await vps_receiver.drain()
+                except Exception:
+                    logger.warning("Startup drain failed — will retry via scheduler")
+
+            # Catch up on missed scheduled jobs (e.g., laptop was off)
             try:
-                await adapter.start()
-            except Exception:
-                logger.warning("Failed to start %s adapter", type(adapter).__name__)
+                from orchestrator.catchup import StartupCatchup
 
-        # Start Telegram update polling (for callback queries and slash commands)
-        if telegram_adapter is not None and telegram_adapter._callback_router is not None:
+                run_history_path = db_path / "data" / "run_history.jsonl"
+                catchup = StartupCatchup(
+                    run_history_path=run_history_path,
+                    bot_configs=config.bot_configs or None,
+                )
+                for event in catchup.build_catchup_events():
+                    logger.info("Startup catch-up: enqueuing %s", event.get("event_id"))
+                    await queue.enqueue(event)
+            except Exception:
+                logger.warning("Startup catch-up failed", exc_info=True)
+
+            # Start scheduler (graceful degradation if it fails)
             try:
-                await telegram_adapter.start_polling()
+                scheduler = _create_scheduler(scheduler_jobs)
             except Exception:
-                logger.warning("Failed to start Telegram polling")
+                logger.error("Failed to create scheduler", exc_info=True)
+                scheduler = None
+            app.state.scheduler = scheduler
 
-        # Start audit trail consumer
-        audit_consumer.start(event_stream)
-
-        # Catch up on events buffered while PC was off
-        if vps_receiver:
+        except Exception as exc:
+            logger.critical("Startup failed: %s", exc, exc_info=True)
+            # Best-effort crash notification
             try:
-                await vps_receiver.drain()
+                payload = NotificationPayload(
+                    notification_type="system_alert",
+                    priority=NotificationPriority.CRITICAL,
+                    title="Trading Assistant Startup Failed",
+                    body=f"Startup failure: {exc}",
+                )
+                await dispatcher.dispatch(payload, notification_prefs, 0)
             except Exception:
-                logger.warning("Startup drain failed — will retry via scheduler")
-
-        # Start scheduler
-        scheduler = _create_scheduler(scheduler_jobs)
-        app.state.scheduler = scheduler
+                pass
+            raise
 
         yield
 
@@ -831,7 +988,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+        scheduler_ok = hasattr(app.state, "scheduler") and app.state.scheduler is not None
+        return {
+            "status": "ok" if scheduler_ok else "degraded",
+            "scheduler": "running" if scheduler_ok else "unavailable",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
 
     @app.get("/metrics")
     async def metrics():
@@ -1001,6 +1163,10 @@ def _create_scheduler(jobs: list[dict]) -> object | None:
         func = job.pop("func")
         name = job.pop("name")
 
+        # Extract APScheduler add_job kwargs before building trigger
+        misfire_grace_time = job.pop("misfire_grace_time", None)
+        coalesce = job.pop("coalesce", None)
+
         if trigger_type == "interval":
             trigger = IntervalTrigger(seconds=job.pop("seconds"))
         elif trigger_type == "cron":
@@ -1010,7 +1176,13 @@ def _create_scheduler(jobs: list[dict]) -> object | None:
             logger.warning("Unknown trigger type %s for job %s", trigger_type, name)
             continue
 
-        scheduler.add_job(func, trigger, id=name, name=name, **job)
+        add_kwargs: dict = {}
+        if misfire_grace_time is not None:
+            add_kwargs["misfire_grace_time"] = misfire_grace_time
+        if coalesce is not None:
+            add_kwargs["coalesce"] = coalesce
+
+        scheduler.add_job(func, trigger, id=name, name=name, **add_kwargs, **job)
 
     scheduler.start()
     return scheduler

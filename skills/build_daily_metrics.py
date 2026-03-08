@@ -28,9 +28,10 @@ from schemas.daily_metrics import (
 class DailyMetricsBuilder:
     """Builds curated daily metrics for a single bot on a single day."""
 
-    def __init__(self, date: str, bot_id: str) -> None:
+    def __init__(self, date: str, bot_id: str, bot_timezone: str = "UTC") -> None:
         self.date = date
         self.bot_id = bot_id
+        self.bot_timezone = bot_timezone
 
     def build_summary(self, trades: list[TradeEvent]) -> BotDailySummary:
         """Aggregate trade list into daily summary stats."""
@@ -176,13 +177,13 @@ class DailyMetricsBuilder:
     def hourly_performance(self, trades: list[TradeEvent]) -> dict:
         """Compute time-of-day performance buckets via HourlyAnalyzer."""
         from skills.hourly_analyzer import HourlyAnalyzer
-        analyzer = HourlyAnalyzer(bot_id=self.bot_id, date=self.date)
+        analyzer = HourlyAnalyzer(bot_id=self.bot_id, date=self.date, bot_timezone=self.bot_timezone)
         return analyzer.compute(trades).model_dump(mode="json")
 
     def slippage_stats(self, trades: list[TradeEvent]) -> dict:
         """Compute per-symbol, per-hour slippage distributions via SlippageAnalyzer."""
         from skills.slippage_analyzer import SlippageAnalyzer
-        analyzer = SlippageAnalyzer(bot_id=self.bot_id, date=self.date)
+        analyzer = SlippageAnalyzer(bot_id=self.bot_id, date=self.date, bot_timezone=self.bot_timezone)
         return analyzer.compute(trades).model_dump(mode="json")
 
     def factor_attribution(self, trades: list[TradeEvent]) -> FactorAttribution:

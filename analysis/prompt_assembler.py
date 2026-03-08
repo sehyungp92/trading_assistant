@@ -143,17 +143,19 @@ class DailyPromptAssembler:
         curated_dir: Path,
         memory_dir: Path,
         corrections_lookback_days: int = 30,
+        bot_configs: dict | None = None,
     ) -> None:
         self.date = date
         self.bots = bots
         self.curated_dir = curated_dir
         self.memory_dir = memory_dir
         self.corrections_lookback_days = corrections_lookback_days
+        self.bot_configs = bot_configs
         self._ctx = ContextBuilder(memory_dir)
 
     def assemble(self) -> PromptPackage:
         """Build the complete prompt package."""
-        pkg = self._ctx.base_package()
+        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_structured_data())
         pkg.instructions = _INSTRUCTIONS

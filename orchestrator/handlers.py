@@ -56,6 +56,7 @@ class Handlers:
         threshold_learner: object | None = None,
         experiment_manager: object | None = None,
         experiment_config_gen: object | None = None,
+        bot_configs: dict | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -77,10 +78,13 @@ class Handlers:
         self._threshold_learner = threshold_learner
         self._experiment_manager = experiment_manager
         self._experiment_config_gen = experiment_config_gen
+        self._bot_configs = bot_configs
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
-        date = (action.details or {}).get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        details = action.details or {}
+        date = details.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        bots = details.get("bots", self._bots)
         run_id = f"daily-{date}"
         start_time = datetime.now(timezone.utc)
         self._record_run(run_id, "daily_analysis", "running", started_at=start_time.isoformat())
@@ -92,7 +96,7 @@ class Handlers:
 
             # Data availability pre-check via MemoryIndex
             index = MemoryConsolidator.load_index(self._runs_dir.parent)
-            for bot in self._bots:
+            for bot in bots:
                 avail = ContextBuilder.check_data_availability(index, bot, date)
                 if avail["has_curated"] is False:
                     logger.warning("No curated data for %s on %s — analysis may be incomplete", bot, date)
@@ -103,7 +107,7 @@ class Handlers:
             gate = QualityGate(
                 report_id=run_id,
                 date=date,
-                expected_bots=self._bots,
+                expected_bots=bots,
                 curated_dir=self._curated_dir,
             )
             checklist = gate.run()
@@ -143,7 +147,7 @@ class Handlers:
                 except (TypeError, ValueError):
                     completeness_str = str(completeness)
                 body = (
-                    f"Daily summary for {date}: {total_trades} trade(s) across {len(self._bots)} bot(s). "
+                    f"Daily summary for {date}: {total_trades} trade(s) across {len(bots)} bot(s). "
                     f"Insufficient data for full analysis (minimum {_MIN_TRADES_FOR_ANALYSIS} trades required). "
                     f"Data completeness: {completeness_str}."
                 )
@@ -178,9 +182,10 @@ class Handlers:
 
             assembler = DailyPromptAssembler(
                 date=date,
-                bots=self._bots,
+                bots=bots,
                 curated_dir=self._curated_dir,
                 memory_dir=self._memory_dir,
+                bot_configs=self._bot_configs,
             )
             package = assembler.assemble()
 
@@ -467,6 +472,7 @@ class Handlers:
                 curated_dir=self._curated_dir,
                 memory_dir=self._memory_dir,
                 runs_dir=self._runs_dir,
+                bot_configs=self._bot_configs,
             )
             package = assembler.assemble()
 

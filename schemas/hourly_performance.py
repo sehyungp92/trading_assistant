@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 
 class HourlyBucket(BaseModel):
-    """Performance stats for a single hour of the day (0-23 UTC)."""
+    """Performance stats for a single hour of the day (0-23 in bot's local tz)."""
 
     hour: int  # 0-23
     trade_count: int = 0
@@ -25,6 +25,7 @@ class HourlyPerformance(BaseModel):
 
     bot_id: str
     date: str
+    timezone: str = "UTC"
     buckets: list[HourlyBucket] = []
 
     @property

@@ -25,7 +25,9 @@ class TestOrchestratorApp:
         resp = await client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "ok"
+        assert data["status"] in ("ok", "degraded")
+        assert "scheduler" in data
+        assert "timestamp" in data
 
     async def test_ingest_event(self, client: AsyncClient):
         """Direct event ingest for testing without relay."""

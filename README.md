@@ -1,6 +1,6 @@
 # Trading Assistant
 
-An agent system that monitors multiple trading bots across VPSes, automatically triages errors, and continuously analyzes trading performance to propose parameter, structural, and portfolio-level improvements — closing the loop between observation and action over time.
+An agent system that monitors multiple trading bots across VPSes, automatically triages errors, and continuously analyses trading performance to propose parameter, structural, and portfolio-level improvements — closing the loop between observation and action over time.
 
 ## What It Does
 
@@ -12,7 +12,7 @@ An agent system that monitors multiple trading bots across VPSes, automatically 
 - Monitors bot heartbeats and alerts on gaps (>2h warning, >4h critical)
 - Runs morning and evening proactive scans for unusual losses (>2σ from 30-day mean) and repeated error patterns
 
-### Analyzes trading performance across multiple dimensions
+### Analyses trading performance across multiple dimensions
 
 Every day, raw event data is transformed into a curated analysis package per bot covering:
 
@@ -28,7 +28,7 @@ Every day, raw event data is transformed into a curated analysis package per bot
 
 Claude Code is invoked daily and weekly to interpret this data, producing reports delivered via Telegram, Discord, or email.
 
-### Optimizes parameters through walk-forward optimization
+### Optimises parameters through walk-forward optimisation
 
 The WFO pipeline runs grid search over configured parameter spaces with:
 
@@ -154,7 +154,7 @@ See `orchestrator/config.py` for all settings.
 |------|----------|--------------|
 | Daily Analysis | 22:30 UTC | Per-bot daily report with quality gate |
 | Weekly Summary | Sunday | Cross-bot review, strategy suggestions, structural proposals |
-| WFO | Weekly/monthly | Walk-forward parameter optimization |
+| WFO | Weekly/monthly | Walk-forward parameter optimisation |
 | Proactive Scanner | Morning + evening | Anomaly detection, heartbeat monitoring |
 | Outcome Measurement | Sunday 10:00 UTC | Measures implemented suggestions against pre/post performance |
 | Memory Consolidation | Sunday 09:00 UTC | Aggregates findings, generates hypothesis candidates |

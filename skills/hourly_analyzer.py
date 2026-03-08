@@ -12,14 +12,18 @@ from schemas.hourly_performance import HourlyBucket, HourlyPerformance
 
 
 class HourlyAnalyzer:
-    def __init__(self, bot_id: str, date: str) -> None:
+    def __init__(self, bot_id: str, date: str, bot_timezone: str = "UTC") -> None:
         self._bot_id = bot_id
         self._date = date
+        self._bot_timezone = bot_timezone
 
     def compute(self, trades: list[TradeEvent]) -> HourlyPerformance:
+        from orchestrator.tz_utils import to_local_hour
+
         by_hour: dict[int, list[TradeEvent]] = defaultdict(list)
         for t in trades:
-            by_hour[t.entry_time.hour].append(t)
+            hour = to_local_hour(t.entry_time, self._bot_timezone)
+            by_hour[hour].append(t)
 
         buckets: list[HourlyBucket] = []
         for hour in sorted(by_hour):
@@ -41,4 +45,5 @@ class HourlyAnalyzer:
             bot_id=self._bot_id,
             date=self._date,
             buckets=buckets,
+            timezone=self._bot_timezone,
         )

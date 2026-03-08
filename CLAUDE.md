@@ -40,6 +40,30 @@ Copy `.env.example` to `.env` and set your credentials.
 Bot IDs: comma-separated in `BOT_IDS` env var.
 See `orchestrator/config.py` for all settings.
 
+### Per-Bot Timezones
+
+Set `BOT_TIMEZONES` to map bots to IANA timezones:
+```
+BOT_TIMEZONES=k_stock_trader:Asia/Seoul,us_bot:US/Eastern
+```
+Unlisted bots default to UTC. This controls:
+- Daily analysis trigger time (market close + delay per bot group)
+- Hourly performance bucketing (local hours, not UTC)
+- Slippage hour bucketing
+- Morning/evening scan date boundaries
+
+Key files: `schemas/bot_config.py`, `orchestrator/tz_utils.py`, `orchestrator/catchup.py`.
+
+### Auto-Start (Windows)
+
+```powershell
+# Register Task Scheduler task for auto-start on login
+powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1
+```
+
+Missed scheduled jobs (laptop off) are caught up on startup via `orchestrator/catchup.py`.
+APScheduler `misfire_grace_time` also allows late-firing (12h for daily, 48h for weekly/WFO).
+
 ## Event Flow
 
 ```

@@ -158,6 +158,7 @@ class WeeklyPromptAssembler:
         curated_dir: Path,
         memory_dir: Path,
         runs_dir: Path,
+        bot_configs: dict | None = None,
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -165,11 +166,12 @@ class WeeklyPromptAssembler:
         self.curated_dir = curated_dir
         self.memory_dir = memory_dir
         self.runs_dir = runs_dir
+        self.bot_configs = bot_configs
         self._ctx = ContextBuilder(memory_dir)
 
     def assemble(self) -> PromptPackage:
         """Build the complete weekly prompt package."""
-        pkg = self._ctx.base_package()
+        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_data())
         pkg.instructions = _WEEKLY_INSTRUCTIONS

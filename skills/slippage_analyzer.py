@@ -13,11 +13,14 @@ from schemas.slippage_analysis import SlippageBucket, SlippageDistribution
 
 
 class SlippageAnalyzer:
-    def __init__(self, bot_id: str, date: str) -> None:
+    def __init__(self, bot_id: str, date: str, bot_timezone: str = "UTC") -> None:
         self._bot_id = bot_id
         self._date = date
+        self._bot_timezone = bot_timezone
 
     def compute(self, trades: list[TradeEvent]) -> SlippageDistribution:
+        from orchestrator.tz_utils import to_local_hour
+
         by_symbol: dict[str, list[float]] = defaultdict(list)
         by_hour: dict[str, list[float]] = defaultdict(list)
 
@@ -26,7 +29,8 @@ class SlippageAnalyzer:
             if bps <= 0:
                 continue
             by_symbol[t.pair].append(bps)
-            hour_key = f"{t.entry_time.hour:02d}"
+            local_hour = to_local_hour(t.entry_time, self._bot_timezone)
+            hour_key = f"{local_hour:02d}"
             by_hour[hour_key].append(bps)
 
         return SlippageDistribution(
