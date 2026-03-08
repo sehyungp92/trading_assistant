@@ -32,6 +32,9 @@ _CURATED_FILES = [
     "experiment_data.json",
     "signal_health.json",
     "fill_quality.json",
+    "filter_decisions.json",
+    "indicator_snapshots.json",
+    "orderbook_stats.json",
 ]
 
 _INSTRUCTIONS = """\
@@ -68,40 +71,52 @@ _INSTRUCTIONS = """\
    review entry vs exit slippage distributions. Flag adverse_selection_detected.
    Check per-symbol breakdown for outlier symbols. Quantify annualized slippage cost
    (avg_slippage_bps × estimated annual trade count × avg position size).
-11. Actionable items: max 3 specific, testable suggestions backed by factor attribution or exit efficiency data
+11. Filter decisions: when filter_decisions.json is present, review per-filter pass/block
+    rates and near-miss percentages. Filters with >30% near-miss rate are borderline —
+    consider whether threshold adjustment would improve outcomes. Cross-reference with
+    filter_analysis.json to validate that high-block-rate filters are net-positive.
+12. Indicator snapshots: when indicator_snapshots.json is present, review indicator value
+    distributions at signal evaluation points. Flag indicators with extreme clustering
+    (low variance) — they may not be contributing differentiation. Compare decision
+    distribution (enter/skip/exit) with win/loss outcomes for signal quality assessment.
+13. Order book microstructure: when orderbook_stats.json is present, review spread and
+    depth imbalance patterns. Flag entry-context spreads that exceed 2× the median
+    (potential adverse selection). Bid/ask imbalance >2.0 or <0.5 at entry suggests
+    positioning against order flow — note these for risk assessment.
+14. Actionable items: max 3 specific, testable suggestions backed by factor attribution or exit efficiency data
    QUANTIFICATION REQUIRED: Every suggestion MUST include:
    (a) Expected return impact with a range (e.g., "+0.3% to +0.8% daily PnL")
    (b) Drawdown impact estimate (e.g., "max drawdown reduction of ~15%")
    (c) Evidence base: trade count, time period, and statistical significance
    Suggestions without quantification will be rejected.
-12. Open risks: any CRITICAL/HIGH events that need human attention
-13. Output: daily_report.md + report_checklist.json
-14. Check the rejected_suggestions list (if present). Do NOT re-suggest anything that was previously rejected unless you have new evidence.
-15. Contradiction check: If 'contradictions' data is present, review each flagged item.
+15. Open risks: any CRITICAL/HIGH events that need human attention
+16. Output: daily_report.md + report_checklist.json
+17. Check the rejected_suggestions list (if present). Do NOT re-suggest anything that was previously rejected unless you have new evidence.
+18. Contradiction check: If 'contradictions' data is present, review each flagged item.
     Assess whether each contradiction indicates a genuine issue or an acceptable regime
     transition. Address each contradiction explicitly — do not ignore them silently.
-16. Signal factor trends: If 'signal_factor_trends' data is present, review each factor's
+19. Signal factor trends: If 'signal_factor_trends' data is present, review each factor's
     rolling 30d metrics. Factors with 'degrading' trend or 'below_threshold: true' should
     be explicitly called out as candidates for recalibration. Compare against today's
     factor_attribution data.
-17. Correction patterns: If 'correction_patterns' data is present, review recurring human
+20. Correction patterns: If 'correction_patterns' data is present, review recurring human
     corrections. Avoid repeating these mistakes — adapt your analysis to address known blind spots.
-18. Reference outcome_measurements (if present) when making suggestions. Only make
+21. Reference outcome_measurements (if present) when making suggestions. Only make
     high-confidence suggestions for approaches with proven POSITIVE track records.
-19. Review active_suggestions (if present). Don't contradict IMPLEMENTED suggestions.
+22. Review active_suggestions (if present). Don't contradict IMPLEMENTED suggestions.
     For PROPOSED suggestions, note any supporting or contradicting evidence from today.
-20. Review category_scorecard (if present). Categories with win_rate < 30% and sample_size >= 5
+23. Review category_scorecard (if present). Categories with win_rate < 30% and sample_size >= 5
     require exceptional new evidence to justify suggestions in that category.
-21. Review prediction_accuracy_by_metric (if present). For metrics where accuracy < 40%,
+24. Review prediction_accuracy_by_metric (if present). For metrics where accuracy < 40%,
     explicitly caveat predictions and lower confidence.
-22. Review failure_log (if present). Avoid analysis approaches that have previously failed.
-23. Review consolidated_patterns (if present). These are systemic patterns discovered across
+25. Review failure_log (if present). Avoid analysis approaches that have previously failed.
+26. Review consolidated_patterns (if present). These are systemic patterns discovered across
     findings — use them to ground your structural analysis.
-24. Review hypothesis_track_record (if present). Prioritize hypotheses with positive
+27. Review hypothesis_track_record (if present). Prioritize hypotheses with positive
     effectiveness. Do not propose retired hypotheses.
-25. Review validation_patterns (if present). These are recurring blocked suggestion categories —
+28. Review validation_patterns (if present). These are recurring blocked suggestion categories —
     avoid proposing suggestions in categories that are consistently blocked.
-26. STRUCTURED OUTPUT (REQUIRED): At the END of your analysis, emit a structured data block.
+29. STRUCTURED OUTPUT (REQUIRED): At the END of your analysis, emit a structured data block.
     This block is machine-parsed — do NOT omit it.
     <!-- STRUCTURED_OUTPUT
     {

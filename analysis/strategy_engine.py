@@ -801,6 +801,80 @@ class StrategyEngine:
             suggestions=suggestions,
         )
 
+    def detect_microstructure_issues(
+        self,
+        bot_id: str,
+        orderbook_stats: dict,
+        spread_threshold_bps: float = 5.0,
+        imbalance_threshold: float = 2.0,
+    ) -> list[StrategySuggestion]:
+        """Tier 2: Detect adverse microstructure conditions at entry/exit."""
+        effective_spread = self._get_threshold(
+            "microstructure", "spread_threshold_bps", bot_id, spread_threshold_bps,
+        )
+        effective_imbalance = self._get_threshold(
+            "microstructure", "imbalance_threshold", bot_id, imbalance_threshold,
+        )
+        suggestions: list[StrategySuggestion] = []
+
+        by_context = orderbook_stats.get("by_context", {})
+        entry_data = by_context.get("entry", {})
+        if not entry_data:
+            return []
+
+        entry_spread = entry_data.get("spread_stats", {}).get("mean", 0)
+        entry_imbalance = entry_data.get("imbalance_stats", {}).get("mean", 1.0)
+        entry_count = entry_data.get("count", 0)
+
+        if entry_count < 5:
+            return []
+
+        if entry_spread > effective_spread:
+            suggestions.append(StrategySuggestion(
+                tier=SuggestionTier.FILTER,
+                bot_id=bot_id,
+                title=f"Wide spreads at entry — {bot_id}",
+                description=(
+                    f"Average spread at entry is {entry_spread:.1f} bps "
+                    f"(threshold: {effective_spread:.1f} bps) across {entry_count} entries. "
+                    f"Consider adding a spread-width gate or preferring limit orders."
+                ),
+                evidence_days=7,
+                confidence=0.6,
+                detection_context=DetectionContext(
+                    detector_name="microstructure",
+                    bot_id=bot_id,
+                    threshold_name="spread_threshold_bps",
+                    threshold_value=effective_spread,
+                    observed_value=entry_spread,
+                ),
+            ))
+
+        if entry_imbalance > effective_imbalance or (entry_imbalance > 0 and entry_imbalance < 1.0 / effective_imbalance):
+            suggestions.append(StrategySuggestion(
+                tier=SuggestionTier.FILTER,
+                bot_id=bot_id,
+                title=f"Order book imbalance at entry — {bot_id}",
+                description=(
+                    f"Average bid/ask imbalance at entry is {entry_imbalance:.2f} "
+                    f"across {entry_count} entries. Values far from 1.0 suggest "
+                    f"positioning against order flow. Review trade direction vs "
+                    f"book pressure for adverse selection."
+                ),
+                evidence_days=7,
+                confidence=0.5,
+                requires_human_judgment=True,
+                detection_context=DetectionContext(
+                    detector_name="microstructure",
+                    bot_id=bot_id,
+                    threshold_name="imbalance_threshold",
+                    threshold_value=effective_imbalance,
+                    observed_value=entry_imbalance,
+                ),
+            ))
+
+        return suggestions
+
     def build_report(
         self,
         bot_summaries: dict[str, BotWeeklySummary],
@@ -814,6 +888,7 @@ class StrategyEngine:
         signal_health: dict[str, dict] | None = None,
         factor_rolling: dict[str, list[dict]] | None = None,
         filter_interactions: dict[str, list] | None = None,
+        orderbook_stats: dict[str, dict] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -885,6 +960,12 @@ class StrategyEngine:
             for bot_id, interactions in filter_interactions.items():
                 all_suggestions.extend(
                     self.detect_filter_interactions(bot_id, interactions)
+                )
+
+        if orderbook_stats:
+            for bot_id, ob_data in orderbook_stats.items():
+                all_suggestions.extend(
+                    self.detect_microstructure_issues(bot_id, ob_data)
                 )
 
         return RefinementReport(

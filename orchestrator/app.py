@@ -314,6 +314,22 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         )
         logger.info("Deployment monitoring enabled")
 
+    # Experiment manager (feature-flagged)
+    experiment_manager = None
+    experiment_config_gen = None
+    if config.ab_testing_enabled:
+        from skills.experiment_manager import ExperimentManager
+        from skills.experiment_config_generator import ExperimentConfigGenerator
+
+        experiment_manager = ExperimentManager(
+            findings_dir=db_path / "memory" / "findings",
+        )
+        _ecg_registry = config_registry if config.autonomous_enabled else None
+        experiment_config_gen = ExperimentConfigGenerator(
+            config_registry=_ecg_registry,
+        )
+        logger.info("A/B testing enabled")
+
     handlers = Handlers(
         agent_runner=agent_runner,
         event_stream=event_stream,
@@ -332,6 +348,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         autonomous_pipeline=autonomous_pipeline,
         deployment_monitor=deployment_monitor,
         threshold_learner=threshold_learner,
+        experiment_manager=experiment_manager,
+        experiment_config_gen=experiment_config_gen,
     )
 
     # Wire handler slots on worker
@@ -414,6 +432,34 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             telegram_adapter.set_callback_router(callback_router)
 
         logger.info("Telegram approval callbacks registered")
+
+    # Register experiment Telegram callbacks (independent of autonomous pipeline)
+    if experiment_manager is not None and telegram_adapter is not None:
+        if not (approval_handler is not None):
+            # callback_router not created above; create one now
+            from comms.telegram_handlers import TelegramCallbackRouter
+            callback_router = TelegramCallbackRouter()
+
+        async def _on_start_experiment(experiment_id: str) -> str:
+            try:
+                experiment_manager.activate_experiment(experiment_id)
+                exp = experiment_manager.get_by_id(experiment_id)
+                return f"\u25b6\ufe0f Experiment started: {exp.title if exp else experiment_id}"
+            except Exception as e:
+                return f"Failed to start experiment: {e}"
+
+        async def _on_cancel_experiment(experiment_id: str) -> str:
+            try:
+                experiment_manager.cancel_experiment(experiment_id)
+                return f"\u274c Experiment cancelled: {experiment_id}"
+            except Exception as e:
+                return f"Failed to cancel experiment: {e}"
+
+        callback_router.register("start_experiment_", _on_start_experiment)
+        callback_router.register("cancel_experiment_", _on_cancel_experiment)
+
+        telegram_adapter.set_callback_router(callback_router)
+        logger.info("Experiment Telegram callbacks registered")
 
     # Relay polling — only active when RELAY_URL is configured
     vps_receiver: VPSReceiver | None = None
@@ -615,6 +661,38 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.exception("Memory consolidation failed")
 
+    # Experiment check function (for scheduler)
+    async def _check_experiments() -> None:
+        """Check active experiments for auto-conclusion."""
+        if experiment_manager is None:
+            return
+        try:
+            active = experiment_manager.get_active()
+            for exp in active:
+                if experiment_manager.check_auto_conclusion(exp.experiment_id):
+                    result = experiment_manager.analyze_experiment(exp.experiment_id)
+                    experiment_manager.conclude_experiment(exp.experiment_id, result)
+                    logger.info(
+                        "Auto-concluded experiment %s: %s",
+                        exp.experiment_id, result.recommendation,
+                    )
+                    event_stream.broadcast("experiment_concluded", {
+                        "experiment_id": exp.experiment_id,
+                        "recommendation": result.recommendation,
+                        "winner": result.winner,
+                        "p_value": result.p_value,
+                    })
+                    if telegram_adapter is not None:
+                        try:
+                            from comms.telegram_renderer import TelegramRenderer
+                            renderer = TelegramRenderer()
+                            text = renderer.render_experiment_result(exp, result)
+                            await telegram_adapter.send_message(text)
+                        except Exception:
+                            logger.warning("Failed to send experiment result notification")
+        except Exception:
+            logger.exception("Experiment check failed")
+
     # AuditTrailConsumer — persists SSE events to JSONL
     audit_consumer = AuditTrailConsumer(log_dir=db_path / "logs")
 
@@ -655,6 +733,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         pr_review_check_fn=_check_pr_reviews if approval_tracker else None,
         deployment_check_fn=handlers._check_deployments if deployment_monitor else None,
         threshold_learning_fn=threshold_learner.learn_thresholds if threshold_learner else None,
+        experiment_check_fn=_check_experiments if experiment_manager else None,
     )
 
     @asynccontextmanager
@@ -737,6 +816,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     app.state.approval_handler = approval_handler
     app.state.deployment_monitor = deployment_monitor
     app.state.threshold_learner = threshold_learner
+    app.state.experiment_manager = experiment_manager
+    app.state.experiment_config_gen = experiment_config_gen
 
     @app.get("/health")
     async def health():

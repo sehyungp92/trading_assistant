@@ -205,6 +205,87 @@ class TelegramRenderer:
 
         return text, keyboard
 
+    def render_experiment_proposal(
+        self,
+        config,  # ExperimentConfig
+    ) -> tuple[str, list[list[dict]]]:
+        """Render an experiment proposal card with start/cancel buttons."""
+        lines: list[str] = []
+        lines.append("\U0001f9ea A/B Experiment Proposal")
+        lines.append(f"ID: {_escape_md2(config.experiment_id[:8])}")
+        lines.append(f"Bot: {_escape_md2(config.bot_id)}")
+        lines.append(f"Type: {config.experiment_type.value}")
+        lines.append("")
+        lines.append(f"Title: {_escape_md2(config.title)}")
+        if config.description:
+            lines.append(f"Description: {_escape_md2(config.description)}")
+        lines.append("")
+
+        lines.append("Variants:")
+        for v in config.variants:
+            params_str = ", ".join(f"{k}={v_val}" for k, v_val in v.params.items())
+            lines.append(f"  {_escape_md2(v.name)} ({v.allocation_pct:.0f}%): {_escape_md2(params_str)}")
+        lines.append("")
+
+        lines.append(f"Metric: {config.success_metric}")
+        lines.append(f"Duration: {config.max_duration_days}d")
+        lines.append(f"Min trades/variant: {config.min_trades_per_variant}")
+        lines.append(f"Significance: {config.significance_level}")
+
+        text = _truncate("\n".join(lines))
+
+        keyboard = [
+            [
+                {"text": "\u25b6\ufe0f Start", "callback_data": f"start_experiment_{config.experiment_id}"},
+                {"text": "\u274c Cancel", "callback_data": f"cancel_experiment_{config.experiment_id}"},
+            ],
+        ]
+
+        return text, keyboard
+
+    def render_experiment_result(
+        self,
+        config,   # ExperimentConfig
+        result,   # ExperimentResult
+    ) -> str:
+        """Render experiment conclusion summary."""
+        lines: list[str] = []
+
+        icon = {
+            "adopt_treatment": "\u2705",
+            "keep_control": "\U0001f6d1",
+            "inconclusive": "\u2753",
+            "extend": "\u23f3",
+        }.get(result.recommendation, "\u2753")
+
+        lines.append(f"\U0001f9ea Experiment Concluded: {_escape_md2(config.title)}")
+        lines.append(f"Bot: {_escape_md2(config.bot_id)}")
+        lines.append(f"Result: {icon} {result.recommendation.replace('_', ' ').upper()}")
+        lines.append("")
+
+        lines.append("Variant Results:")
+        for vm in result.variant_metrics:
+            lines.append(
+                f"  {_escape_md2(vm.variant_name)}: "
+                f"{vm.trade_count} trades, "
+                f"PnL ${vm.total_pnl:.0f}, "
+                f"WR {vm.win_rate:.0%}, "
+                f"Sharpe {vm.sharpe:.2f}"
+            )
+        lines.append("")
+
+        if result.p_value is not None:
+            lines.append(f"p\\-value: {result.p_value:.4f}")
+        if result.effect_size is not None:
+            lines.append(f"Effect size \\(Cohen's d\\): {result.effect_size:.3f}")
+        if result.confidence_interval_95 is not None:
+            lo, hi = result.confidence_interval_95
+            lines.append(f"95% CI: \\[{lo:.4f}, {hi:.4f}\\]")
+        if result.winner:
+            lines.append(f"Winner: {_escape_md2(result.winner)}")
+
+        return _truncate("\n".join(lines))
+
     def _render_generic(self, payload: NotificationPayload) -> str:
         text = f"{payload.title}\n\n{payload.body}"
         return _truncate(text)

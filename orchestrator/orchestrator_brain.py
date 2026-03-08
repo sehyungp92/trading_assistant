@@ -192,6 +192,15 @@ class OrchestratorBrain:
     def _handle_exit_movement(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
+    def _handle_indicator_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_orderbook_context(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
+    def _handle_filter_decision(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+
     def _handle_parameter_change(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         """Route parameter changes — safety-critical params get immediate alert."""
         payload = json.loads(event.get("payload", "{}")) if isinstance(event.get("payload"), str) else event.get("payload", {})
@@ -247,4 +256,7 @@ class OrchestratorBrain:
         "exit_movement": _handle_exit_movement,
         "user_feedback": _handle_user_feedback,
         "parameter_change": _handle_parameter_change,
+        "indicator_snapshot": _handle_indicator_snapshot,
+        "orderbook_context": _handle_orderbook_context,
+        "filter_decision": _handle_filter_decision,
     }

@@ -52,6 +52,8 @@ class Handlers:
         autonomous_pipeline: object | None = None,
         deployment_monitor: object | None = None,
         threshold_learner: object | None = None,
+        experiment_manager: object | None = None,
+        experiment_config_gen: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -71,6 +73,8 @@ class Handlers:
         self._autonomous_pipeline = autonomous_pipeline
         self._deployment_monitor = deployment_monitor
         self._threshold_learner = threshold_learner
+        self._experiment_manager = experiment_manager
+        self._experiment_config_gen = experiment_config_gen
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -403,6 +407,46 @@ class Handlers:
 
             # Run autonomous pipeline on recorded suggestions
             await self._run_autonomous_pipeline(suggestion_ids, run_id)
+
+            # Ingest experiment variant data from curated experiment_data.json files
+            experiment_results = []
+            if self._experiment_manager is not None:
+                from datetime import timedelta as _td_exp
+                start_exp = datetime.strptime(week_start, "%Y-%m-%d")
+                dates_in_week_exp = [(start_exp + _td_exp(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+                for bot in self._bots:
+                    for date_str in dates_in_week_exp:
+                        exp_path = self._curated_dir / date_str / bot / "experiment_data.json"
+                        if not exp_path.exists():
+                            continue
+                        try:
+                            exp_data = json.loads(exp_path.read_text())
+                            for exp_id, variants in exp_data.items():
+                                for variant_name, variant_data in variants.items():
+                                    trades = variant_data.get("trades", [])
+                                    if trades:
+                                        self._experiment_manager.ingest_variant_data(
+                                            exp_id, variant_name, trades,
+                                        )
+                        except Exception:
+                            logger.warning(
+                                "Failed to ingest experiment data from %s", exp_path,
+                            )
+
+                # Check auto-conclusion and analyze
+                active_experiments = self._experiment_manager.get_active()
+                for exp in active_experiments:
+                    try:
+                        if self._experiment_manager.check_auto_conclusion(exp.experiment_id):
+                            result = self._experiment_manager.analyze_experiment(exp.experiment_id)
+                            self._experiment_manager.conclude_experiment(exp.experiment_id, result)
+                            experiment_results.append(result)
+                            self._event_stream.broadcast("experiment_concluded", {
+                                "experiment_id": exp.experiment_id,
+                                "recommendation": result.recommendation,
+                            })
+                    except Exception:
+                        logger.warning("Experiment check failed for %s", exp.experiment_id)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "simulations", "handler": "weekly_analysis",

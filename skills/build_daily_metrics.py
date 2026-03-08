@@ -460,6 +460,175 @@ class DailyMetricsBuilder:
             "events": coordination_events,
         }
 
+    def build_filter_decision_summary(self, filter_events: list[dict]) -> dict:
+        """Summarize per-filter pass/block decisions from FilterDecisionEvent data."""
+        from collections import defaultdict
+
+        per_filter: dict[str, dict] = defaultdict(lambda: {
+            "pass_count": 0,
+            "block_count": 0,
+            "margins": [],
+            "near_misses": 0,
+        })
+
+        for evt in filter_events:
+            payload = evt.get("payload", evt)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    continue
+
+            name = payload.get("filter_name", "unknown")
+            passed = payload.get("passed", True)
+            threshold = payload.get("threshold", 0)
+            actual = payload.get("actual_value", 0)
+
+            bucket = per_filter[name]
+            if passed:
+                bucket["pass_count"] += 1
+            else:
+                bucket["block_count"] += 1
+
+            margin_pct = 0.0
+            if threshold != 0:
+                margin_pct = ((actual - threshold) / abs(threshold)) * 100
+            bucket["margins"].append(margin_pct)
+
+            if abs(margin_pct) < 10:
+                bucket["near_misses"] += 1
+
+        summary = {}
+        for name, data in per_filter.items():
+            margins = data["margins"]
+            total = data["pass_count"] + data["block_count"]
+            summary[name] = {
+                "pass_count": data["pass_count"],
+                "block_count": data["block_count"],
+                "total": total,
+                "block_rate": data["block_count"] / total if total > 0 else 0,
+                "avg_margin_pct": sum(margins) / len(margins) if margins else 0,
+                "near_miss_count": data["near_misses"],
+                "near_miss_rate": data["near_misses"] / len(margins) if margins else 0,
+            }
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "filters": summary,
+            "total_evaluations": sum(d["pass_count"] + d["block_count"] for d in per_filter.values()),
+        }
+
+    def build_indicator_snapshot_summary(self, indicator_events: list[dict]) -> dict:
+        """Summarize indicator values at signal evaluation points."""
+        from collections import defaultdict
+
+        indicator_values: dict[str, list[float]] = defaultdict(list)
+        decision_counts: dict[str, int] = defaultdict(int)
+        signal_strengths: list[float] = []
+
+        for evt in indicator_events:
+            payload = evt.get("payload", evt)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    continue
+
+            indicators = payload.get("indicators", {})
+            for name, value in indicators.items():
+                if isinstance(value, (int, float)):
+                    indicator_values[name].append(value)
+
+            decision = payload.get("decision", "skip")
+            decision_counts[decision] += 1
+
+            strength = payload.get("signal_strength", 0)
+            if isinstance(strength, (int, float)):
+                signal_strengths.append(strength)
+
+        indicator_stats = {}
+        for name, values in indicator_values.items():
+            sorted_vals = sorted(values)
+            n = len(sorted_vals)
+            indicator_stats[name] = {
+                "count": n,
+                "mean": sum(values) / n if n else 0,
+                "min": sorted_vals[0] if n else 0,
+                "max": sorted_vals[-1] if n else 0,
+                "median": sorted_vals[n // 2] if n else 0,
+            }
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "indicator_stats": indicator_stats,
+            "decision_counts": dict(decision_counts),
+            "total_snapshots": sum(decision_counts.values()),
+            "avg_signal_strength": sum(signal_strengths) / len(signal_strengths) if signal_strengths else 0,
+        }
+
+    def build_orderbook_summary(self, orderbook_events: list[dict]) -> dict:
+        """Summarize order book state at trading decision points."""
+        from collections import defaultdict
+
+        spreads: list[float] = []
+        imbalances: list[float] = []
+        by_context: dict[str, dict] = defaultdict(lambda: {
+            "count": 0, "spreads": [], "imbalances": [],
+        })
+
+        for evt in orderbook_events:
+            payload = evt.get("payload", evt)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    continue
+
+            spread = payload.get("spread_bps", 0)
+            spreads.append(spread)
+
+            bid_depth = payload.get("bid_depth_10bps", 0)
+            ask_depth = payload.get("ask_depth_10bps", 0)
+            imbalance = bid_depth / ask_depth if ask_depth > 0 else 0
+            imbalances.append(imbalance)
+
+            context = payload.get("trade_context", "signal")
+            by_context[context]["count"] += 1
+            by_context[context]["spreads"].append(spread)
+            by_context[context]["imbalances"].append(imbalance)
+
+        def _stats(values: list[float]) -> dict:
+            if not values:
+                return {"count": 0, "mean": 0, "min": 0, "max": 0, "median": 0}
+            s = sorted(values)
+            n = len(s)
+            return {
+                "count": n,
+                "mean": sum(s) / n,
+                "min": s[0],
+                "max": s[-1],
+                "median": s[n // 2],
+            }
+
+        context_summary = {}
+        for ctx, data in by_context.items():
+            context_summary[ctx] = {
+                "count": data["count"],
+                "spread_stats": _stats(data["spreads"]),
+                "imbalance_stats": _stats(data["imbalances"]),
+            }
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "spread_stats": _stats(spreads),
+            "imbalance_stats": _stats(imbalances),
+            "by_context": context_summary,
+            "total_snapshots": len(spreads),
+        }
+
     def write_curated(
         self,
         trades: list[TradeEvent],
@@ -468,6 +637,9 @@ class DailyMetricsBuilder:
         coordination_events: list[dict] | None = None,
         daily_snapshot: dict | None = None,
         findings_dir: Path | None = None,
+        filter_decision_events: list[dict] | None = None,
+        indicator_snapshot_events: list[dict] | None = None,
+        orderbook_context_events: list[dict] | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
@@ -570,6 +742,25 @@ class DailyMetricsBuilder:
             analyzer = FillQualityAnalyzer(bot_id=self.bot_id, date=self.date)
             report = analyzer.compute(trades)
             self._write_json(output_dir / "fill_quality.json", report.model_dump(mode="json"))
+
+        # 2B: Write enriched event summaries if events provided
+        if filter_decision_events:
+            self._write_json(
+                output_dir / "filter_decisions.json",
+                self.build_filter_decision_summary(filter_decision_events),
+            )
+
+        if indicator_snapshot_events:
+            self._write_json(
+                output_dir / "indicator_snapshots.json",
+                self.build_indicator_snapshot_summary(indicator_snapshot_events),
+            )
+
+        if orderbook_context_events:
+            self._write_json(
+                output_dir / "orderbook_stats.json",
+                self.build_orderbook_summary(orderbook_context_events),
+            )
 
         return output_dir
 

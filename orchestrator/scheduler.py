@@ -47,6 +47,7 @@ class SchedulerConfig:
     threshold_learning_day_of_week: str = "sun"
     threshold_learning_hour: int = 9
     threshold_learning_minute: int = 30
+    experiment_check_interval_seconds: int = 21600  # 6 hours
 
 
 def create_scheduler_jobs(
@@ -68,6 +69,7 @@ def create_scheduler_jobs(
     pr_review_check_fn: Callable[[], Awaitable[None]] | None = None,
     deployment_check_fn: Callable[[], Awaitable[None]] | None = None,
     threshold_learning_fn: Callable[[], Awaitable[None]] | None = None,
+    experiment_check_fn: Callable[[], Awaitable[None]] | None = None,
 ) -> list[dict]:
     """Build job definitions for APScheduler. Returns dicts, not APScheduler objects,
     so the caller can register them with their scheduler instance."""
@@ -218,6 +220,14 @@ def create_scheduler_jobs(
             "day_of_week": config.threshold_learning_day_of_week,
             "hour": config.threshold_learning_hour,
             "minute": config.threshold_learning_minute,
+        })
+
+    if experiment_check_fn is not None:
+        jobs.append({
+            "name": "experiment_check",
+            "func": experiment_check_fn,
+            "trigger": "interval",
+            "seconds": config.experiment_check_interval_seconds,
         })
 
     return jobs
