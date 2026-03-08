@@ -6,6 +6,7 @@ for statistical significance testing.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ class ExperimentManager:
         self._results_path = findings_dir / "experiment_results.jsonl"
         self._variant_data_dir = findings_dir / "experiment_data"
         self._min_trades = min_trades
+        self._lock = asyncio.Lock()
 
     def create_experiment(self, config: ExperimentConfig) -> ExperimentConfig:
         """Persist a new experiment. Deduplicates by experiment_id."""
@@ -69,6 +71,35 @@ class ExperimentManager:
             for trade in trades:
                 f.write(json.dumps(trade) + "\n")
 
+    def _extract_metric_values(
+        self, experiment_id: str, variant_name: str, metric: str,
+    ) -> list[float]:
+        """Extract metric values for a variant based on the success_metric.
+
+        Falls back to PnL if the requested metric isn't available in the data.
+        """
+        data_path = self._variant_data_dir / experiment_id / f"{variant_name}.jsonl"
+        if not data_path.exists():
+            return []
+
+        values = []
+        for line in data_path.read_text().strip().splitlines():
+            try:
+                data = json.loads(line)
+                if metric == "pnl":
+                    values.append(float(data.get("pnl", 0.0)))
+                elif metric == "sharpe":
+                    values.append(float(data.get("sharpe", data.get("pnl", 0.0))))
+                elif metric == "win_rate":
+                    values.append(float(data.get("win", 1.0 if data.get("pnl", 0) > 0 else 0.0)))
+                elif metric == "profit_factor":
+                    values.append(float(data.get("pnl", 0.0)))
+                else:
+                    values.append(float(data.get("pnl", 0.0)))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return values
+
     def analyze_experiment(self, experiment_id: str) -> ExperimentResult:
         """Compute variant metrics and run statistical test."""
         experiment = self.get_by_id(experiment_id)
@@ -77,10 +108,16 @@ class ExperimentManager:
 
         variant_metrics = []
         variant_pnls: dict[str, list[float]] = {}
+        variant_metric_values: dict[str, list[float]] = {}
 
         for variant in experiment.variants:
             pnls = self._load_variant_pnls(experiment_id, variant.name)
             variant_pnls[variant.name] = pnls
+            # Extract success_metric values for statistical test
+            metric_vals = self._extract_metric_values(
+                experiment_id, variant.name, experiment.success_metric,
+            )
+            variant_metric_values[variant.name] = metric_vals if metric_vals else pnls
 
             wins = [p for p in pnls if p > 0]
             losses = [p for p in pnls if p <= 0]
@@ -95,10 +132,10 @@ class ExperimentManager:
                 if std > 0:
                     sharpe = (statistics.mean(pnls) / std) * math.sqrt(252)
 
-            # Profit factor
+            # Profit factor — 10.0 sentinel for all-win (no losses)
             gross_wins = sum(wins) if wins else 0.0
             gross_losses = abs(sum(losses)) if losses else 0.0
-            profit_factor = gross_wins / gross_losses if gross_losses > 0 else 0.0
+            profit_factor = gross_wins / gross_losses if gross_losses > 0 else (10.0 if wins else 0.0)
 
             # Max drawdown
             max_dd = 0.0
@@ -134,19 +171,22 @@ class ExperimentManager:
 
         variant_names = [v.name for v in experiment.variants]
         if len(variant_names) >= 2:
-            control_pnls = variant_pnls.get(variant_names[0], [])
-            treatment_pnls = variant_pnls.get(variant_names[1], [])
+            control_vals = variant_metric_values.get(variant_names[0], [])
+            treatment_vals = variant_metric_values.get(variant_names[1], [])
 
-            if (
-                len(control_pnls) >= self._min_trades
-                and len(treatment_pnls) >= self._min_trades
+            # Empty data → recommend extending
+            if not control_vals or not treatment_vals:
+                recommendation = "extend"
+            elif (
+                len(control_vals) >= self._min_trades
+                and len(treatment_vals) >= self._min_trades
             ):
-                p_value, ci_95 = self._welch_t_test(control_pnls, treatment_pnls)
-                effect_size = self._cohens_d(control_pnls, treatment_pnls)
+                p_value, ci_95 = self._welch_t_test(control_vals, treatment_vals)
+                effect_size = self._cohens_d(control_vals, treatment_vals)
 
                 if p_value is not None and p_value < experiment.significance_level:
-                    control_mean = statistics.mean(control_pnls)
-                    treatment_mean = statistics.mean(treatment_pnls)
+                    control_mean = statistics.mean(control_vals)
+                    treatment_mean = statistics.mean(treatment_vals)
                     if treatment_mean > control_mean:
                         winner = variant_names[1]
                         recommendation = "adopt_treatment"
@@ -200,10 +240,13 @@ class ExperimentManager:
         experiment_id: str,
         result: ExperimentResult,
     ) -> None:
-        """Mark experiment CONCLUDED with result."""
+        """Mark experiment CONCLUDED with result. Idempotent if already concluded."""
         experiments = self._load_all()
         for exp in experiments:
             if exp.experiment_id == experiment_id:
+                if exp.status == ExperimentStatus.CONCLUDED:
+                    logger.info("Experiment %s already concluded — skipping", experiment_id)
+                    return
                 exp.status = ExperimentStatus.CONCLUDED
                 exp.concluded_at = datetime.now(timezone.utc)
                 self._save_all(experiments)
@@ -269,9 +312,11 @@ class ExperimentManager:
         var_b = statistics.variance(group_b)
 
         # Pooled standard error
-        se = math.sqrt(var_a / n_a + var_b / n_b)
-        if se == 0:
-            return None, None
+        se_sq = var_a / n_a + var_b / n_b
+        if se_sq == 0:
+            # Both groups have zero variance — identical values, no meaningful test
+            return 1.0, None
+        se = math.sqrt(se_sq)
 
         t_stat = (mean_b - mean_a) / se
 

@@ -6,6 +6,7 @@ Same persistence pattern as SuggestionTracker.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone, timedelta
@@ -21,6 +22,7 @@ class ApprovalTracker:
 
     def __init__(self, storage_path: Path) -> None:
         self._path = Path(storage_path)
+        self._lock = asyncio.Lock()
 
     def create_request(self, request: ApprovalRequest) -> ApprovalRequest:
         """Persist a new approval request. Deduplicates by request_id."""

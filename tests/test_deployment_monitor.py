@@ -92,7 +92,7 @@ class TestDeploymentMonitor:
         curated.mkdir()
 
         mock_pr_builder = MagicMock()
-        mock_pr_builder._run_cmd = AsyncMock(
+        mock_pr_builder.run_gh_command = AsyncMock(
             return_value=(0, json.dumps({"state": "MERGED", "mergedAt": "2026-03-07T12:00:00Z"}), "")
         )
 
@@ -121,7 +121,7 @@ class TestDeploymentMonitor:
         curated.mkdir()
 
         mock_pr_builder = MagicMock()
-        mock_pr_builder._run_cmd = AsyncMock(
+        mock_pr_builder.run_gh_command = AsyncMock(
             return_value=(0, json.dumps({"state": "OPEN"}), "")
         )
 
@@ -287,7 +287,8 @@ class TestDeploymentMonitor:
         record.status = DeploymentStatus.REGRESSION_DETECTED
         mon._update_record(record)
 
-        result = await mon.create_rollback_pr("dep1abcd")
+        with patch.object(mon, "_get_repo_dir", return_value=tmp_path):
+            result = await mon.create_rollback_pr("dep1abcd")
         assert result is not None
         assert result.success is True
         assert result.pr_url == "https://github.com/user/repo/pull/99"
@@ -433,7 +434,7 @@ class TestCheckDeploymentsHandler:
 
     @pytest.mark.asyncio
     async def test_check_deployments_handles_merged(self, tmp_path: Path):
-        """MERGED state → collect pre-deploy metrics + mark_deployed."""
+        """MERGED state with heartbeat → collect pre-deploy metrics + mark_deployed."""
         findings = tmp_path / "findings"
         findings.mkdir()
         curated = tmp_path / "curated"
@@ -447,9 +448,10 @@ class TestCheckDeploymentsHandler:
             bot_id="bot1",
             param_changes=[],
         )
-        # Manually set to MERGED
+        # Manually set to MERGED with merge_time in the past
         record = monitor.get_by_id("dep1")
         record.status = DeploymentStatus.MERGED
+        record.merge_time = datetime.now(timezone.utc) - timedelta(minutes=5)
         monitor._update_record(record)
 
         # Set up curated data so collect_metrics_snapshot has something to read
@@ -460,7 +462,15 @@ class TestCheckDeploymentsHandler:
             "sharpe_ratio": 1.2, "max_drawdown_pct": 5.0,
         }))
 
+        # Set up heartbeat file with timestamp after merge
+        heartbeat_dir = tmp_path / "heartbeats"
+        heartbeat_dir.mkdir(parents=True)
+        (heartbeat_dir / "bot1.json").write_text(json.dumps({
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+        }))
+
         handlers = self._make_handlers(monitor)
+        handlers._heartbeat_dir = heartbeat_dir
         await handlers._check_deployments()
 
         updated = monitor.get_by_id("dep1")
@@ -555,7 +565,8 @@ class TestCheckDeploymentsHandler:
         dispatcher = MagicMock()
         dispatcher.dispatch = AsyncMock()
         handlers = self._make_handlers(monitor, dispatcher)
-        await handlers._check_deployments()
+        with patch.object(monitor, "_get_repo_dir", return_value=tmp_path):
+            await handlers._check_deployments()
 
         updated = monitor.get_by_id("dep1")
         assert updated.regression_detected is True
@@ -596,7 +607,7 @@ class TestCheckDeploymentsHandler:
         handlers = self._make_handlers(monitor)
         await handlers._check_deployments()
 
-        # Deployment should still be DEPLOYED (not regressed, not rolled back)
+        # Deployment should be MONITORING_COMPLETE (not regressed, not rolled back)
         updated = monitor.get_by_id("dep1")
-        assert updated.status == DeploymentStatus.DEPLOYED
+        assert updated.status == DeploymentStatus.MONITORING_COMPLETE
         assert updated.regression_detected is False

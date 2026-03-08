@@ -31,7 +31,7 @@ class SuggestionTracker:
         if suggestion.suggestion_id in existing_ids:
             return False
         self._store_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._suggestions_path, "a") as f:
+        with open(self._suggestions_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(suggestion.model_dump(mode="json"), default=str) + "\n")
         return True
 
@@ -43,7 +43,7 @@ class SuggestionTracker:
 
     def record_outcome(self, outcome: SuggestionOutcome) -> None:
         self._store_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._outcomes_path, "a") as f:
+        with open(self._outcomes_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(outcome.model_dump(mode="json"), default=str) + "\n")
 
     def load_all(self) -> list[dict]:
@@ -77,10 +77,19 @@ class SuggestionTracker:
     def _read_jsonl(path: Path) -> list[dict]:
         if not path.exists():
             return []
+        import logging
+        _logger = logging.getLogger(__name__)
         records: list[dict] = []
-        with open(path) as f:
-            for line in f:
+        with open(path, encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    _logger.warning(
+                        "Skipping malformed JSON at %s:%d", path.name, line_no,
+                    )
+                    continue
         return records

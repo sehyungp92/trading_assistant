@@ -59,9 +59,17 @@ class AutonomousPipeline:
         """
         results: list[ApprovalRequest] = []
 
+        # Batch-load all suggestions once (O(n) instead of O(n*m))
+        all_suggestions: dict[str, dict] = {}
+        if self._suggestion_tracker:
+            for s in self._suggestion_tracker.load_all():
+                sid_key = s.get("suggestion_id", "")
+                if sid_key:
+                    all_suggestions[sid_key] = s
+
         for sid in suggestion_ids:
             try:
-                result = await self._process_one(sid, run_id)
+                result = await self._process_one(sid, run_id, all_suggestions)
                 if result is not None:
                     results.append(result)
             except Exception:
@@ -76,11 +84,17 @@ class AutonomousPipeline:
         return results
 
     async def _process_one(
-        self, suggestion_id: str, run_id: str | None,
+        self,
+        suggestion_id: str,
+        run_id: str | None,
+        all_suggestions: dict[str, dict] | None = None,
     ) -> ApprovalRequest | None:
         """Process a single suggestion through the pipeline."""
-        # 1. Load suggestion record
-        suggestion = self._load_suggestion(suggestion_id)
+        # 1. Load suggestion record (use batch dict if available)
+        if all_suggestions is not None:
+            suggestion = all_suggestions.get(suggestion_id)
+        else:
+            suggestion = self._load_suggestion(suggestion_id)
         if suggestion is None:
             logger.debug("Suggestion %s not found in tracker", suggestion_id)
             return None

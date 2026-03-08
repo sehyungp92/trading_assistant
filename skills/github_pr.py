@@ -227,8 +227,16 @@ class PRBuilder:
         """Run a git command via asyncio subprocess."""
         return await self._run_cmd(["git"] + args, cwd)
 
-    async def _run_cmd(self, args: list[str], cwd: Path) -> tuple[int, str, str]:
-        """Run a command via asyncio subprocess."""
+    async def run_gh_command(
+        self, args: list[str], cwd: Path, timeout_seconds: int = 60,
+    ) -> tuple[int, str, str]:
+        """Public API for running gh/git commands with timeout."""
+        return await self._run_cmd(args, cwd, timeout_seconds=timeout_seconds)
+
+    async def _run_cmd(
+        self, args: list[str], cwd: Path, timeout_seconds: int = 60,
+    ) -> tuple[int, str, str]:
+        """Run a command via asyncio subprocess with timeout."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -236,7 +244,14 @@ class PRBuilder:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return 1, "", f"Command timed out after {timeout_seconds}s"
             return (
                 proc.returncode or 0,
                 stdout.decode("utf-8", errors="replace"),

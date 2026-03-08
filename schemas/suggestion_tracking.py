@@ -37,6 +37,7 @@ class SuggestionRecord(BaseModel):
     rejection_reason: str = ""
     confidence: float = 0.0
     hypothesis_id: Optional[str] = None
+    detection_context: Optional[dict] = None
 
 
 class SuggestionOutcome(BaseModel):

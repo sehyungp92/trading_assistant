@@ -6,7 +6,10 @@ It pulls pending events, asks the OrchestratorBrain what to do, and dispatches.
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Awaitable
 
 from orchestrator.conversation_tracker import ConversationTracker
@@ -26,12 +29,14 @@ class Worker:
         brain: OrchestratorBrain,
         event_stream: EventStream | None = None,
         conversation_tracker: ConversationTracker | None = None,
+        raw_data_dir: Path | None = None,
     ) -> None:
         self._queue = queue
         self._registry = registry
         self._brain = brain
         self._event_stream: EventStream | None = event_stream
         self._conversation_tracker: ConversationTracker | None = conversation_tracker
+        self._raw_data_dir: Path | None = raw_data_dir
 
         # Pluggable handlers — set these to hook into the action pipeline
         self.on_alert: Callable[[Action], Awaitable[None]] | None = None
@@ -98,12 +103,33 @@ class Worker:
 
         return processed
 
-    def _record_queued_event(self, bot_id: str, action_type: ActionType) -> None:
+    def _record_queued_event(self, bot_id: str, action_type: ActionType, event_type: str = "") -> None:
         """Track event counts for QUEUE_FOR_DAILY/WEEKLY actions."""
         if action_type == ActionType.QUEUE_FOR_DAILY:
             self.daily_queue_counts[bot_id] = self.daily_queue_counts.get(bot_id, 0) + 1
         elif action_type == ActionType.QUEUE_FOR_WEEKLY:
             self.weekly_queue_counts[bot_id] = self.weekly_queue_counts.get(bot_id, 0) + 1
+
+    def _persist_raw_event(self, action: Action) -> None:
+        """Persist event payload to raw JSONL file for later curated data building."""
+        if self._raw_data_dir is None:
+            return
+        details = action.details or {}
+        event_type = details.get("event_type", "")
+        if not event_type:
+            return
+
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        bot_dir = self._raw_data_dir / date / action.bot_id
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = bot_dir / f"{event_type}.jsonl"
+        try:
+            payload = details.get("payload", details)
+            line = json.dumps(payload, default=str) if not isinstance(payload, str) else payload
+            with out_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            logger.warning("Failed to persist raw event %s for %s", event_type, action.bot_id)
 
     def get_and_reset_daily_counts(self) -> dict[str, int]:
         """Get accumulated daily event counts and reset. Called by daily analysis trigger."""
@@ -169,6 +195,7 @@ class Worker:
 
         elif action.type == ActionType.QUEUE_FOR_DAILY:
             self._record_queued_event(action.bot_id, action.type)
+            self._persist_raw_event(action)
             logger.debug("Queued for daily: %s", action.event_id)
 
         elif action.type == ActionType.QUEUE_FOR_WEEKLY:

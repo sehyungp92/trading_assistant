@@ -6,6 +6,7 @@ monitor window (24h) -> regression check -> success or rollback PR.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,7 @@ class DeploymentMonitor:
         self._config_registry = config_registry
         self._event_stream = event_stream
         self._file_change_generator = file_change_generator
+        self._lock = asyncio.Lock()
 
     def create_deployment(
         self,
@@ -79,9 +81,9 @@ class DeploymentMonitor:
             return False
 
         try:
-            returncode, stdout, stderr = await self._pr_builder._run_cmd(
+            returncode, stdout, stderr = await self._pr_builder.run_gh_command(
                 ["gh", "pr", "view", record.pr_url, "--json", "state,mergedAt"],
-                cwd=Path("."),
+                cwd=Path("."), timeout_seconds=30,
             )
             if returncode != 0:
                 logger.warning("Failed to check PR status: %s", stderr)
@@ -120,12 +122,42 @@ class DeploymentMonitor:
         deployment_id: str,
         snapshot: DeploymentMetricsSnapshot,
     ) -> None:
-        """Record post-deployment metrics for regression comparison."""
+        """Accumulate post-deployment metric snapshots (max 48 = 24h at 30min)."""
         record = self.get_by_id(deployment_id)
         if record is None:
             return
-        record.post_deploy_metrics = snapshot
+        record.post_deploy_snapshots.append(snapshot)
+        if len(record.post_deploy_snapshots) > 48:
+            record.post_deploy_snapshots = record.post_deploy_snapshots[-48:]
         self._update_record(record)
+
+    def is_heartbeat_confirmed(
+        self, deployment_id: str, latest_heartbeat_time: datetime | None,
+    ) -> bool:
+        """Check if a heartbeat arrived after merge time, confirming deployment."""
+        record = self.get_by_id(deployment_id)
+        if record is None or record.merge_time is None:
+            return False
+        if latest_heartbeat_time is None:
+            return False
+        return latest_heartbeat_time > record.merge_time
+
+    def check_merged_timeout(self, deployment_id: str, timeout_hours: int = 6) -> bool:
+        """Check if MERGED state has timed out (no heartbeat confirmation).
+
+        Returns True if timed out -> transitions to STALE.
+        """
+        record = self.get_by_id(deployment_id)
+        if record is None or record.status != DeploymentStatus.MERGED:
+            return False
+        if record.merge_time is None:
+            return False
+        elapsed = datetime.now(timezone.utc) - record.merge_time
+        if elapsed > timedelta(hours=timeout_hours):
+            record.status = DeploymentStatus.STALE
+            self._update_record(record)
+            return True
+        return False
 
     def mark_deployed(self, deployment_id: str) -> None:
         """Mark as deployed when bot heartbeat confirms new version."""
@@ -140,18 +172,25 @@ class DeploymentMonitor:
         self._update_record(record)
 
     def check_regression(self, deployment_id: str) -> bool:
-        """Compare pre/post metrics, detect >2 sigma PnL decline.
+        """Compare pre-deploy vs worst post-deploy snapshot.
 
         Returns True if regression detected.
         """
         record = self.get_by_id(deployment_id)
         if record is None:
             return False
-        if record.pre_deploy_metrics is None or record.post_deploy_metrics is None:
+        if record.pre_deploy_metrics is None:
+            logger.warning(
+                "Cannot detect regression for %s — no baseline metrics",
+                deployment_id,
+            )
+            return False
+        if not record.post_deploy_snapshots:
             return False
 
         pre = record.pre_deploy_metrics
-        post = record.post_deploy_metrics
+        # Use worst snapshot: min avg_pnl, min win_rate, max drawdown
+        post = min(record.post_deploy_snapshots, key=lambda s: s.avg_pnl)
         regression_reasons: list[str] = []
 
         # PnL regression: post avg_pnl significantly below pre
@@ -192,23 +231,66 @@ class DeploymentMonitor:
         return False
 
     def check_monitoring_window_expired(self, deployment_id: str) -> bool:
-        """Check if monitoring window has expired without regression."""
+        """Check if monitoring window has expired without regression.
+
+        If expired, transitions to MONITORING_COMPLETE.
+        """
         record = self.get_by_id(deployment_id)
         if record is None or record.status != DeploymentStatus.DEPLOYED:
             return False
         if record.monitoring_end_time is None:
             return False
-        return datetime.now(timezone.utc) >= record.monitoring_end_time
+        if datetime.now(timezone.utc) >= record.monitoring_end_time:
+            record.status = DeploymentStatus.MONITORING_COMPLETE
+            self._update_record(record)
+            return True
+        return False
+
+    def check_stale_pending(self, deployment_id: str, max_days: int = 7) -> bool:
+        """Mark PENDING_MERGE as STALE if older than max_days.
+
+        Returns True if transitioned to STALE.
+        """
+        record = self.get_by_id(deployment_id)
+        if record is None or record.status != DeploymentStatus.PENDING_MERGE:
+            return False
+        elapsed = datetime.now(timezone.utc) - record.created_at
+        if elapsed > timedelta(days=max_days):
+            record.status = DeploymentStatus.STALE
+            self._update_record(record)
+            return True
+        return False
 
     async def create_rollback_pr(self, deployment_id: str) -> PRResult | None:
         """Create a PR that reverts the parameter change."""
         record = self.get_by_id(deployment_id)
-        if record is None or self._pr_builder is None:
+        if record is None:
             return None
+        if self._pr_builder is None:
+            logger.warning(
+                "Cannot create rollback PR for %s — pr_builder not available "
+                "(autonomous_enabled may be False)", deployment_id,
+            )
+            return PRResult(
+                success=False,
+                branch_name="",
+                error="pr_builder not available (autonomous_enabled=False)",
+            )
+
+        repo_dir = self._get_repo_dir(record.bot_id)
+        if repo_dir is None:
+            logger.warning(
+                "Cannot create rollback PR for %s — repo_dir not resolvable for %s",
+                deployment_id, record.bot_id,
+            )
+            return PRResult(
+                success=False,
+                branch_name="",
+                error=f"repo_dir not resolvable for {record.bot_id}",
+            )
 
         # Build reverse changes using FileChangeGenerator when available
         file_changes = []
-        repo_dir = self._get_repo_dir(record.bot_id)
         for change in record.param_changes:
             param_name = change.get("param_name", "unknown")
             old_value = change.get("old_value")
@@ -242,7 +324,7 @@ class DeploymentMonitor:
             approval_request_id=record.approval_request_id,
             suggestion_id=deployment_id,
             bot_id=record.bot_id,
-            repo_dir=str(self._get_repo_dir(record.bot_id)),
+            repo_dir=str(repo_dir),
             branch_name=f"ta/rollback-{deployment_id[:8]}",
             title=f"[trading-assistant] ROLLBACK: revert changes on {record.bot_id}",
             body=(
@@ -272,17 +354,14 @@ class DeploymentMonitor:
         return result
 
     def get_monitoring(self) -> list[DeploymentRecord]:
-        """Return deployments that need active monitoring."""
-        return [
-            d
-            for d in self._load_all()
-            if d.status
-            in (
-                DeploymentStatus.PENDING_MERGE,
-                DeploymentStatus.MERGED,
-                DeploymentStatus.DEPLOYED,
-            )
-        ]
+        """Return deployments that need active monitoring (excludes terminal states)."""
+        _TERMINAL = {
+            DeploymentStatus.MONITORING_COMPLETE,
+            DeploymentStatus.STALE,
+            DeploymentStatus.REGRESSION_DETECTED,
+            DeploymentStatus.ROLLED_BACK,
+        }
+        return [d for d in self._load_all() if d.status not in _TERMINAL]
 
     def get_by_id(self, deployment_id: str) -> DeploymentRecord | None:
         """Retrieve deployment by ID."""
@@ -321,13 +400,13 @@ class DeploymentMonitor:
                     continue
         return None
 
-    def _get_repo_dir(self, bot_id: str) -> Path:
-        """Get repo directory for a bot."""
+    def _get_repo_dir(self, bot_id: str) -> Path | None:
+        """Get repo directory for a bot. Returns None if not resolvable."""
         if self._config_registry:
             profile = self._config_registry.get_profile(bot_id)
             if profile:
                 return Path(profile.repo_dir)
-        return Path(".")
+        return None
 
     def _load_all(self) -> list[DeploymentRecord]:
         """Load all deployments from JSONL."""

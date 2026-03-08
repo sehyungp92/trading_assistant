@@ -24,6 +24,7 @@ class ThresholdLearner:
         self._min_samples = min_samples
         self._thresholds_path = findings_dir / "learned_thresholds.jsonl"
         self._profile: ThresholdProfile | None = None
+        self._cached_bot_id: str | None = None
 
     def learn_thresholds(self) -> dict[str, ThresholdProfile]:
         """Compute optimal thresholds from suggestions + outcomes.
@@ -32,6 +33,8 @@ class ThresholdLearner:
         """
         outcomes = self._load_detection_outcomes()
         if not outcomes:
+            self._profile = None
+            self._cached_bot_id = None
             return {}
 
         # Group by (detector_name, bot_id, threshold_name)
@@ -69,8 +72,10 @@ class ThresholdLearner:
             )
             profiles[bot_id].total_outcomes_used += len(observations)
 
-        # Persist
+        # Persist and invalidate cache
         self._save_profiles(profiles)
+        self._profile = None
+        self._cached_bot_id = None
         return profiles
 
     def get_threshold(
@@ -81,8 +86,9 @@ class ThresholdLearner:
         default: float,
     ) -> float:
         """Return learned threshold if available and confident, else default."""
-        if self._profile is None:
+        if self._profile is None or self._cached_bot_id != bot_id:
             self._profile = self._load_profile(bot_id)
+            self._cached_bot_id = bot_id
         if self._profile is None:
             return default
 
@@ -199,12 +205,10 @@ class ThresholdLearner:
         return defaults.get((detector_name, threshold_name), 0.0)
 
     def _save_profiles(self, profiles: dict[str, ThresholdProfile]) -> None:
-        """Persist learned thresholds to JSONL."""
-        self._thresholds_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = []
-        for profile in profiles.values():
-            lines.append(json.dumps(profile.model_dump(), default=str))
-        self._thresholds_path.write_text("\n".join(lines) + "\n" if lines else "")
+        """Persist learned thresholds to JSONL (atomic write)."""
+        from skills._atomic_write import atomic_rewrite_jsonl
+
+        atomic_rewrite_jsonl(self._thresholds_path, list(profiles.values()))
 
     def _load_profile(self, bot_id: str) -> ThresholdProfile | None:
         """Load learned threshold profile for a specific bot."""

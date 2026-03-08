@@ -18,6 +18,8 @@ class DeploymentStatus(str, Enum):
     DEPLOYED = "deployed"
     REGRESSION_DETECTED = "regression_detected"
     ROLLED_BACK = "rolled_back"
+    MONITORING_COMPLETE = "monitoring_complete"
+    STALE = "stale"
 
 
 class DeploymentMetricsSnapshot(BaseModel):
@@ -49,10 +51,15 @@ class DeploymentRecord(BaseModel):
     monitoring_window_hours: int = 24
     monitoring_end_time: Optional[datetime] = None
     pre_deploy_metrics: Optional[DeploymentMetricsSnapshot] = None
-    post_deploy_metrics: Optional[DeploymentMetricsSnapshot] = None
+    post_deploy_snapshots: list[DeploymentMetricsSnapshot] = []
     regression_detected: bool = False
     regression_details: str = ""
     rollback_pr_url: Optional[str] = None
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
+    @property
+    def post_deploy_metrics(self) -> DeploymentMetricsSnapshot | None:
+        """Backward-compat: return latest post-deploy snapshot."""
+        return self.post_deploy_snapshots[-1] if self.post_deploy_snapshots else None

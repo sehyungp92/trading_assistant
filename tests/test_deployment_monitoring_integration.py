@@ -36,9 +36,9 @@ def _make_monitor(tmp_path: Path, *, pr_builder=None, event_stream=None) -> Depl
 
 
 def _make_pr_builder_mock(*, merge_state: str = "OPEN") -> MagicMock:
-    """Return a mock PRBuilder whose _run_cmd returns the given merge state."""
+    """Return a mock PRBuilder whose run_gh_command returns the given merge state."""
     builder = MagicMock()
-    builder._run_cmd = AsyncMock(
+    builder.run_gh_command = AsyncMock(
         return_value=(
             0,
             json.dumps({"state": merge_state, "mergedAt": "2026-03-07T12:00:00Z"}),
@@ -189,7 +189,8 @@ class TestDeploymentMonitoringIntegration:
         assert "PnL" in record.regression_details
 
         # Create rollback PR
-        result = await monitor.create_rollback_pr("dep-002")
+        with patch.object(monitor, "_get_repo_dir", return_value=tmp_path):
+            result = await monitor.create_rollback_pr("dep-002")
         assert result is not None
         assert result.success is True
         assert result.pr_url == "https://github.com/user/bot/pull/99"
@@ -272,9 +273,9 @@ class TestDeploymentMonitoringIntegration:
         has_regression = monitor.check_regression("dep-004")
         assert has_regression is False
 
-        # Deployment still DEPLOYED (successful — no regression during window)
+        # Deployment is MONITORING_COMPLETE (successful — no regression during window)
         record = monitor.get_by_id("dep-004")
-        assert record.status == DeploymentStatus.DEPLOYED
+        assert record.status == DeploymentStatus.MONITORING_COMPLETE
 
     def test_feature_flag_controls_deployment_creation(self, tmp_path: Path):
         """Without DeploymentMonitor, no deployment records are created."""
@@ -372,7 +373,8 @@ class TestDeploymentMonitoringIntegration:
         assert monitor.check_regression("dep-b") is False
 
         # Only bot_a gets rollback PR
-        result_a = await monitor.create_rollback_pr("dep-a")
+        with patch.object(monitor, "_get_repo_dir", return_value=tmp_path):
+            result_a = await monitor.create_rollback_pr("dep-a")
         assert result_a is not None
         assert result_a.success is True
 

@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from analysis.context_builder import ContextBuilder
 from orchestrator.agent_runner import AgentRunner, AgentResult
 from orchestrator.event_stream import EventStream
@@ -167,6 +169,9 @@ class Handlers:
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "quality_gate", "handler": "daily_analysis",
             })
+
+            # Build enriched curated files from raw enriched events
+            self._build_enriched_curated(date)
 
             # Assemble prompt
             from analysis.prompt_assembler import DailyPromptAssembler
@@ -1255,6 +1260,10 @@ class Handlers:
 
             category_str = str(getattr(suggestion, "category", "") or "")
             confidence = float(getattr(suggestion, "confidence", 0.0) or 0.0)
+            det_ctx = getattr(suggestion, "detection_context", None)
+            det_ctx_dict = None
+            if isinstance(det_ctx, BaseModel):
+                det_ctx_dict = det_ctx.model_dump(mode="json")
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -1264,6 +1273,7 @@ class Handlers:
                 source_report_id=run_id,
                 description=description,
                 confidence=confidence,
+                detection_context=det_ctx_dict,
             )
 
             recorded = self._suggestion_tracker.record(record)
@@ -1725,6 +1735,70 @@ class Handlers:
                     logger.warning("Could not load daily summary for %s on %s", bot_id, date_str)
         return dailies
 
+    def _build_enriched_curated(self, date: str) -> None:
+        """Read enriched raw events and build curated enriched files for each bot."""
+        raw_dir = self._curated_dir.parent / "raw"
+        if not raw_dir.exists():
+            return
+
+        from skills.build_daily_metrics import DailyMetricsBuilder
+
+        for bot_id in self._bots:
+            bot_raw = raw_dir / date / bot_id
+            if not bot_raw.exists():
+                continue
+
+            enriched_types = {
+                "filter_decision": "filter_decision_events",
+                "indicator_snapshot": "indicator_snapshot_events",
+                "orderbook_context": "orderbook_context_events",
+            }
+
+            kwargs: dict = {}
+            for event_type, param_name in enriched_types.items():
+                raw_file = bot_raw / f"{event_type}.jsonl"
+                if raw_file.exists():
+                    events: list[dict] = []
+                    for line in raw_file.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line:
+                            try:
+                                events.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+                    if events:
+                        kwargs[param_name] = events
+
+            if kwargs:
+                try:
+                    builder = DailyMetricsBuilder(date=date, bot_id=bot_id)
+                    builder.write_curated(
+                        trades=[], missed=[], base_dir=self._curated_dir, **kwargs,
+                    )
+                    logger.info(
+                        "Built enriched curated files for %s/%s: %s",
+                        date, bot_id, list(kwargs.keys()),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to build enriched curated for %s/%s", date, bot_id,
+                        exc_info=True,
+                    )
+
+    def _get_latest_heartbeat_time(self, bot_id: str) -> datetime | None:
+        """Get the latest heartbeat timestamp for a bot from heartbeat files."""
+        hb_file = self._heartbeat_dir / f"{bot_id}.json"
+        if not hb_file.exists():
+            return None
+        try:
+            data = json.loads(hb_file.read_text(encoding="utf-8"))
+            ts = data.get("last_seen") or data.get("timestamp")
+            if ts:
+                return datetime.fromisoformat(ts)
+        except (json.JSONDecodeError, ValueError, OSError):
+            pass
+        return None
+
     def _count_daily_trades(self, date: str) -> int:
         """Count total trades across all bots for a given date."""
         count = 0
@@ -1800,17 +1874,40 @@ class Handlers:
             try:
                 if deployment.status == DeploymentStatus.PENDING_MERGE:
                     await self._deployment_monitor.check_merge_status(deployment.deployment_id)
+                    # Also check for stale pending
+                    self._deployment_monitor.check_stale_pending(deployment.deployment_id)
                 elif deployment.status == DeploymentStatus.MERGED:
-                    snapshot = self._deployment_monitor.collect_metrics_snapshot(deployment.bot_id)
-                    if snapshot:
-                        self._deployment_monitor.record_pre_deploy_metrics(
-                            deployment.deployment_id, snapshot,
+                    # Record pre-deploy metrics if not yet captured
+                    if deployment.pre_deploy_metrics is None:
+                        snapshot = self._deployment_monitor.collect_metrics_snapshot(deployment.bot_id)
+                        if snapshot:
+                            self._deployment_monitor.record_pre_deploy_metrics(
+                                deployment.deployment_id, snapshot,
+                            )
+                    # Require heartbeat confirmation before marking DEPLOYED
+                    latest_hb = self._get_latest_heartbeat_time(deployment.bot_id)
+                    if self._deployment_monitor.is_heartbeat_confirmed(
+                        deployment.deployment_id, latest_hb,
+                    ):
+                        self._deployment_monitor.mark_deployed(deployment.deployment_id)
+                        logger.info(
+                            "Deployment %s confirmed by heartbeat, monitoring started",
+                            deployment.deployment_id,
                         )
-                    self._deployment_monitor.mark_deployed(deployment.deployment_id)
-                    logger.info(
-                        "Deployment %s marked as DEPLOYED, monitoring started",
-                        deployment.deployment_id,
-                    )
+                    elif self._deployment_monitor.check_merged_timeout(deployment.deployment_id):
+                        logger.warning(
+                            "Deployment %s timed out waiting for heartbeat — STALE",
+                            deployment.deployment_id,
+                        )
+                        await self._notify(
+                            notification_type="alert",
+                            priority=NotificationPriority.HIGH,
+                            title=f"Deployment Stale — {deployment.bot_id}",
+                            body=(
+                                f"Deployment {deployment.deployment_id} merged but no heartbeat "
+                                f"received within 6 hours. Check bot status."
+                            ),
+                        )
                 elif deployment.status == DeploymentStatus.DEPLOYED:
                     snapshot = self._deployment_monitor.collect_metrics_snapshot(deployment.bot_id)
                     if snapshot:

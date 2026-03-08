@@ -6,6 +6,7 @@ For production, use create_app() factory to configure paths.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -154,6 +155,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     worker = Worker(
         queue=queue, registry=registry, brain=brain,
         event_stream=event_stream, conversation_tracker=conversation_tracker,
+        raw_data_dir=db_path / "raw",
     )
     session_store = SessionStore(base_dir=str(db_path / ".assistant" / "sessions"))
     subagent_mgr = SubagentManager()
@@ -301,6 +303,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     if config.deployment_monitoring_enabled:
         from skills.deployment_monitor import DeploymentMonitor
 
+        if not config.autonomous_enabled:
+            logger.warning(
+                "deployment_monitoring_enabled=True but autonomous_enabled=False: "
+                "rollback PRs will not work (pr_builder is None)"
+            )
         _dm_pr_builder = pr_builder if config.autonomous_enabled else None
         _dm_config_registry = config_registry if config.autonomous_enabled else None
         _dm_file_change_gen = file_change_gen if config.autonomous_enabled else None
@@ -732,7 +739,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         )) if approval_tracker else None,
         pr_review_check_fn=_check_pr_reviews if approval_tracker else None,
         deployment_check_fn=handlers._check_deployments if deployment_monitor else None,
-        threshold_learning_fn=threshold_learner.learn_thresholds if threshold_learner else None,
+        threshold_learning_fn=(
+            (lambda: asyncio.to_thread(threshold_learner.learn_thresholds))
+            if threshold_learner else None
+        ),
         experiment_check_fn=_check_experiments if experiment_manager else None,
     )
 

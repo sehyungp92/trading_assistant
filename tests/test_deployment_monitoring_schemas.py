@@ -20,6 +20,8 @@ class TestDeploymentStatus:
             "deployed",
             "regression_detected",
             "rolled_back",
+            "monitoring_complete",
+            "stale",
         }
         actual = {s.value for s in DeploymentStatus}
         assert actual == expected
@@ -109,7 +111,7 @@ class TestDeploymentRecord:
             bot_id="bot1",
             status=DeploymentStatus.DEPLOYED,
             pre_deploy_metrics=pre,
-            post_deploy_metrics=post,
+            post_deploy_snapshots=[post],
         )
         assert record.pre_deploy_metrics is not None
         assert record.post_deploy_metrics is not None

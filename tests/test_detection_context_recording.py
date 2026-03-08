@@ -4,9 +4,22 @@
 Verifies that all strategy engine detectors populate DetectionContext
 with correct detector_name, threshold_name, threshold_value, observed_value,
 and that margin is computed correctly.
+
+Also tests the full data-flow pipeline: StrategySuggestion →
+_record_suggestions() → suggestions.jsonl → ThresholdLearner.
 """
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
 from schemas.detection_context import DetectionContext
+from schemas.suggestion_tracking import SuggestionRecord
 from schemas.strategy_suggestions import SuggestionTier, StrategySuggestion
+from skills.suggestion_tracker import SuggestionTracker
+from skills.threshold_learner import ThresholdLearner
 from schemas.weekly_metrics import (
     BotWeeklySummary,
     CorrelationSummary,
@@ -351,3 +364,177 @@ class TestBackwardCompatDetectionContextOptional:
         assert restored.detection_context is not None
         assert restored.detection_context.detector_name == "test"
         assert restored.detection_context.margin == abs(0.3 - 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline integration tests: StrategySuggestion → _record_suggestions() →
+# suggestions.jsonl → ThresholdLearner
+# ---------------------------------------------------------------------------
+
+def _make_strategy_suggestion_with_ctx(
+    bot_id: str,
+    detector_name: str,
+    threshold_name: str,
+    threshold_value: float,
+    observed_value: float,
+) -> StrategySuggestion:
+    """Create a StrategySuggestion with a populated DetectionContext."""
+    return StrategySuggestion(
+        tier=SuggestionTier.PARAMETER,
+        bot_id=bot_id,
+        title=f"Adjust {threshold_name}",
+        description=f"Detected by {detector_name}",
+        confidence=0.7,
+        detection_context=DetectionContext(
+            detector_name=detector_name,
+            bot_id=bot_id,
+            threshold_name=threshold_name,
+            threshold_value=threshold_value,
+            observed_value=observed_value,
+        ),
+    )
+
+
+class TestDetectionContextPipeline:
+    """End-to-end: StrategySuggestion → _record_suggestions() → JSONL → ThresholdLearner."""
+
+    @pytest.fixture()
+    def findings_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "findings"
+        d.mkdir()
+        return d
+
+    @pytest.fixture()
+    def handler(self, findings_dir: Path):
+        """Minimal Handlers instance with a real SuggestionTracker."""
+        from orchestrator.handlers import Handlers
+
+        tracker = SuggestionTracker(store_dir=findings_dir)
+        stream = MagicMock()
+        stream.broadcast = MagicMock()
+
+        h = Handlers.__new__(Handlers)
+        h._suggestion_tracker = tracker
+        h._event_stream = stream
+        return h
+
+    def test_detection_context_persisted_to_jsonl(self, handler, findings_dir: Path):
+        """detection_context dict appears in suggestions.jsonl after _record_suggestions()."""
+        suggestions = [
+            _make_strategy_suggestion_with_ctx(
+                "bot_a", "alpha_decay", "decay_threshold", 0.3, 0.45,
+            ),
+        ]
+
+        id_map = handler._record_suggestions(suggestions, run_id="run_001")
+        assert len(id_map) == 1
+
+        jsonl_path = findings_dir / "suggestions.jsonl"
+        assert jsonl_path.exists()
+
+        lines = jsonl_path.read_text().strip().splitlines()
+        assert len(lines) == 1
+
+        record = json.loads(lines[0])
+        ctx = record.get("detection_context")
+        assert ctx is not None
+        assert ctx["detector_name"] == "alpha_decay"
+        assert ctx["threshold_name"] == "decay_threshold"
+        assert ctx["threshold_value"] == 0.3
+        assert ctx["observed_value"] == 0.45
+        assert ctx["bot_id"] == "bot_a"
+
+    def test_threshold_learner_reads_persisted_context(self, handler, findings_dir: Path):
+        """ThresholdLearner._load_detection_outcomes() parses detection_context from JSONL."""
+        suggestions = [
+            _make_strategy_suggestion_with_ctx(
+                "bot_a", "alpha_decay", "decay_threshold", 0.3, 0.45,
+            ),
+            _make_strategy_suggestion_with_ctx(
+                "bot_a", "filter_cost", "cost_threshold", 0.1, 0.15,
+            ),
+        ]
+
+        id_map = handler._record_suggestions(suggestions, run_id="run_002")
+        sug_ids = list(id_map.keys())
+        assert len(sug_ids) == 2
+
+        # Write matching outcomes
+        outcomes_path = findings_dir / "outcomes.jsonl"
+        outcomes = [
+            {"suggestion_id": sug_ids[0], "implemented_date": "2026-03-01", "pnl_delta_7d": 50.0},
+            {"suggestion_id": sug_ids[1], "implemented_date": "2026-03-01", "pnl_delta_7d": -20.0},
+        ]
+        with outcomes_path.open("w") as f:
+            for o in outcomes:
+                f.write(json.dumps(o) + "\n")
+
+        learner = ThresholdLearner(findings_dir=findings_dir)
+        detection_outcomes = learner._load_detection_outcomes()
+
+        assert len(detection_outcomes) == 2
+
+        # First outcome: alpha_decay, positive
+        ctx0, positive0 = detection_outcomes[0]
+        assert isinstance(ctx0, DetectionContext)
+        assert ctx0.detector_name == "alpha_decay"
+        assert ctx0.threshold_value == 0.3
+        assert ctx0.observed_value == 0.45
+        assert positive0 is True
+
+        # Second outcome: filter_cost, negative
+        ctx1, positive1 = detection_outcomes[1]
+        assert isinstance(ctx1, DetectionContext)
+        assert ctx1.detector_name == "filter_cost"
+        assert ctx1.threshold_value == 0.1
+        assert ctx1.observed_value == 0.15
+        assert positive1 is False
+
+    def test_suggestion_without_detection_context_no_crash(self, handler, findings_dir: Path):
+        """Suggestions without detection_context serialize with None — no crash."""
+        suggestion = StrategySuggestion(
+            tier=SuggestionTier.PARAMETER,
+            bot_id="bot_b",
+            title="Manual adjustment",
+            description="No detector involved",
+            confidence=0.5,
+            detection_context=None,
+        )
+
+        id_map = handler._record_suggestions([suggestion], run_id="run_003")
+        assert len(id_map) == 1
+
+        jsonl_path = findings_dir / "suggestions.jsonl"
+        record = json.loads(jsonl_path.read_text().strip())
+        assert record.get("detection_context") is None
+
+    def test_suggestion_record_round_trip(self):
+        """SuggestionRecord preserves detection_context through model_dump/model_validate."""
+        ctx_dict = {
+            "detector_name": "exit_timing",
+            "bot_id": "bot_c",
+            "threshold_name": "exit_delay_threshold",
+            "threshold_value": 5.0,
+            "observed_value": 8.2,
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        record = SuggestionRecord(
+            suggestion_id="test_123",
+            bot_id="bot_c",
+            title="Fix exit timing",
+            tier="parameter",
+            source_report_id="run_004",
+            detection_context=ctx_dict,
+        )
+
+        dumped = record.model_dump(mode="json")
+        restored = SuggestionRecord.model_validate(dumped)
+
+        assert restored.detection_context == ctx_dict
+        assert restored.detection_context["detector_name"] == "exit_timing"
+
+        # Also verify DetectionContext can validate from the dict
+        validated_ctx = DetectionContext.model_validate(restored.detection_context)
+        assert validated_ctx.detector_name == "exit_timing"
+        assert validated_ctx.margin == pytest.approx(3.2)
