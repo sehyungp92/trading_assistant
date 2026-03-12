@@ -1,5 +1,5 @@
 # analysis/triage_prompt_assembler.py
-"""Triage prompt assembler — builds context package for the Claude triage agent.
+"""Triage prompt assembler — builds context package for the triage agent runtime.
 
 Uses ContextBuilder for shared policy loading. Adds triage-specific
 context: stack trace, source snippet, git log, past rejections.

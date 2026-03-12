@@ -12,10 +12,12 @@ class TestWeeklyBrainRouting:
             "event_type": "weekly_summary_trigger",
             "event_id": "weekly-2026-03-01",
             "bot_id": "",
+            "payload": '{"week_start":"2026-02-23","week_end":"2026-03-01"}',
         }
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.SPAWN_WEEKLY_SUMMARY
+        assert actions[0].details["week_start"] == "2026-02-23"
 
 
 class TestWeeklyWorkerDispatch:

@@ -14,12 +14,14 @@ class TestBrainWFORouting:
             "event_id": "wfo-bot2-2026-03-01",
             "event_type": "wfo_trigger",
             "bot_id": "bot2",
-            "payload": "{}",
+            "payload": '{"data_end":"2026-03-01"}',
         }
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.SPAWN_WFO
         assert actions[0].bot_id == "bot2"
+        assert actions[0].details["bot_id"] == "bot2"
+        assert actions[0].details["data_end"] == "2026-03-01"
 
 
 class TestWorkerWFODispatch:
@@ -72,6 +74,25 @@ class TestSchedulerWFOConfig:
         wfo_jobs = [j for j in jobs if j["name"] == "wfo"]
         assert len(wfo_jobs) == 1
         assert wfo_jobs[0]["trigger"] == "cron"
+
+    def test_scheduler_creates_per_bot_wfo_jobs(self):
+        async def noop():
+            pass
+
+        cfg = SchedulerConfig()
+        jobs = create_scheduler_jobs(
+            cfg,
+            worker_fn=noop,
+            monitoring_fn=noop,
+            relay_fn=noop,
+            wfo_fns=[
+                {"fn": noop, "name_suffix": "bot1"},
+                {"fn": noop, "name_suffix": "bot2"},
+            ],
+        )
+
+        wfo_jobs = [j for j in jobs if j["name"].startswith("wfo_")]
+        assert [job["name"] for job in wfo_jobs] == ["wfo_bot1", "wfo_bot2"]
 
     def test_scheduler_omits_wfo_without_fn(self):
         async def noop():

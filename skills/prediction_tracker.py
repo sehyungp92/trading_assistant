@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from schemas.agent_response import AgentPrediction
@@ -60,8 +61,8 @@ class PredictionTracker:
     ) -> PredictionEvaluation:
         """Evaluate predictions for a given week against actual curated data.
 
-        Compares predicted direction with actual metric change from the curated
-        summary data.
+        Compares predicted direction with the realized metric change between the
+        prediction's baseline date and its target horizon.
         """
         predictions = self.load_predictions(week)
         if not predictions:
@@ -69,8 +70,13 @@ class PredictionTracker:
 
         verdicts: list[PredictionVerdict] = []
         for pred in predictions:
-            actual = self._load_actual_metric(
-                pred.bot_id, pred.metric, curated_dir, pred.timeframe_days,
+            anchor_date = self._parse_date(baseline_date or pred.week)
+            actual = self._load_actual_metric_change(
+                pred.bot_id,
+                pred.metric,
+                curated_dir,
+                anchor_date,
+                pred.timeframe_days,
             )
             if actual is None:
                 verdicts.append(PredictionVerdict(
@@ -159,27 +165,71 @@ class PredictionTracker:
             if vals
         }
 
-    def _load_actual_metric(
-        self, bot_id: str, metric: str, curated_dir: Path, timeframe_days: int,
+    def _load_actual_metric_change(
+        self,
+        bot_id: str,
+        metric: str,
+        curated_dir: Path,
+        baseline_date: date | None,
+        timeframe_days: int,
     ) -> float | None:
-        """Load the actual metric change from curated data.
+        """Load realized change between the baseline and target dates."""
+        if baseline_date is None:
+            return None
 
-        Searches the most recent curated summary for the bot and extracts
-        the relevant metric.
+        baseline_value = self._load_metric_for_date(
+            bot_id, metric, curated_dir, baseline_date,
+        )
+        target_value = self._load_metric_for_date(
+            bot_id, metric, curated_dir, baseline_date + timedelta(days=timeframe_days),
+        )
+        if baseline_value is None or target_value is None:
+            return None
+        return target_value - baseline_value
+
+    def _load_metric_for_date(
+        self,
+        bot_id: str,
+        metric: str,
+        curated_dir: Path,
+        target_date: date,
+        max_offset_days: int = 3,
+    ) -> float | None:
+        """Load the closest available metric near a target date.
+
+        We prefer exact matches, then later dates, then earlier dates. This
+        tolerates weekends/market holidays without making evaluations depend on
+        the current date.
         """
-        from datetime import datetime, timedelta, timezone
-
-        today = datetime.now(timezone.utc)
-        for days_back in range(timeframe_days + 7):
-            date_str = (today - timedelta(days=days_back)).strftime("%Y-%m-%d")
-            summary_path = curated_dir / date_str / bot_id / "summary.json"
-            if summary_path.exists():
-                try:
-                    data = json.loads(summary_path.read_text(encoding="utf-8"))
-                    return self._extract_metric(data, metric)
-                except (json.JSONDecodeError, OSError):
-                    pass
+        for candidate in self._candidate_dates(target_date, max_offset_days):
+            summary_path = curated_dir / candidate.strftime("%Y-%m-%d") / bot_id / "summary.json"
+            if not summary_path.exists():
+                continue
+            try:
+                data = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            metric_value = self._extract_metric(data, metric)
+            if metric_value is not None:
+                return metric_value
         return None
+
+    @staticmethod
+    def _candidate_dates(target_date: date, max_offset_days: int) -> list[date]:
+        dates = [target_date]
+        for offset in range(1, max_offset_days + 1):
+            dates.append(target_date + timedelta(days=offset))
+            dates.append(target_date - timedelta(days=offset))
+        return dates
+
+    @staticmethod
+    def _parse_date(raw: str) -> date | None:
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            return None
 
     @staticmethod
     def _extract_metric(summary: dict, metric: str) -> float | None:

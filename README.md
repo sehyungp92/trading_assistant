@@ -26,7 +26,7 @@ Every day, raw event data is transformed into a curated analysis package per bot
 - **Drawdown episodes**: equity curve segmentation with duration, root cause attribution, and recovery tracking
 - **Root cause distribution**: across a 21-type controlled taxonomy
 
-Claude Code is invoked daily and weekly to interpret this data, producing reports delivered via Telegram, Discord, or email.
+The agent runtime can be switched per workflow between Claude Max, Codex Pro, Z.AI Coding Plan, and OpenRouter-backed Claude-compatible models, while reports still flow through Telegram, Discord, or email.
 
 ### Optimises parameters through walk-forward optimisation
 
@@ -54,7 +54,7 @@ Beyond parameter tuning, the strategy engine runs 11 detectors looking for highe
 - Factor correlation drift
 - Microstructure issues (fill quality, adverse selection)
 
-These findings feed into Claude's weekly analysis, which produces structural suggestions (e.g., "add a regime-aware exit rule", "split this strategy into two variants"). Portfolio-level analysis computes cross-bot exposure concentration, crowding alerts, and risk-parity allocation recommendations with Calmar ratio tilt. Cross-bot transfer proposals identify validated patterns from one bot that may apply to others, scored by regime distribution overlap and historical transfer success rates.
+These findings feed into the configured weekly analysis provider, which produces structural suggestions (e.g., "add a regime-aware exit rule", "split this strategy into two variants"). Portfolio-level analysis computes cross-bot exposure concentration, crowding alerts, and risk-parity allocation recommendations with Calmar ratio tilt. Cross-bot transfer proposals identify validated patterns from one bot that may apply to others, scored by regime distribution overlap and historical transfer success rates.
 
 Structural suggestions surface in reports for human consideration — they are never auto-implemented.
 
@@ -90,7 +90,7 @@ VPS Bots → Sidecar → Relay VPS → POST /events → EventQueue (SQLite)
                                               (pick task → run agent)
                                                        ↓
                                                   AgentRunner
-                                          (assemble context → Claude CLI)
+                                          (assemble context → provider profile → CLI runtime)
                                                        ↓
                                                 runs/<id>/outputs/
                                                        ↓
@@ -134,12 +134,21 @@ uvicorn orchestrator.app:app --reload
 
 Copy `.env.example` to `.env` and configure:
 
+- Local runs auto-load `.env`; exported process environment variables still take precedence.
+- On Windows, one-time background startup is: copy `.env`, run `powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1`, then log in. The logon task keeps the supervisor running in the background and startup catch-up replays missed cron work after downtime.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `BOT_IDS` | Yes | Comma-separated bot identifiers |
 | `RELAY_URL` | Yes | Relay VPS endpoint URL |
 | `RELAY_HMAC_SECRET` | Yes | HMAC-SHA256 secret for relay auth |
-| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token for notifications |
+| `CLAUDE_COMMAND` | No | Claude Code CLI command or absolute path |
+| `CLAUDE_COMMAND_ARGS` | No | JSON array of launcher args prepended before Claude runtime args |
+| `CODEX_COMMAND` | No | Codex CLI command or absolute path |
+| `CODEX_COMMAND_ARGS` | No | JSON array of launcher args prepended before Codex runtime args |
+| `ZAI_API_KEY` | No | Enables the Z.AI Coding Plan profile through Claude Code-compatible env overrides |
+| `OPENROUTER_API_KEY` | No | Enables the OpenRouter profile through Claude Code-compatible env overrides |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token for notifications and `/settings` |
 | `TELEGRAM_CHAT_ID` | No | Telegram chat for reports |
 | `DISCORD_BOT_TOKEN` | No | Discord bot token |
 | `DISCORD_CHANNEL_ID` | No | Discord channel for reports |
@@ -147,6 +156,46 @@ Copy `.env.example` to `.env` and configure:
 | `DATA_DIR` | No | Base data directory (default: `.`) |
 
 See `orchestrator/config.py` for all settings.
+
+### Agent Provider Switching
+
+Agent selection is persisted in `data/agent_preferences.json`.
+
+- Global default applies everywhere unless a workflow override exists.
+- Workflow overrides are available for `daily_analysis`, `weekly_analysis`, `wfo`, and `triage`.
+- Initial values can be seeded from `AGENT_PROVIDER` and the per-workflow `*_AGENT_PROVIDER` env vars, but only when no persisted preferences file exists yet.
+- `GET /agent/preferences` returns the persisted default, overrides, effective workflow selections, and provider readiness.
+- `PUT /agent/preferences` updates the global default or workflow overrides. A `null` model means "use the provider default model."
+- Telegram exposes the same provider switching via `/settings` and the control-panel `Settings` button. Telegram changes provider only; model overrides remain HTTP-only.
+
+Built-in provider defaults:
+
+- `claude_max` -> `sonnet`
+- `codex_pro` -> `gpt-5.4`
+- `zai_coding_plan` -> `glm-4.7`
+- `openrouter` -> `anthropic/claude-sonnet-4.5`
+
+Claude Max setup:
+
+- Install Claude Code locally and log in with `claude auth login`.
+- Verify the CLI reports `loggedIn=true`, `authMethod=claude.ai`, and `subscriptionType=max` via `claude auth status`.
+- `GET /agent/preferences` marks `claude_max` unavailable until that Max-auth check passes.
+
+Launcher args:
+
+- `CLAUDE_COMMAND_ARGS` and `CODEX_COMMAND_ARGS` accept JSON arrays and are inserted before the runtime-specific CLI args.
+- This supports wrapper scripts and Windows launcher patterns such as `CODEX_COMMAND=wsl.exe` with `CODEX_COMMAND_ARGS=["--","codex"]`.
+
+Provider notes:
+
+- `claude_max` runs through the local Claude Code CLI with `stream-json` output, fresh per-run sessions, and live runtime events on the existing SSE bus. The runner clears Anthropic API/base-url/model override env vars before Claude-backed launches so Max runs cannot silently fall back to API-credit billing.
+- `codex_pro` runs through the local Codex CLI in read-only sandbox mode with streamed JSONL parsing, raw run artifacts, and the same runtime SSE events as Claude-backed providers.
+- `codex_pro` requires a launchable Codex command plus local ChatGPT auth in `~/.codex/auth.json`. API-key auth is rejected for this subscription-backed profile, and OpenAI API/base-url env vars are cleared before launch so runs cannot drift into API billing.
+- On Windows, `CODEX_COMMAND` may need a wrapper or launcher abstraction rather than a directly executable WindowsApp binary. Use `CODEX_COMMAND_ARGS` for that instead of editing orchestrator code.
+- The app surfaces Codex diagnostics when it detects high-latency local settings such as `model_reasoning_effort = "xhigh"` or recent shared-state lock/slow-write symptoms.
+- `zai_coding_plan` intentionally stays Claude Code-backed so tool use still works and usage can count against the Z.AI coding plan. It only requires the Claude CLI itself plus `ZAI_API_KEY`; it does not depend on Claude Max auth.
+- `openrouter` uses the Claude-compatible Anthropic surface for parity with the existing tool-using flow. It only requires the Claude CLI itself plus `OPENROUTER_API_KEY`; it does not depend on Claude Max auth.
+- Daily, weekly, and WFO Claude workflows use read-only tool allowlists (`Read`, `Grep`, `Glob`). Triage keeps `Bash` enabled alongside those read-only tools.
 
 ## Scheduled Tasks
 
@@ -160,7 +209,7 @@ See `orchestrator/config.py` for all settings.
 | Memory Consolidation | Sunday 09:00 UTC | Aggregates findings, generates hypothesis candidates |
 | Transfer Outcome Tracking | Sunday 10:30 UTC | Measures cross-bot pattern transfer results |
 
-Bug triage runs on-demand when HIGH+ severity errors arrive. Claude Code is invoked per-task (not always-running) — zero cost when idle.
+Bug triage runs on-demand when HIGH+ severity errors arrive. The configured agent runtime is invoked per-task (not always-running), which keeps subscription-backed profiles at zero extra cost while idle.
 
 ## Human-in-the-Loop
 
@@ -200,7 +249,7 @@ pytest tests/test_handlers.py -v
 
 - **Python 3.12**, FastAPI, uvicorn, APScheduler
 - **SQLite** for event queue + task tracking
-- **Claude Code CLI** invoked per-task
+- **Claude Code CLI** and **Codex CLI**, with Claude-compatible provider overlays for Z.AI and OpenRouter
 - **Pydantic v2** for all data contracts
 - **Telegram Bot API**, discord.py, SMTP for notifications
 - **HMAC-SHA256** for relay authentication

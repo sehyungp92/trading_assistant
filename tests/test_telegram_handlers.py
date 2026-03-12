@@ -55,6 +55,7 @@ class TestSlashCommandFallback:
         r = TelegramCallbackRouter()
         r.register("cmd_daily", AsyncMock(return_value="Daily"))
         r.register("cmd_weekly", AsyncMock(return_value="Weekly"))
+        r.register("cmd_settings", AsyncMock(return_value="Settings"))
         return r
 
     @pytest.mark.asyncio
@@ -72,6 +73,12 @@ class TestSlashCommandFallback:
         result = await router.dispatch_slash("/help")
         assert "/daily" in result
         assert "/weekly" in result
+        assert "/settings" in result
+
+    @pytest.mark.asyncio
+    async def test_settings_slash_command_maps_to_callback(self, router):
+        result = await router.dispatch_slash("/settings")
+        assert result == "Settings"
 
 
 class TestApprovalFlow:

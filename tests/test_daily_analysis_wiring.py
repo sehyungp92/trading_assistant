@@ -18,6 +18,7 @@ class TestBrainDailyTrigger:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.SPAWN_DAILY_ANALYSIS
+        assert actions[0].details["date"] == "2026-03-01"
 
 
 class TestSchedulerDailyCron:

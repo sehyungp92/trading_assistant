@@ -17,6 +17,8 @@ from orchestrator.db.queue import EventQueue
 from orchestrator.event_stream import EventStream
 from orchestrator.orchestrator_brain import OrchestratorBrain, Action, ActionType
 from orchestrator.task_registry import TaskRegistry
+from orchestrator.tz_utils import bot_trading_date
+from schemas.bot_config import BotConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ class Worker:
         event_stream: EventStream | None = None,
         conversation_tracker: ConversationTracker | None = None,
         raw_data_dir: Path | None = None,
+        bot_configs: dict[str, BotConfig] | None = None,
     ) -> None:
         self._queue = queue
         self._registry = registry
@@ -37,6 +40,7 @@ class Worker:
         self._event_stream: EventStream | None = event_stream
         self._conversation_tracker: ConversationTracker | None = conversation_tracker
         self._raw_data_dir: Path | None = raw_data_dir
+        self._bot_configs = bot_configs or {}
 
         # Pluggable handlers — set these to hook into the action pipeline
         self.on_alert: Callable[[Action], Awaitable[None]] | None = None
@@ -119,17 +123,67 @@ class Worker:
         if not event_type:
             return
 
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        payload = self._normalize_payload(details)
+        date = self._resolve_raw_event_date(action.bot_id, details, payload)
         bot_dir = self._raw_data_dir / date / action.bot_id
         bot_dir.mkdir(parents=True, exist_ok=True)
         out_path = bot_dir / f"{event_type}.jsonl"
         try:
-            payload = details.get("payload", details)
             line = json.dumps(payload, default=str) if not isinstance(payload, str) else payload
             with out_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
             logger.warning("Failed to persist raw event %s for %s", event_type, action.bot_id)
+
+    def _resolve_raw_event_date(self, bot_id: str, details: dict, payload: object) -> str:
+        if isinstance(payload, dict):
+            payload_date = payload.get("date")
+            if isinstance(payload_date, str):
+                try:
+                    datetime.strptime(payload_date, "%Y-%m-%d")
+                    return payload_date
+                except ValueError:
+                    pass
+
+        exchange_timestamp = self._parse_timestamp(details.get("exchange_timestamp"))
+        if exchange_timestamp is not None:
+            bot_config = self._bot_configs.get(bot_id)
+            if bot_config is not None:
+                return bot_trading_date(bot_config.timezone, exchange_timestamp)
+            return exchange_timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _normalize_payload(self, details: dict) -> object:
+        payload = details.get("payload", details)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return payload
+
+        if isinstance(payload, dict):
+            normalized = dict(payload)
+            if details.get("event_type") and "event_type" not in normalized:
+                normalized["event_type"] = details["event_type"]
+            if details.get("exchange_timestamp") and "exchange_timestamp" not in normalized:
+                normalized["exchange_timestamp"] = details["exchange_timestamp"]
+            return normalized
+
+        return payload
+
+    @staticmethod
+    def _parse_timestamp(raw: object) -> datetime | None:
+        if not isinstance(raw, str) or not raw:
+            return None
+        candidate = raw.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def get_and_reset_daily_counts(self) -> dict[str, int]:
         """Get accumulated daily event counts and reset. Called by daily analysis trigger."""

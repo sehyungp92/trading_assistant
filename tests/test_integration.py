@@ -56,6 +56,41 @@ class TestOrchestratorApp:
         data = resp.json()
         assert data["inserted"] is False
 
+    async def test_ingest_backfills_required_queue_timestamps(self, client: AsyncClient):
+        event = {
+            "event_id": "direct002",
+            "bot_id": "bot1",
+            "event_type": "trade",
+            "payload": {"trade_id": "t002"},
+        }
+
+        resp = await client.post("/ingest", json=event)
+
+        assert resp.status_code == 200
+        pending = (await client.get("/events/pending")).json()
+        stored = next(item for item in pending if item["event_id"] == "direct002")
+        assert stored["exchange_timestamp"] == stored["received_at"]
+        assert json.loads(stored["payload"]) == {"trade_id": "t002"}
+
+    async def test_feedback_enqueues_queue_timestamps(self, client: AsyncClient):
+        resp = await client.post("/feedback", json={
+            "text": "please tighten stops",
+            "bot_id": "bot1",
+            "report_id": "report-123",
+        })
+
+        assert resp.status_code == 200
+        event_id = resp.json()["event_id"]
+        pending = (await client.get("/events/pending")).json()
+        stored = next(item for item in pending if item["event_id"] == event_id)
+        assert stored["event_type"] == "user_feedback"
+        assert stored["exchange_timestamp"]
+        assert stored["received_at"]
+        assert json.loads(stored["payload"]) == {
+            "text": "please tighten stops",
+            "report_id": "report-123",
+        }
+
     async def test_list_tasks(self, client: AsyncClient):
         resp = await client.get("/tasks")
         assert resp.status_code == 200

@@ -22,6 +22,7 @@ class FailureEntry:
     outcome: TriageOutcome
     rejection_reason: str = ""
     pr_url: str = ""
+    issue_url: str = ""
     suggested_fix: str = ""
     timestamp: str = ""
 
@@ -38,6 +39,7 @@ class FailureEntry:
             outcome=result.outcome,
             rejection_reason=rejection_reason,
             pr_url=result.pr_url,
+            issue_url=result.github_issue_url,
             suggested_fix=result.suggested_fix,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
@@ -50,6 +52,7 @@ class FailureEntry:
             "outcome": self.outcome.value,
             "rejection_reason": self.rejection_reason,
             "pr_url": self.pr_url,
+            "issue_url": self.issue_url,
             "suggested_fix": self.suggested_fix,
             "timestamp": self.timestamp,
         }
@@ -63,6 +66,7 @@ class FailureEntry:
             outcome=TriageOutcome(d["outcome"]),
             rejection_reason=d.get("rejection_reason", ""),
             pr_url=d.get("pr_url", ""),
+            issue_url=d.get("issue_url", ""),
             suggested_fix=d.get("suggested_fix", ""),
             timestamp=d.get("timestamp", ""),
         )

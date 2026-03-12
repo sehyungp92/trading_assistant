@@ -1,9 +1,4 @@
-# schemas/autonomous_pipeline.py
-"""Autonomous pipeline schemas — suggestion-to-PR automation models.
-
-Covers: parameter definitions, bot config profiles, backtest comparisons,
-approval requests, file changes, and PR requests.
-"""
+"""Autonomous pipeline schemas for repo-backed suggestion automation."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -18,8 +13,26 @@ from schemas.wfo_results import SimulationMetrics
 class ParameterType(str, Enum):
     YAML_FIELD = "YAML_FIELD"
     PYTHON_CONSTANT = "PYTHON_CONSTANT"
-    # FileChangeGenerator only supports YAML_FIELD currently.
-    # PYTHON_CONSTANT is used in bot config definitions but not yet auto-modifiable.
+
+
+class ChangeKind(str, Enum):
+    PARAMETER_CHANGE = "parameter_change"
+    BUG_FIX = "bug_fix"
+    STRUCTURAL_CHANGE = "structural_change"
+    ROLLBACK = "rollback"
+
+
+class RepoRiskTier(str, Enum):
+    AUTO = "auto"
+    REQUIRES_APPROVAL = "requires_approval"
+    REQUIRES_DOUBLE_APPROVAL = "requires_double_approval"
+
+
+class FileChangeMode(str, Enum):
+    FILE_REPLACE = "file_replace"
+    YAML_FIELD = "yaml_field"
+    PYTHON_CONSTANT = "python_constant"
+    UNIFIED_DIFF = "unified_diff"
 
 
 class ParameterDefinition(BaseModel):
@@ -56,17 +69,21 @@ class BotConfigProfile(BaseModel):
     bot_id: str
     repo_url: str = ""
     repo_dir: str = ""
-    parameters: list[ParameterDefinition] = []
-    strategies: list[str] = []
+    default_branch: str = "main"
+    allowed_edit_paths: list[str] = Field(default_factory=list)
+    structural_context_paths: list[str] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    parameters: list[ParameterDefinition] = Field(default_factory=list)
+    strategies: list[str] = Field(default_factory=list)
 
     def get_parameter(self, param_name: str) -> Optional[ParameterDefinition]:
-        for p in self.parameters:
-            if p.param_name == param_name:
-                return p
+        for param in self.parameters:
+            if param.param_name == param_name:
+                return param
         return None
 
     def get_parameters_by_category(self, category: str) -> list[ParameterDefinition]:
-        return [p for p in self.parameters if p.category == category]
+        return [param for param in self.parameters if param.category == category]
 
 
 class BacktestContext(BaseModel):
@@ -92,21 +109,21 @@ class BacktestComparison(BaseModel):
     profit_factor_change_pct: float = 0.0
     win_rate_change_pct: float = 0.0
     passes_safety: bool = False
-    safety_notes: list[str] = []
+    safety_notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _compute_changes(self) -> BacktestComparison:
         self.sharpe_change_pct = _pct_change(
-            self.baseline.sharpe_ratio, self.proposed.sharpe_ratio
+            self.baseline.sharpe_ratio, self.proposed.sharpe_ratio,
         )
         self.max_dd_change_pct = _pct_change(
-            self.baseline.max_drawdown_pct, self.proposed.max_drawdown_pct
+            self.baseline.max_drawdown_pct, self.proposed.max_drawdown_pct,
         )
         self.profit_factor_change_pct = _pct_change(
-            self.baseline.profit_factor, self.proposed.profit_factor
+            self.baseline.profit_factor, self.proposed.profit_factor,
         )
         self.win_rate_change_pct = _pct_change(
-            self.baseline.win_rate, self.proposed.win_rate
+            self.baseline.win_rate, self.proposed.win_rate,
         )
         return self
 
@@ -125,17 +142,42 @@ class ApprovalStatus(str, Enum):
     EXPIRED = "EXPIRED"
 
 
+class RepoTaskContext(BaseModel):
+    """Execution context for a repo mutation task."""
+
+    task_id: str
+    repo_url: str = ""
+    repo_dir: str = ""
+    default_branch: str = "main"
+    repo_cache_dir: str = ""
+    worktree_dir: str = ""
+    artifact_dir: str = ""
+
+
 class ApprovalRequest(BaseModel):
-    """A request for human approval of a parameter change."""
+    """A request for human approval of a repo-backed change."""
 
     request_id: str
     suggestion_id: str
     bot_id: str
-    param_changes: list[dict] = []
+    change_kind: ChangeKind = ChangeKind.PARAMETER_CHANGE
+    title: str = ""
+    summary: str = ""
+    param_changes: list[dict] = Field(default_factory=list)
+    file_changes: list[FileChange] = Field(default_factory=list)
     backtest_summary: Optional[BacktestComparison] = None
+    planned_files: list[str] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
+    risk_tier: RepoRiskTier = RepoRiskTier.REQUIRES_APPROVAL
+    draft_pr: bool = False
+    repo_task: Optional[RepoTaskContext] = None
+    implementation_notes: str = ""
+    issue_url: Optional[str] = None
+    diff_summary: list[str] = Field(default_factory=list)
+    approval_count: int = 0
     status: ApprovalStatus = ApprovalStatus.PENDING
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(timezone.utc),
     )
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
@@ -150,6 +192,9 @@ class FileChange(BaseModel):
     file_path: str
     original_content: str = ""
     new_content: str = ""
+    change_mode: FileChangeMode = FileChangeMode.FILE_REPLACE
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    patch: str = ""
     diff_preview: str = ""
 
 
@@ -163,15 +208,42 @@ class PRRequest(BaseModel):
     branch_name: str
     title: str
     body: str = ""
-    file_changes: list[FileChange] = []
+    change_kind: ChangeKind = ChangeKind.PARAMETER_CHANGE
+    draft: bool = False
+    verification_commands: list[str] = Field(default_factory=list)
+    repo_task: Optional[RepoTaskContext] = None
+    file_changes: list[FileChange] = Field(default_factory=list)
+
+
+class GitHubIssueRequest(BaseModel):
+    """Request to create or deduplicate a GitHub issue."""
+
+    bot_id: str
+    title: str
+    body: str
+    repo_dir: str
+    labels: list[str] = Field(default_factory=list)
+    dedupe_key: str = ""
+    repo_task: Optional[RepoTaskContext] = None
+    change_kind: ChangeKind = ChangeKind.BUG_FIX
+
+
+class GitHubIssueResult(BaseModel):
+    """Result of a GitHub issue creation attempt."""
+
+    success: bool
+    issue_url: Optional[str] = None
+    issue_number: Optional[int] = None
+    error: Optional[str] = None
+    existing_issue_url: Optional[str] = None
 
 
 class PreflightResult(BaseModel):
     """Result of pre-flight checks before PR creation."""
 
     passed: bool = True
-    checks: list[dict] = []
-    reasons: list[str] = []
+    checks: list[dict] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ReviewState(str, Enum):
@@ -187,11 +259,11 @@ class PRReviewStatus(BaseModel):
     pr_number: int
     pr_url: str = ""
     review_state: ReviewState = ReviewState.PENDING
-    reviewers: list[str] = []
-    actionable_comments: list[str] = []
+    reviewers: list[str] = Field(default_factory=list)
+    actionable_comments: list[str] = Field(default_factory=list)
     needs_attention: bool = False
     checked_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -205,3 +277,7 @@ class PRResult(BaseModel):
     pr_number: Optional[int] = None
     preflight: Optional[PreflightResult] = None
     existing_pr_url: Optional[str] = None
+    diff_summary: list[str] = Field(default_factory=list)
+
+
+ApprovalRequest.model_rebuild()

@@ -225,6 +225,41 @@ class ContextBuilder:
         if not sessions:
             return ""
 
+        formatted_lines = [f"Recent {agent_type} sessions (last {days} days):"]
+        for s in sessions[:20]:  # cap to avoid context bloat
+            details: list[str] = []
+            provider = s.get("provider")
+            effective_model = s.get("effective_model")
+            if provider and effective_model:
+                details.append(f"{provider}/{effective_model}")
+            elif provider:
+                details.append(str(provider))
+
+            duration = s.get("duration_ms", 0)
+            details.append(f"{duration}ms")
+
+            first_output_ms = s.get("first_output_ms")
+            if isinstance(first_output_ms, int) and first_output_ms > 0:
+                details.append(f"first {first_output_ms}ms")
+
+            tool_call_count = s.get("tool_call_count")
+            if isinstance(tool_call_count, int) and tool_call_count > 0:
+                details.append(f"tools {tool_call_count}")
+
+            stream_event_count = s.get("stream_event_count")
+            if isinstance(stream_event_count, int) and stream_event_count > 0:
+                details.append(f"stream {stream_event_count}")
+
+            auth_mode = s.get("auth_mode")
+            if auth_mode:
+                details.append(str(auth_mode))
+
+            summary = s.get("response_summary", "")[:100]
+            formatted_lines.append(
+                f"- {s.get('date', '?')}: {', '.join(details)} -- {summary}"
+            )
+        return "\n".join(formatted_lines)
+
         lines = [f"Recent {agent_type} sessions (last {days} days):"]
         for s in sessions[:20]:  # cap to avoid context bloat
             duration = s.get("duration_ms", 0)

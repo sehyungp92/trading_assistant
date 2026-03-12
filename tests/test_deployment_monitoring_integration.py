@@ -49,7 +49,7 @@ def _make_pr_builder_mock(*, merge_state: str = "OPEN") -> MagicMock:
         return_value=PRResult(
             success=True,
             pr_url="https://github.com/user/bot/pull/99",
-            branch_name="ta/rollback-abc12345",
+            branch_name="codex/rollback-abc12345",
             pr_number=99,
         )
     )

@@ -23,6 +23,7 @@ class TestFailureEntry:
         assert entry.error_type == "E"
         assert entry.outcome == TriageOutcome.KNOWN_FIX
         assert entry.rejection_reason == "wrong fix"
+        assert entry.issue_url == ""
 
 
 class TestFailureLogWrite:
@@ -77,6 +78,22 @@ class TestFailureLogWrite:
         data = json.loads(lines[0])
         assert data["rejection_reason"] == "wrong version pinned"
         assert data["pr_url"] == "https://github.com/user/repo/pull/42"
+
+    def test_records_issue_url(self, tmp_path: Path):
+        log_path = tmp_path / "failure-log.jsonl"
+        log = FailureLog(log_path)
+        tr = TriageResult(
+            error_event=ErrorEvent(
+                bot_id="bot1", error_type="RuntimeError", message="investigate", stack_trace="s",
+            ),
+            severity=BugSeverity.HIGH,
+            complexity=BugComplexity.MULTI_FILE,
+            outcome=TriageOutcome.NEEDS_INVESTIGATION,
+            github_issue_url="https://github.com/user/repo/issues/7",
+        )
+        log.record_triage(tr)
+        data = json.loads(log_path.read_text().strip().splitlines()[0])
+        assert data["issue_url"] == "https://github.com/user/repo/issues/7"
 
 
 class TestFailureLogRead:

@@ -1,6 +1,19 @@
 bot_id: momentum_trader
 repo_url: git@github.com:user/momentum_trader.git
 repo_dir: /repos/momentum_trader
+default_branch: main
+allowed_edit_paths:
+  - config/*
+  - strategies/*
+  - tests/*
+  - docs/*
+  - README.md
+structural_context_paths:
+  - config/*
+  - strategies/*
+  - tests/*
+verification_commands:
+  - pytest tests -q
 strategies:
   - macd
   - rsi

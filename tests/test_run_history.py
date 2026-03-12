@@ -45,6 +45,7 @@ def test_record_run_creates_entry(handlers_with_tmp):
     entry = json.loads(lines[0])
     assert entry["run_id"] == "daily-2026-03-04"
     assert entry["status"] == "running"
+    assert entry["handler"] == "daily_analysis"
 
 
 def test_record_run_on_success(handlers_with_tmp):

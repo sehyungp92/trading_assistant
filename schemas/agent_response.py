@@ -10,6 +10,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from schemas.autonomous_pipeline import FileChange
+
 
 class AgentPrediction(BaseModel):
     """A specific, measurable prediction about a bot's future performance."""
@@ -40,12 +42,15 @@ class StructuralProposal(BaseModel):
     """A proposal for structural changes to a bot's architecture."""
 
     hypothesis_id: Optional[str] = None
+    linked_suggestion_id: Optional[str] = None
     bot_id: str
     title: str
     description: str = ""
     reversibility: Literal["easy", "moderate", "hard"] = "moderate"
     evidence: str = ""
     estimated_complexity: Literal["low", "medium", "high"] = "medium"
+    file_changes: list[FileChange] = Field(default_factory=list)
+    verification_commands: list[str] = Field(default_factory=list)
 
 
 # Shared mapping from suggestion category → suggestion tier.
@@ -64,8 +69,8 @@ CATEGORY_TO_TIER: dict[str, str] = {
 class ParsedAnalysis(BaseModel):
     """Result of parsing Claude's structured output block."""
 
-    predictions: list[AgentPrediction] = []
-    suggestions: list[AgentSuggestion] = []
-    structural_proposals: list[StructuralProposal] = []
+    predictions: list[AgentPrediction] = Field(default_factory=list)
+    suggestions: list[AgentSuggestion] = Field(default_factory=list)
+    structural_proposals: list[StructuralProposal] = Field(default_factory=list)
     raw_report: str = ""
     parse_success: bool = True

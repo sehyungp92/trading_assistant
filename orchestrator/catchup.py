@@ -1,159 +1,221 @@
-"""Startup catch-up — detect and enqueue missed scheduled jobs."""
+"""Startup catch-up planning for tracked scheduled jobs."""
+
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from schemas.bot_config import BotConfig
+from orchestrator.scheduler import (
+    ScheduledJobClass,
+    ScheduledJobSpec,
+    recent_cron_occurrences,
+)
+from orchestrator.scheduled_runs import ScheduledRunStore
 
 logger = logging.getLogger(__name__)
 
+_DAILY_RUN_RE = re.compile(r"^daily-(\d{4}-\d{2}-\d{2})")
+_WEEKLY_RUN_RE = re.compile(r"^weekly-(\d{4}-\d{2}-\d{2})")
+_WFO_RUN_RE = re.compile(r"^wfo-([^-]+)-(\d{4}-\d{2}-\d{2})$")
+
+
+@dataclass(frozen=True)
+class ScheduledOccurrence:
+    spec: ScheduledJobSpec
+    scheduled_for: datetime
+
 
 class StartupCatchup:
-    """Reads run_history.jsonl to determine if scheduled jobs were missed.
-
-    Catches up all missed days (up to ``max_catchup_days``) in chronological
-    order, so multi-day laptop-off periods are fully recovered.
-    """
+    """Plans which missed cron executions should be replayed on startup."""
 
     def __init__(
         self,
-        run_history_path: Path,
-        bot_configs: dict[str, BotConfig] | None = None,
-        max_catchup_days: int = 7,
+        job_specs: list[ScheduledJobSpec],
+        run_store: ScheduledRunStore,
     ) -> None:
-        self._history_path = Path(run_history_path)
-        self._bot_configs = bot_configs or {}
-        self._max_catchup_days = max_catchup_days
-        self._runs = self._load_history()
+        self._job_specs = job_specs
+        self._run_store = run_store
 
-    def _load_history(self) -> list[dict]:
-        if not self._history_path.exists():
-            return []
-        runs = []
-        try:
-            for line in self._history_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        runs.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            logger.warning("Could not read run history at %s", self._history_path)
-        return runs
+    async def build_plan(self, *, now: datetime | None = None) -> list[ScheduledOccurrence]:
+        now = _ensure_utc(now or datetime.now(timezone.utc))
+        baseline = await self._run_store.get_baseline()
+        occurrences: list[ScheduledOccurrence] = []
 
-    def _last_run_date(self, handler_name: str) -> str | None:
-        """Return the most recent date string for a given handler."""
-        matches = [
-            r for r in self._runs
-            if r.get("handler") == handler_name
-            and r.get("status") in ("completed", "skipped", "running")
-        ]
-        if not matches:
-            return None
-        # Sort by started_at descending
-        matches.sort(key=lambda r: r.get("started_at", ""), reverse=True)
-        # Extract date from run_id (e.g., "daily-2026-03-08" -> "2026-03-08")
-        run_id = matches[0].get("run_id", "")
-        parts = run_id.split("-", 1)
-        if len(parts) >= 2:
-            return parts[1]
+        for spec in self._job_specs:
+            if not spec.is_catchup_eligible:
+                continue
+
+            candidates = recent_cron_occurrences(spec, now, spec.catchup_limit)
+            if not candidates:
+                continue
+
+            if baseline is not None:
+                candidates = [candidate for candidate in candidates if candidate > baseline]
+                if not candidates:
+                    continue
+
+            records = await self._run_store.get_records(
+                spec.job_key,
+                spec.scope_key,
+                since=candidates[0],
+                until=candidates[-1],
+            )
+            completed = {
+                record.scheduled_for.replace(microsecond=0)
+                for record in records
+                if record.status == "completed"
+            }
+            due = [
+                candidate.replace(microsecond=0)
+                for candidate in candidates
+                if candidate.replace(microsecond=0) not in completed
+            ]
+            if not due:
+                continue
+
+            if spec.job_class == ScheduledJobClass.COALESCED:
+                occurrences.append(ScheduledOccurrence(spec=spec, scheduled_for=due[-1]))
+            else:
+                occurrences.extend(
+                    ScheduledOccurrence(spec=spec, scheduled_for=scheduled_for)
+                    for scheduled_for in due
+                )
+
+        occurrences.sort(key=lambda item: (item.scheduled_for, item.spec.name))
+        return occurrences
+
+
+async def bootstrap_run_store_from_history(
+    run_store: ScheduledRunStore,
+    job_specs: list[ScheduledJobSpec],
+    run_history_path: Path,
+) -> datetime | None:
+    """Seed tracked completions from run_history.jsonl as a one-time migration."""
+    path = Path(run_history_path)
+    if not path.exists():
         return None
 
-    def needs_daily_catchup(self) -> list[dict]:
-        """Check if daily analysis needs catching up for any bot group.
+    earliest_seeded: datetime | None = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        logger.warning("Could not read run history at %s", path)
+        return None
 
-        Returns list of ``{"bots": [...], "date": "YYYY-MM-DD"}`` dicts
-        for each missed day per group, oldest first.  Up to
-        ``max_catchup_days`` entries per group.
-        """
-        from orchestrator.tz_utils import bot_trading_date
+    daily_specs = [spec for spec in job_specs if spec.job_key == "daily_analysis"]
+    weekly_specs = [spec for spec in job_specs if spec.job_key == "weekly_summary"]
+    wfo_specs = {spec.scope_key: spec for spec in job_specs if spec.job_key == "wfo"}
 
-        catchups: list[dict] = []
-        last_daily = self._last_run_date("daily_analysis")
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
-        if self._bot_configs:
-            from orchestrator.tz_utils import group_bots_by_analysis_time
-            groups = group_bots_by_analysis_time(self._bot_configs)
+        status = entry.get("status", "")
+        if status not in {"completed", "skipped"}:
+            continue
 
-            for _time_key, bot_list in groups.items():
-                tz = self._bot_configs[bot_list[0]].timezone
-                yesterday = bot_trading_date(
-                    tz, datetime.now(timezone.utc) - timedelta(days=1),
+        handler_name = entry.get("handler") or entry.get("agent_type") or ""
+        run_id = entry.get("run_id", "")
+
+        if handler_name == "daily_analysis":
+            match = _DAILY_RUN_RE.match(run_id)
+            if not match:
+                continue
+            run_date = match.group(1)
+            for spec in daily_specs:
+                scheduled_for = _scheduled_for_daily(run_date, spec)
+                await run_store.seed_completion(
+                    spec.job_key,
+                    spec.scope_key,
+                    scheduled_for,
+                    started_at=entry.get("started_at", ""),
+                    finished_at=entry.get("finished_at", ""),
                 )
-                if last_daily is None:
-                    # No history — catch up yesterday only
-                    catchups.append({"bots": bot_list, "date": yesterday})
-                elif last_daily < yesterday:
-                    # Iterate each missed day from last_daily+1 through yesterday
-                    from datetime import date as date_type
-                    start = date_type.fromisoformat(last_daily) + timedelta(days=1)
-                    end = date_type.fromisoformat(yesterday)
-                    count = 0
-                    d = start
-                    while d <= end and count < self._max_catchup_days:
-                        catchups.append({
-                            "bots": bot_list,
-                            "date": d.isoformat(),
-                        })
-                        d += timedelta(days=1)
-                        count += 1
-        else:
-            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-            if last_daily is None:
-                catchups.append({"date": yesterday})
-            elif last_daily < yesterday:
-                from datetime import date as date_type
-                start = date_type.fromisoformat(last_daily) + timedelta(days=1)
-                end = date_type.fromisoformat(yesterday)
-                count = 0
-                d = start
-                while d <= end and count < self._max_catchup_days:
-                    catchups.append({"date": d.isoformat()})
-                    d += timedelta(days=1)
-                    count += 1
+                earliest_seeded = _min_datetime(earliest_seeded, scheduled_for)
+            continue
 
-        return catchups
+        if handler_name == "weekly_analysis":
+            match = _WEEKLY_RUN_RE.match(run_id)
+            if not match or not weekly_specs:
+                continue
+            week_start = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+            week_end = week_start + timedelta(days=6)
+            for spec in weekly_specs:
+                scheduled_for = datetime(
+                    week_end.year,
+                    week_end.month,
+                    week_end.day,
+                    spec.hour or 0,
+                    spec.minute or 0,
+                    tzinfo=timezone.utc,
+                )
+                await run_store.seed_completion(
+                    spec.job_key,
+                    spec.scope_key,
+                    scheduled_for,
+                    started_at=entry.get("started_at", ""),
+                    finished_at=entry.get("finished_at", ""),
+                )
+                earliest_seeded = _min_datetime(earliest_seeded, scheduled_for)
+            continue
 
-    def needs_weekly_catchup(self) -> bool:
-        """Check if weekly analysis was missed this week."""
-        last_weekly = self._last_run_date("weekly_analysis")
-        if last_weekly is None:
-            return True
+        if handler_name == "wfo":
+            match = _WFO_RUN_RE.match(run_id)
+            if not match:
+                continue
+            bot_id = match.group(1)
+            spec = wfo_specs.get(f"bot:{bot_id}") or wfo_specs.get(bot_id)
+            if spec is None:
+                continue
+            run_date = datetime.strptime(match.group(2), "%Y-%m-%d").date()
+            scheduled_for = datetime(
+                run_date.year,
+                run_date.month,
+                run_date.day,
+                spec.hour or 0,
+                spec.minute or 0,
+                tzinfo=timezone.utc,
+            )
+            await run_store.seed_completion(
+                spec.job_key,
+                spec.scope_key,
+                scheduled_for,
+                started_at=entry.get("started_at", ""),
+                finished_at=entry.get("finished_at", ""),
+            )
+            earliest_seeded = _min_datetime(earliest_seeded, scheduled_for)
 
-        now = datetime.now(timezone.utc)
-        # Find the most recent Sunday
-        days_since_sunday = (now.weekday() + 1) % 7
-        last_sunday = (now - timedelta(days=days_since_sunday)).strftime("%Y-%m-%d")
+    return earliest_seeded
 
-        return last_weekly < last_sunday
 
-    def build_catchup_events(self) -> list[dict]:
-        """Build event dicts to enqueue for missed jobs."""
-        events: list[dict] = []
+def _scheduled_for_daily(run_date: str, spec: ScheduledJobSpec) -> datetime:
+    date = datetime.strptime(run_date, "%Y-%m-%d").date()
+    return datetime(
+        date.year,
+        date.month,
+        date.day,
+        spec.hour or 0,
+        spec.minute or 0,
+        tzinfo=timezone.utc,
+    )
 
-        for catchup in self.needs_daily_catchup():
-            date = catchup["date"]
-            bots = catchup.get("bots")
-            payload = {"date": date}
-            if bots:
-                payload["bots"] = bots
-            events.append({
-                "event_type": "daily_analysis_trigger",
-                "bot_id": "system",
-                "event_id": f"catchup-daily-{date}",
-                "payload": json.dumps(payload),
-            })
 
-        if self.needs_weekly_catchup():
-            events.append({
-                "event_type": "weekly_summary_trigger",
-                "bot_id": "system",
-                "event_id": f"catchup-weekly-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-                "payload": "{}",
-            })
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
-        return events
+
+def _min_datetime(current: datetime | None, candidate: datetime) -> datetime:
+    if current is None:
+        return candidate
+    return min(current, candidate)

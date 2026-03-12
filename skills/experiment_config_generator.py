@@ -100,7 +100,7 @@ class ExperimentConfigGenerator:
             suggestion_id=config.source_suggestion_id or config.experiment_id,
             bot_id=config.bot_id,
             repo_dir=repo_dir,
-            branch_name=f"ta/experiment-{config.experiment_id[:8]}-{date_str}",
+            branch_name=f"codex/experiment-{config.experiment_id[:8]}-{date_str}",
             title=f"[trading-assistant] Experiment: {config.title}",
             body=(
                 f"## A/B Experiment\n\n"

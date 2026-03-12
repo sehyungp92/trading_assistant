@@ -383,7 +383,7 @@ class TestFeedbackEventId:
         ids = set()
         for _ in range(100):
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            event_id = f"feedback-{ts}-{secrets.token_hex(2)}"
+            event_id = f"feedback-{ts}-{secrets.token_hex(6)}"
             ids.add(event_id)
         assert len(ids) == 100
 

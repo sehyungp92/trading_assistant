@@ -1,5 +1,5 @@
 # analysis/weekly_prompt_assembler.py
-"""Weekly prompt assembler — builds context package for weekly analysis Claude invocation.
+"""Weekly prompt assembler — builds context package for weekly analysis runtime invocation.
 
 Uses ContextBuilder for shared policy/corrections loading. Adds weekly-specific
 data: 7 daily reports, weekly summary, week-over-week comparisons,

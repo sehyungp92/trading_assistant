@@ -97,12 +97,42 @@ class TestAutoOutcomeMeasurer:
         changes = measurer.detect_parameter_changes("bot1")
         assert len(changes) >= 1
 
-    def _write_summaries(self, base: Path, date: str, bot_id: str,
-                         pnl: float, wins: int, total: int):
+    def test_measure_prefers_net_pnl(self, tmp_path):
+        from skills.auto_outcome_measurer import AutoOutcomeMeasurer
+
+        self._write_summaries(tmp_path, "2026-02-15", "bot1", pnl=100, wins=5, total=10, net_pnl=80)
+        self._write_summaries(tmp_path, "2026-02-25", "bot1", pnl=150, wins=8, total=10, net_pnl=140)
+
+        measurer = AutoOutcomeMeasurer(curated_dir=tmp_path)
+        result = measurer.measure(
+            suggestion_id="s1",
+            bot_id="bot1",
+            implemented_date="2026-02-20",
+            before_days=7,
+            after_days=7,
+        )
+
+        assert result is not None
+        assert result.pnl_before == 80
+        assert result.pnl_after == 140
+
+    def _write_summaries(
+        self,
+        base: Path,
+        date: str,
+        bot_id: str,
+        pnl: float,
+        wins: int,
+        total: int,
+        net_pnl: float | None = None,
+    ):
         bot_dir = base / date / bot_id
         bot_dir.mkdir(parents=True, exist_ok=True)
         (bot_dir / "summary.json").write_text(json.dumps({
             "date": date, "bot_id": bot_id,
-            "gross_pnl": pnl, "win_count": wins, "total_trades": total,
+            "gross_pnl": pnl,
+            "net_pnl": pnl if net_pnl is None else net_pnl,
+            "win_count": wins,
+            "total_trades": total,
             "max_drawdown_pct": 3.0,
         }))

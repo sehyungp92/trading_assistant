@@ -47,12 +47,25 @@ def test_load_session_history_formats_text(memory_dir, session_store):
         prompt_package={},
         response="Daily report generated",
         duration_ms=3000,
+        metadata={
+            "provider": "claude_max",
+            "effective_model": "sonnet",
+            "first_output_ms": 125,
+            "tool_call_count": 2,
+            "stream_event_count": 8,
+            "auth_mode": "claude.ai:max",
+        },
     )
 
     ctx = ContextBuilder(memory_dir)
     result = ctx.load_session_history(session_store, "daily_analysis")
     assert "Recent daily_analysis sessions" in result
     assert "3000ms" in result
+    assert "claude_max/sonnet" in result
+    assert "first 125ms" in result
+    assert "tools 2" in result
+    assert "stream 8" in result
+    assert "claude.ai:max" in result
 
 
 def test_base_package_includes_session_history(memory_dir, session_store):

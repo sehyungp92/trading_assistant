@@ -13,6 +13,7 @@ from orchestrator.handlers import Handlers
 from orchestrator.orchestrator_brain import Action, ActionType, OrchestratorBrain
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.worker import Worker
+from schemas.bot_config import BotConfig
 from schemas.notifications import NotificationPreferences
 
 
@@ -62,6 +63,31 @@ class TestWorkerPersistsEnrichedEvents:
         assert len(raw_files) == 1
         lines = raw_files[0].read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) >= 1
+
+    async def test_persist_uses_bot_trading_date(self, queue, registry, brain, tmp_path):
+        raw_dir = tmp_path / "raw"
+        worker = Worker(
+            queue=queue,
+            registry=registry,
+            brain=brain,
+            raw_data_dir=raw_dir,
+            bot_configs={
+                "bot1": BotConfig(bot_id="bot1", timezone="Asia/Seoul"),
+            },
+        )
+
+        await queue.enqueue({
+            "event_id": "is003",
+            "bot_id": "bot1",
+            "event_type": "indicator_snapshot",
+            "payload": json.dumps({"rsi": 55.2}),
+            "exchange_timestamp": "2026-03-01T23:30:00+00:00",
+            "received_at": "2026-03-01T23:30:01+00:00",
+        })
+
+        processed = await worker.process_batch(limit=10)
+        assert processed == 1
+        assert (raw_dir / "2026-03-02" / "bot1" / "indicator_snapshot.jsonl").exists()
 
     async def test_worker_without_raw_dir_still_counts(self, queue, registry, brain):
         """Backward compat: raw_data_dir=None just counts, doesn't persist."""
@@ -140,16 +166,39 @@ class TestHandlerBuildsEnrichedCurated:
             json.dumps({"rsi": 55.2, "macd": 0.3}) + "\n",
             encoding="utf-8",
         )
-
-        # Also need a summary.json for write_curated to work
-        curated_bot_dir = tmp_path / "data" / "curated" / date / "bot1"
-        curated_bot_dir.mkdir(parents=True)
+        (raw_dir / "daily_snapshot.jsonl").write_text(
+            json.dumps({
+                "date": date,
+                "bot_id": "bot1",
+                "total_trades": 3,
+                "net_pnl": 120.0,
+                "per_strategy_summary": {
+                    "alpha": {
+                        "trades": 3,
+                        "win_count": 2,
+                        "loss_count": 1,
+                        "gross_pnl": 125.0,
+                        "net_pnl": 120.0,
+                        "win_rate": 0.67,
+                    },
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (raw_dir / "coordinator_action.jsonl").write_text(
+            json.dumps({"action": "tighten_stops", "rule": "heat_guard", "symbol": "BTCUSDT"}) + "\n",
+            encoding="utf-8",
+        )
 
         handlers._build_enriched_curated(date)
 
         # Check curated files were written (write_curated creates them)
         curated_dir = tmp_path / "data" / "curated" / date / "bot1"
         assert curated_dir.exists()
+        summary = json.loads((curated_dir / "summary.json").read_text(encoding="utf-8"))
+        assert "alpha" in summary["per_strategy_summary"]
+        coordinator = json.loads((curated_dir / "coordinator_impact.json").read_text(encoding="utf-8"))
+        assert coordinator["by_action"]["tighten_stops"] == 1
 
     def test_build_enriched_curated_skips_missing_raw(self, tmp_path):
         """No raw directory = graceful no-op."""

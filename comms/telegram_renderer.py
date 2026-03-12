@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from orchestrator.agent_preferences import WORKFLOW_ORDER
+from schemas.agent_preferences import AgentPreferencesView, AgentProvider, AgentWorkflow
 from schemas.notifications import (
     ControlPanelState,
     NotificationPayload,
@@ -51,6 +53,20 @@ _DAILY_REPORT_KEYBOARD = [
         {"text": "Approve Change", "callback_data": "cmd_approve_change"},
     ],
 ]
+
+_WORKFLOW_LABELS: dict[AgentWorkflow, str] = {
+    AgentWorkflow.DAILY_ANALYSIS: "Daily",
+    AgentWorkflow.WEEKLY_ANALYSIS: "Weekly",
+    AgentWorkflow.WFO: "WFO",
+    AgentWorkflow.TRIAGE: "Triage",
+}
+
+_PROVIDER_LABELS: dict[AgentProvider, str] = {
+    AgentProvider.CLAUDE_MAX: "Claude Max",
+    AgentProvider.CODEX_PRO: "Codex Pro",
+    AgentProvider.ZAI_CODING_PLAN: "Z.AI Coding",
+    AgentProvider.OPENROUTER: "OpenRouter",
+}
 
 
 class TelegramRenderer:
@@ -101,6 +117,17 @@ class TelegramRenderer:
         text = "\n".join(lines)
         return text, _CONTROL_PANEL_KEYBOARD
 
+    def render_agent_settings(
+        self,
+        view: AgentPreferencesView,
+        scope: AgentWorkflow | str | None = None,
+    ) -> tuple[str, list[list[dict]]]:
+        if scope is None:
+            return self._render_agent_settings_home(view)
+        if scope == "global":
+            return self._render_agent_settings_global(view)
+        return self._render_agent_settings_scope(view, scope)
+
     def render_alert(self, payload: NotificationPayload) -> str:
         priority = payload.priority
         if priority == NotificationPriority.CRITICAL:
@@ -147,6 +174,11 @@ class TelegramRenderer:
         lines: list[str] = []
         lines.append("\U0001f514 Suggestion Approval Request")
         lines.append(f"Bot: {_escape_md2(request.bot_id)}")
+        lines.append(f"Kind: {_escape_md2(request.change_kind.value)}")
+        if getattr(request, "risk_tier", None):
+            lines.append(f"Risk: {_escape_md2(request.risk_tier.value)}")
+        if getattr(request, "title", ""):
+            lines.append(f"Title: {_escape_md2(request.title)}")
         lines.append("")
 
         # Parameter changes
@@ -157,6 +189,15 @@ class TelegramRenderer:
                 current = pc.get("current", "?")
                 proposed = pc.get("proposed", "?")
                 lines.append(f"  {_escape_md2(name)}: {current} -> {proposed}")
+            lines.append("")
+        elif getattr(request, "planned_files", None):
+            lines.append("Planned Files:")
+            for file_path in request.planned_files:
+                lines.append(f"  {_escape_md2(file_path)}")
+            lines.append("")
+
+        if getattr(request, "summary", ""):
+            lines.append(_escape_md2(request.summary))
             lines.append("")
 
         # Backtest results
@@ -190,6 +231,16 @@ class TelegramRenderer:
             if bs.safety_notes:
                 for note in bs.safety_notes:
                     lines.append(f"  - {_escape_md2(note)}")
+
+        if getattr(request, "verification_commands", None):
+            lines.append("")
+            lines.append("Verification:")
+            for command in request.verification_commands:
+                lines.append(f"  {_escape_md2(command)}")
+
+        if getattr(request, "draft_pr", False):
+            lines.append("")
+            lines.append("PR mode: draft")
 
         text = _truncate("\n".join(lines))
 
@@ -289,3 +340,159 @@ class TelegramRenderer:
     def _render_generic(self, payload: NotificationPayload) -> str:
         text = f"{payload.title}\n\n{payload.body}"
         return _truncate(text)
+
+    def _render_agent_settings_home(
+        self, view: AgentPreferencesView
+    ) -> tuple[str, list[list[dict]]]:
+        lines = [
+            "\u2699\ufe0f Agent Settings",
+            "",
+            f"Global: {self._selection_label(view.default)}",
+            "",
+            "Effective by workflow:",
+        ]
+        for workflow in WORKFLOW_ORDER:
+            effective = view.effective.get(workflow)
+            if effective is None:
+                continue
+            override = view.overrides.get(workflow)
+            suffix = " (override)" if override is not None else ""
+            lines.append(
+                f"- {_WORKFLOW_LABELS[workflow]}: {self._selection_label(effective)}{suffix}"
+            )
+        lines.append("")
+        lines.append("Provider readiness:")
+        for provider_status in view.providers:
+            status = "ready" if provider_status.available else provider_status.reason or "unavailable"
+            lines.append(f"- {_PROVIDER_LABELS[provider_status.provider]}: {status}")
+
+        keyboard = [
+            [{"text": "Global", "callback_data": "agent_settings_scope_global"}],
+            [
+                {"text": "Daily", "callback_data": "agent_settings_scope_daily_analysis"},
+                {"text": "Weekly", "callback_data": "agent_settings_scope_weekly_analysis"},
+            ],
+            [
+                {"text": "WFO", "callback_data": "agent_settings_scope_wfo"},
+                {"text": "Triage", "callback_data": "agent_settings_scope_triage"},
+            ],
+        ]
+        return "\n".join(lines), keyboard
+
+    def _render_agent_settings_scope(
+        self,
+        view: AgentPreferencesView,
+        scope: AgentWorkflow,
+    ) -> tuple[str, list[list[dict]]]:
+        effective = view.effective[scope]
+        override = view.overrides.get(scope)
+        lines = [
+            f"\u2699\ufe0f Agent Settings - {_WORKFLOW_LABELS[scope]}",
+            "",
+            f"Effective: {self._selection_label(effective)}",
+            f"Override: {self._selection_label(override) if override is not None else 'Use global'}",
+            "",
+            "Choose provider:",
+        ]
+        for provider_status in view.providers:
+            prefix = "\u2705 " if effective.provider == provider_status.provider else ""
+            detail = "ready" if provider_status.available else provider_status.reason or "unavailable"
+            lines.append(
+                f"- {prefix}{_PROVIDER_LABELS[provider_status.provider]} ({detail})"
+            )
+
+        keyboard = [
+            [
+                {
+                    "text": self._provider_button_label(view, scope, AgentProvider.CLAUDE_MAX),
+                    "callback_data": "agent_settings_set_" + f"{scope.value}|{AgentProvider.CLAUDE_MAX.value}",
+                },
+                {
+                    "text": self._provider_button_label(view, scope, AgentProvider.CODEX_PRO),
+                    "callback_data": "agent_settings_set_" + f"{scope.value}|{AgentProvider.CODEX_PRO.value}",
+                },
+            ],
+            [
+                {
+                    "text": self._provider_button_label(view, scope, AgentProvider.ZAI_CODING_PLAN),
+                    "callback_data": "agent_settings_set_" + f"{scope.value}|{AgentProvider.ZAI_CODING_PLAN.value}",
+                },
+                {
+                    "text": self._provider_button_label(view, scope, AgentProvider.OPENROUTER),
+                    "callback_data": "agent_settings_set_" + f"{scope.value}|{AgentProvider.OPENROUTER.value}",
+                },
+            ],
+            [
+                {"text": "Use Global", "callback_data": f"agent_settings_clear_{scope.value}"},
+                {"text": "Back", "callback_data": "agent_settings_home"},
+            ],
+        ]
+        return "\n".join(lines), keyboard
+
+    def _render_agent_settings_global(
+        self, view: AgentPreferencesView
+    ) -> tuple[str, list[list[dict]]]:
+        lines = [
+            "\u2699\ufe0f Agent Settings - Global",
+            "",
+            f"Default: {self._selection_label(view.default)}",
+            "",
+            "Choose the provider used when a workflow has no override:",
+        ]
+        for provider_status in view.providers:
+            prefix = "\u2705 " if view.default.provider == provider_status.provider else ""
+            detail = "ready" if provider_status.available else provider_status.reason or "unavailable"
+            lines.append(f"- {prefix}{_PROVIDER_LABELS[provider_status.provider]} ({detail})")
+
+        keyboard = [
+            [
+                {
+                    "text": self._global_provider_button_label(view, AgentProvider.CLAUDE_MAX),
+                    "callback_data": "agent_settings_set_global|" + AgentProvider.CLAUDE_MAX.value,
+                },
+                {
+                    "text": self._global_provider_button_label(view, AgentProvider.CODEX_PRO),
+                    "callback_data": "agent_settings_set_global|" + AgentProvider.CODEX_PRO.value,
+                },
+            ],
+            [
+                {
+                    "text": self._global_provider_button_label(view, AgentProvider.ZAI_CODING_PLAN),
+                    "callback_data": "agent_settings_set_global|" + AgentProvider.ZAI_CODING_PLAN.value,
+                },
+                {
+                    "text": self._global_provider_button_label(view, AgentProvider.OPENROUTER),
+                    "callback_data": "agent_settings_set_global|" + AgentProvider.OPENROUTER.value,
+                },
+            ],
+            [
+                {"text": "Back", "callback_data": "agent_settings_home"},
+            ],
+        ]
+        return "\n".join(lines), keyboard
+
+    def _selection_label(self, selection) -> str:
+        if selection is None:
+            return "Use global"
+        provider_label = _PROVIDER_LABELS.get(selection.provider, selection.provider.value)
+        if selection.model:
+            return f"{provider_label} ({selection.model})"
+        return provider_label
+
+    def _provider_button_label(
+        self,
+        view: AgentPreferencesView,
+        scope: AgentWorkflow,
+        provider: AgentProvider,
+    ) -> str:
+        effective = view.effective[scope]
+        prefix = "\u2705 " if effective.provider == provider else ""
+        return f"{prefix}{_PROVIDER_LABELS[provider]}"
+
+    def _global_provider_button_label(
+        self,
+        view: AgentPreferencesView,
+        provider: AgentProvider,
+    ) -> str:
+        prefix = "\u2705 " if view.default.provider == provider else ""
+        return f"{prefix}{_PROVIDER_LABELS[provider]}"

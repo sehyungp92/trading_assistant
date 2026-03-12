@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+from schemas.autonomous_pipeline import FileChangeMode, ParameterDefinition, ParameterType
 from skills.file_change_generator import FileChangeGenerator
 
 
@@ -23,6 +23,18 @@ def _yaml_param(yaml_key: str = "kmp.quality_min") -> ParameterDefinition:
         file_path="config.yaml",
         yaml_key=yaml_key,
         current_value=0.6,
+        value_type="float",
+    )
+
+
+def _python_param(python_path: str = "BASE_RISK_PCT") -> ParameterDefinition:
+    return ParameterDefinition(
+        param_name="base_risk_pct",
+        bot_id="bot1",
+        param_type=ParameterType.PYTHON_CONSTANT,
+        file_path="risk.py",
+        python_path=python_path,
+        current_value=0.02,
         value_type="float",
     )
 
@@ -51,6 +63,11 @@ class TestFileChangeGenerator:
         assert "# Top comment" in change.new_content
         assert "# inline" in change.new_content
         assert "quality_min: 0.7" in change.new_content
+
+    def test_yaml_missing_key_raises(self, gen: FileChangeGenerator, tmp_path: Path):
+        (tmp_path / "config.yaml").write_text("kmp:\n  other: 5\n")
+        with pytest.raises(ValueError, match="YAML key not found"):
+            gen.generate_change(_yaml_param(), 0.7, tmp_path)
 
     def test_unsupported_param_type_raises(self, gen: FileChangeGenerator, tmp_path: Path):
         """Non-YAML param types are not supported."""
@@ -86,3 +103,38 @@ class TestFileChangeGenerator:
         change = gen.generate_change(_yaml_param(), 0.6, tmp_path)
         assert change.original_content == change.new_content
         assert change.diff_preview == ""
+
+    def test_python_constant_change(self, gen: FileChangeGenerator, tmp_path: Path):
+        (tmp_path / "risk.py").write_text("BASE_RISK_PCT = 0.02\nOTHER = 5\n")
+        change = gen.generate_change(_python_param(), 0.03, tmp_path)
+        assert change.change_mode == FileChangeMode.PYTHON_CONSTANT
+        assert "BASE_RISK_PCT = 0.03" in change.new_content
+        assert "OTHER = 5" in change.new_content
+
+    def test_unified_diff_change(self, gen: FileChangeGenerator, tmp_path: Path):
+        (tmp_path / "algo.py").write_text("VALUE = 1\nOTHER = 2\n")
+        patch = "\n".join([
+            "--- a/algo.py",
+            "+++ b/algo.py",
+            "@@ -1,2 +1,2 @@",
+            "-VALUE = 1",
+            "+VALUE = 2",
+            " OTHER = 2",
+        ])
+        change = gen.generate_patch_change("algo.py", patch, tmp_path)
+        assert change.change_mode == FileChangeMode.UNIFIED_DIFF
+        assert "VALUE = 2" in change.new_content
+        assert "VALUE = 1" not in change.new_content
+
+    def test_unified_diff_rejects_bad_context(self, gen: FileChangeGenerator, tmp_path: Path):
+        (tmp_path / "algo.py").write_text("VALUE = 1\nOTHER = 2\n")
+        patch = "\n".join([
+            "--- a/algo.py",
+            "+++ b/algo.py",
+            "@@ -1,2 +1,2 @@",
+            "-VALUE = 9",
+            "+VALUE = 2",
+            " OTHER = 2",
+        ])
+        with pytest.raises(ValueError):
+            gen.generate_patch_change("algo.py", patch, tmp_path)

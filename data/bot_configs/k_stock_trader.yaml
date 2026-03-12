@@ -1,6 +1,19 @@
 bot_id: k_stock_trader
 repo_url: git@github.com:user/k_stock_trader.git
 repo_dir: /repos/k_stock_trader
+default_branch: main
+allowed_edit_paths:
+  - strategy_kmp/config/*
+  - config/*
+  - tests/*
+  - docs/*
+  - README.md
+structural_context_paths:
+  - strategy_kmp/*
+  - config/*
+  - tests/*
+verification_commands:
+  - pytest tests -q
 strategies:
   - kmp
 parameters:

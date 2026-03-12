@@ -10,6 +10,12 @@ from schemas.agent_response import AgentPrediction
 from skills.prediction_tracker import PredictionTracker
 
 
+def _write_summary(curated, date: str, bot_id: str, **summary) -> None:
+    bot_dir = curated / date / bot_id
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+
 class TestPredictionTracker:
     def test_record_and_load(self, tmp_path):
         tracker = PredictionTracker(tmp_path)
@@ -46,11 +52,9 @@ class TestPredictionTracker:
             AgentPrediction(bot_id="bot1", metric="pnl", direction="improve", confidence=0.9),
         ])
 
-        # Create curated data with positive PnL
         curated = tmp_path / "curated"
-        bot_dir = curated / "2026-03-01" / "bot1"
-        bot_dir.mkdir(parents=True)
-        (bot_dir / "summary.json").write_text(json.dumps({"total_pnl": 500.0}))
+        _write_summary(curated, "2026-03-01", "bot1", total_pnl=100.0)
+        _write_summary(curated, "2026-03-08", "bot1", total_pnl=500.0)
 
         evaluation = tracker.evaluate_predictions("2026-03-01", curated)
         assert evaluation.total == 1
@@ -65,9 +69,8 @@ class TestPredictionTracker:
         ])
 
         curated = tmp_path / "curated"
-        bot_dir = curated / "2026-03-01" / "bot1"
-        bot_dir.mkdir(parents=True)
-        (bot_dir / "summary.json").write_text(json.dumps({"total_pnl": -200.0}))
+        _write_summary(curated, "2026-03-01", "bot1", total_pnl=100.0)
+        _write_summary(curated, "2026-03-08", "bot1", total_pnl=-200.0)
 
         evaluation = tracker.evaluate_predictions("2026-03-01", curated)
         assert evaluation.total == 1
@@ -96,10 +99,9 @@ class TestPredictionTracker:
         ])
 
         curated = tmp_path / "curated"
-        for bot_id, pnl in [("bot1", 100.0), ("bot2", 100.0)]:
-            d = curated / "2026-03-01" / bot_id
-            d.mkdir(parents=True)
-            (d / "summary.json").write_text(json.dumps({"total_pnl": pnl}))
+        for bot_id in ["bot1", "bot2"]:
+            _write_summary(curated, "2026-03-01", bot_id, total_pnl=100.0)
+            _write_summary(curated, "2026-03-08", bot_id, total_pnl=150.0)
 
         evaluation = tracker.evaluate_predictions("2026-03-01", curated)
         assert evaluation.total == 2
@@ -115,16 +117,26 @@ class TestPredictionTracker:
         ])
 
         curated = tmp_path / "curated"
-        d = curated / "2026-03-01" / "bot1"
-        d.mkdir(parents=True)
-        (d / "summary.json").write_text(json.dumps({
-            "total_pnl": 100.0,
-            "win_rate": -0.05,  # decline, not improve
-        }))
+        _write_summary(curated, "2026-03-01", "bot1", total_pnl=100.0, win_rate=0.60)
+        _write_summary(curated, "2026-03-08", "bot1", total_pnl=150.0, win_rate=0.55)
 
         evaluation = tracker.evaluate_predictions("2026-03-01", curated)
         assert evaluation.accuracy_by_metric.get("pnl") == 1.0
         assert evaluation.accuracy_by_metric.get("win_rate") == 0.0
+
+    def test_evaluation_uses_metric_change_not_absolute_level(self, tmp_path):
+        tracker = PredictionTracker(tmp_path)
+        tracker.record_predictions("2026-03-01", [
+            AgentPrediction(bot_id="bot1", metric="pnl", direction="decline", confidence=0.8),
+        ])
+
+        curated = tmp_path / "curated"
+        _write_summary(curated, "2026-03-01", "bot1", total_pnl=500.0)
+        _write_summary(curated, "2026-03-08", "bot1", total_pnl=300.0)
+
+        evaluation = tracker.evaluate_predictions("2026-03-01", curated)
+        assert evaluation.total == 1
+        assert evaluation.correct == 1
 
     def test_empty_predictions(self, tmp_path):
         tracker = PredictionTracker(tmp_path)

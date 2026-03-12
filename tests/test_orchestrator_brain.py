@@ -85,6 +85,8 @@ class TestOrchestratorBrain:
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
         assert actions[0].bot_id == "swing_trader"
+        assert actions[0].details["event_type"] == "coordinator_action"
+        assert actions[0].details["payload"]["action"] == "tighten_stops"
 
     def test_daily_snapshot_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
@@ -96,6 +98,7 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "daily_snapshot"
 
     def test_order_queued_for_daily(self, brain: OrchestratorBrain):
         event = {

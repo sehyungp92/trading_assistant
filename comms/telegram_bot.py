@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 
 from comms.base_channel import BaseChannel
+from comms.telegram_handlers import TelegramCallbackResponse
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +92,19 @@ class TelegramBotAdapter(BaseChannel):
             callback_data = query.data or ""
             try:
                 result = await self._callback_router.dispatch(callback_data)
-                answer = result or "Done"
+                response = self._normalize_callback_response(result)
+                answer = response.answer or (response.text if response.text else "Done")
                 await query.answer(text=answer[:200])
-                # Send result as a reply if non-trivial
-                if result:
+                if response.text:
                     try:
-                        await self.send_message(result)
+                        if response.edit_message and query.message is not None:
+                            await self.edit_message(
+                                query.message.message_id,
+                                response.text,
+                                keyboard=response.keyboard,
+                            )
+                        else:
+                            await self.send_message(response.text, keyboard=response.keyboard)
                     except Exception:
                         logger.warning("Failed to send callback result message")
             except Exception:
@@ -109,8 +117,9 @@ class TelegramBotAdapter(BaseChannel):
                 command = text.split()[0].lower()
                 try:
                     result = await self._callback_router.dispatch_slash(command)
-                    if result:
-                        await self.send_message(result)
+                    response = self._normalize_callback_response(result)
+                    if response.text:
+                        await self.send_message(response.text, keyboard=response.keyboard)
                 except Exception:
                     logger.exception("Slash command error for %s", command)
 
@@ -142,3 +151,12 @@ class TelegramBotAdapter(BaseChannel):
         msg_id = await self.send_message(text, keyboard=keyboard)
         await self.pin_message(msg_id)
         return msg_id
+
+    def _normalize_callback_response(
+        self, result: str | TelegramCallbackResponse | None
+    ) -> TelegramCallbackResponse:
+        if isinstance(result, TelegramCallbackResponse):
+            return result
+        if isinstance(result, str):
+            return TelegramCallbackResponse(text=result)
+        return TelegramCallbackResponse()

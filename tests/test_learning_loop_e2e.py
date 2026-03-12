@@ -242,6 +242,18 @@ Bot1 had a strong week. Win rate improved.
             "win_rate": 0.6,  # positive → improve (predicted decline ✗)
         }))
 
+        baseline_dir = curated_dir / "2026-03-01" / "bot1"
+        (baseline_dir / "summary.json").write_text(json.dumps({
+            "total_pnl": 100.0,
+            "win_rate": 0.60,
+        }))
+        target_dir = curated_dir / "2026-03-08" / "bot1"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "summary.json").write_text(json.dumps({
+            "total_pnl": 200.0,
+            "win_rate": 0.65,
+        }))
+
         evaluation = tracker.evaluate_predictions("2026-03-01", curated_dir)
         assert evaluation.total == 2
         assert evaluation.correct == 1

@@ -325,7 +325,7 @@ class DeploymentMonitor:
             suggestion_id=deployment_id,
             bot_id=record.bot_id,
             repo_dir=str(repo_dir),
-            branch_name=f"ta/rollback-{deployment_id[:8]}",
+            branch_name=f"codex/rollback-{deployment_id[:8]}",
             title=f"[trading-assistant] ROLLBACK: revert changes on {record.bot_id}",
             body=(
                 f"## Automated Rollback\n\n"

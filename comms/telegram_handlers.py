@@ -2,7 +2,8 @@
 """Telegram callback query router and slash command fallback."""
 from __future__ import annotations
 
-from typing import Callable, Awaitable
+from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 _SLASH_MAP: dict[str, str] = {
     "/daily": "cmd_daily",
@@ -19,20 +20,36 @@ _SLASH_MAP: dict[str, str] = {
 }
 
 
+@dataclass
+class TelegramCallbackResponse:
+    """Structured callback response for Telegram slash commands and buttons."""
+
+    text: str = ""
+    keyboard: list[list[dict]] | None = None
+    answer: str | None = None
+    edit_message: bool = False
+
+
 class TelegramCallbackRouter:
     """Routes callback queries and slash commands to handler functions."""
 
     def __init__(self) -> None:
-        self._handlers: dict[str, Callable[..., Awaitable[str | None]]] = {}
+        self._handlers: dict[str, Callable[..., Awaitable[str | TelegramCallbackResponse | None]]] = {}
 
     @property
-    def handlers(self) -> dict[str, Callable[..., Awaitable[str | None]]]:
+    def handlers(self) -> dict[str, Callable[..., Awaitable[str | TelegramCallbackResponse | None]]]:
         return self._handlers
 
-    def register(self, callback_data: str, handler: Callable[..., Awaitable[str | None]]) -> None:
+    def register(
+        self,
+        callback_data: str,
+        handler: Callable[..., Awaitable[str | TelegramCallbackResponse | None]],
+    ) -> None:
         self._handlers[callback_data] = handler
 
-    async def dispatch(self, callback_data: str, context: dict | None = None) -> str | None:
+    async def dispatch(
+        self, callback_data: str, context: dict | None = None
+    ) -> str | TelegramCallbackResponse | None:
         # Try exact match first
         handler = self._handlers.get(callback_data)
         if handler is not None:
@@ -47,7 +64,9 @@ class TelegramCallbackRouter:
                 return await handler(suffix)
         return None
 
-    async def dispatch_slash(self, command: str, context: dict | None = None) -> str | None:
+    async def dispatch_slash(
+        self, command: str, context: dict | None = None
+    ) -> str | TelegramCallbackResponse | None:
         if command == "/help":
             return self._build_help_text()
         callback_data = _SLASH_MAP.get(command)

@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ from schemas.notifications import (
 
 logger = logging.getLogger(__name__)
 
-# Minimum total trades across all bots to justify a full Claude analysis invocation.
+# Minimum total trades across all bots to justify a full agent-runtime invocation.
 # Days with fewer trades get a deterministic summary instead.
 _MIN_TRADES_FOR_ANALYSIS = 3
 
@@ -52,6 +53,11 @@ class Handlers:
         run_history_path: Path | None = None,
         suggestion_tracker: object | None = None,
         autonomous_pipeline: object | None = None,
+        approval_handler: object | None = None,
+        approval_tracker: object | None = None,
+        pr_builder: object | None = None,
+        config_registry: object | None = None,
+        repo_workspace_manager: object | None = None,
         deployment_monitor: object | None = None,
         threshold_learner: object | None = None,
         experiment_manager: object | None = None,
@@ -74,6 +80,11 @@ class Handlers:
         self._run_history_path = run_history_path or (self._runs_dir.parent / "data" / "run_history.jsonl")
         self._suggestion_tracker = suggestion_tracker
         self._autonomous_pipeline = autonomous_pipeline
+        self._approval_handler = approval_handler
+        self._approval_tracker = approval_tracker
+        self._pr_builder = pr_builder
+        self._config_registry = config_registry
+        self._repo_workspace_manager = repo_workspace_manager
         self._deployment_monitor = deployment_monitor
         self._threshold_learner = threshold_learner
         self._experiment_manager = experiment_manager
@@ -85,7 +96,10 @@ class Handlers:
         details = action.details or {}
         date = details.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         bots = details.get("bots", self._bots)
+        run_scope = details.get("run_scope", "")
         run_id = f"daily-{date}"
+        if run_scope:
+            run_id = f"{run_id}-{hashlib.sha256(run_scope.encode('utf-8')).hexdigest()[:8]}"
         start_time = datetime.now(timezone.utc)
         self._record_run(run_id, "daily_analysis", "running", started_at=start_time.isoformat())
 
@@ -134,7 +148,7 @@ class Handlers:
                     "data_completeness": checklist.data_completeness,
                 })
 
-            # Minimum-data threshold: skip Claude if insufficient data
+            # Minimum-data threshold: skip the agent runtime if insufficient data
             total_trades = self._count_daily_trades(date)
             if total_trades < _MIN_TRADES_FOR_ANALYSIS:
                 logger.info(
@@ -197,11 +211,12 @@ class Handlers:
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "daily_analysis",
             })
 
-            # Invoke Claude
+            # Invoke the configured agent runtime
             result = await self._agent_runner.invoke(
                 agent_type="daily_analysis",
                 prompt_package=package,
                 run_id=run_id,
+                allowed_tools=["Read", "Grep", "Glob"],
             )
 
             # Parse structured response
@@ -484,7 +499,7 @@ class Handlers:
             if allocation_results:
                 package.data.update({"allocation_analysis": allocation_results})
 
-            # Inject suggestion ID mapping so Claude can reference them in the report
+            # Inject suggestion ID mapping so the agent can reference them in the report
             if suggestion_ids:
                 package.metadata["suggestion_ids"] = suggestion_ids
 
@@ -628,11 +643,12 @@ class Handlers:
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "weekly_analysis",
             })
 
-            # Invoke Claude
+            # Invoke the configured agent runtime
             result = await self._agent_runner.invoke(
                 agent_type="weekly_analysis",
                 prompt_package=package,
                 run_id=run_id,
+                allowed_tools=["Read", "Grep", "Glob"],
             )
 
             # Parse structured response
@@ -724,8 +740,10 @@ class Handlers:
         """Run the WFO pipeline: runner -> report -> assemble -> invoke -> notify."""
         details = action.details or {}
         bot_id = details.get("bot_id", action.bot_id)
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        run_id = f"wfo-{bot_id}-{date}"
+        data_end = details.get("data_end", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        run_id = f"wfo-{bot_id}-{data_end}"
+        start_time = datetime.now(timezone.utc)
+        self._record_run(run_id, "wfo", "running", started_at=start_time.isoformat())
 
         try:
             self._event_stream.broadcast("handler_progress", {
@@ -756,7 +774,15 @@ class Handlers:
 
             # Load trades from curated data (filtered by date range)
             data_start = details.get("data_start", "")
-            data_end = details.get("data_end", date)
+            if not data_start:
+                required_span_days = (
+                    config.in_sample_days
+                    + config.out_of_sample_days
+                    + config.step_days * (config.min_folds - 1)
+                )
+                data_start = (
+                    datetime.strptime(data_end, "%Y-%m-%d") - timedelta(days=required_span_days)
+                ).strftime("%Y-%m-%d")
             trades, missed = self._load_trades_for_wfo(bot_id, date_start=data_start, date_end=data_end)
 
             # Run WFO pipeline
@@ -779,7 +805,7 @@ class Handlers:
             markdown = WFOReportBuilder().build_markdown(report)
             (output_dir / "wfo_report.md").write_text(markdown, encoding="utf-8")
 
-            # Assemble prompt for Claude review
+            # Assemble prompt for provider review
             assembler = WFOPromptAssembler(
                 bot_id=bot_id,
                 memory_dir=self._memory_dir,
@@ -788,15 +814,16 @@ class Handlers:
             package = assembler.assemble()
 
             self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "claude_invocation", "handler": "wfo",
+                "run_id": run_id, "stage": "agent_invocation", "handler": "wfo",
             })
 
-            # Invoke Claude
+            # Invoke the configured agent runtime
             result = await self._agent_runner.invoke(
                 agent_type="wfo",
                 prompt_package=package,
                 run_id=run_id,
                 max_turns=3,
+                allowed_tools=["Read", "Grep", "Glob"],
             )
 
             self._event_stream.broadcast("wfo_complete", {
@@ -819,6 +846,15 @@ class Handlers:
                 title=f"WFO {bot_id} — {report.recommendation.value.upper()}",
                 body=result.response[:2000] if result.success else markdown[:2000],
             )
+            finished_at = datetime.now(timezone.utc)
+            self._record_run(
+                run_id,
+                "wfo",
+                "completed",
+                started_at=start_time.isoformat(),
+                finished_at=finished_at.isoformat(),
+                duration_ms=int((finished_at - start_time).total_seconds() * 1000),
+            )
 
         except Exception as exc:
             logger.exception("WFO handler failed for %s", run_id)
@@ -826,6 +862,16 @@ class Handlers:
                 "bot_id": bot_id,
                 "error": str(exc),
             })
+            finished_at = datetime.now(timezone.utc)
+            self._record_run(
+                run_id,
+                "wfo",
+                "failed",
+                started_at=start_time.isoformat(),
+                finished_at=finished_at.isoformat(),
+                duration_ms=int((finished_at - start_time).total_seconds() * 1000),
+                error=str(exc),
+            )
 
     async def handle_triage(self, action: Action) -> None:
         """Run the triage pipeline: classify -> context -> assemble -> invoke -> notify."""
@@ -839,12 +885,12 @@ class Handlers:
                 "run_id": run_id, "stage": "started", "handler": "triage",
             })
 
+            from analysis.triage_response_parser import parse_triage_response
             from schemas.bug_triage import ErrorEvent, TriageOutcome
             from skills.run_bug_triage import TriageRunner
             from skills.triage_context_builder import TriageContextBuilder
             from analysis.triage_prompt_assembler import TriagePromptAssembler
 
-            # Build ErrorEvent from action details
             event = ErrorEvent(
                 bot_id=bot_id,
                 error_type=details.get("error_type", "Unknown"),
@@ -859,7 +905,6 @@ class Handlers:
                 "run_id": run_id, "stage": "classification", "handler": "triage",
             })
 
-            # Run triage pipeline
             triage_runner = TriageRunner(
                 source_root=self._source_root,
                 failure_log_path=self._failure_log_path,
@@ -873,7 +918,8 @@ class Handlers:
                 "outcome": triage_result.outcome.value,
             })
 
-            # Only invoke Claude for actionable outcomes
+            agent_response = ""
+            repair_proposal = None
             if triage_result.outcome in (TriageOutcome.KNOWN_FIX, TriageOutcome.NEEDS_INVESTIGATION):
                 self._event_stream.broadcast("handler_progress", {
                     "run_id": run_id, "stage": "context_build", "handler": "triage",
@@ -907,11 +953,34 @@ class Handlers:
                 )
 
                 if result.success:
+                    agent_response = result.response
+                    repair_proposal = parse_triage_response(result.response)
+
+            if triage_result.outcome == TriageOutcome.KNOWN_FIX:
+                handled = await self._handle_known_fix_triage(
+                    triage_result,
+                    repair_proposal,
+                    agent_response,
+                )
+                if not handled:
                     await self._notify(
                         notification_type="triage_result",
                         priority=self._severity_to_priority(triage_result.severity),
                         title=f"Triage [{triage_result.severity.value.upper()}] {bot_id}",
-                        body=result.response[:2000],
+                        body=(agent_response or triage_result.suggested_fix or event.message)[:2000],
+                    )
+            elif triage_result.outcome == TriageOutcome.NEEDS_INVESTIGATION:
+                handled = await self._handle_investigation_triage(
+                    triage_result,
+                    repair_proposal,
+                    agent_response,
+                )
+                if not handled:
+                    await self._notify(
+                        notification_type="triage_result",
+                        priority=self._severity_to_priority(triage_result.severity),
+                        title=f"Triage [{triage_result.severity.value.upper()}] {bot_id}",
+                        body=(agent_response or event.message)[:2000],
                     )
             elif triage_result.outcome == TriageOutcome.NEEDS_HUMAN:
                 await self._notify(
@@ -978,20 +1047,48 @@ class Handlers:
         # Route suggestion accept/reject to SuggestionTracker
         if self._suggestion_tracker and correction.target_id:
             if correction.correction_type == CorrectionType.SUGGESTION_ACCEPT:
-                self._suggestion_tracker.implement(correction.target_id)
-                self._event_stream.broadcast("suggestion_accepted", {
-                    "suggestion_id": correction.target_id,
-                })
-                # Link hypothesis lifecycle
-                self._update_hypothesis_from_feedback(
-                    correction.target_id, accepted=True,
-                )
+                accepted = False
+                if self._approval_tracker and self._approval_handler:
+                    pending = self._approval_tracker.find_pending_for_suggestion(
+                        correction.target_id,
+                    )
+                    if pending is not None:
+                        await self._approval_handler.handle_approve(pending.request_id)
+                        updated = self._approval_tracker.get_by_id(pending.request_id)
+                        accepted = (
+                            updated is not None
+                            and updated.status.value == "APPROVED"
+                        )
+                if not accepted and not (
+                    self._approval_tracker
+                    and self._approval_tracker.find_pending_for_suggestion(correction.target_id)
+                ):
+                    self._suggestion_tracker.implement(correction.target_id)
+                    accepted = True
+                if accepted:
+                    self._event_stream.broadcast("suggestion_accepted", {
+                        "suggestion_id": correction.target_id,
+                    })
+                    self._update_hypothesis_from_feedback(
+                        correction.target_id, accepted=True,
+                    )
             elif correction.correction_type == CorrectionType.SUGGESTION_REJECT:
-                self._suggestion_tracker.reject(correction.target_id, text[:200])
+                routed = False
+                if self._approval_tracker and self._approval_handler:
+                    pending = self._approval_tracker.find_pending_for_suggestion(
+                        correction.target_id,
+                    )
+                    if pending is not None:
+                        await self._approval_handler.handle_reject(
+                            pending.request_id,
+                            reason=text[:200],
+                        )
+                        routed = True
+                if not routed:
+                    self._suggestion_tracker.reject(correction.target_id, text[:200])
                 self._event_stream.broadcast("suggestion_rejected", {
                     "suggestion_id": correction.target_id,
                 })
-                # Link hypothesis lifecycle
                 self._update_hypothesis_from_feedback(
                     correction.target_id, accepted=False,
                 )
@@ -1002,6 +1099,223 @@ class Handlers:
             title="Feedback recorded",
             body=f"Correction type: {correction.correction_type.value}",
         )
+
+    async def _handle_known_fix_triage(
+        self,
+        triage_result,
+        repair_proposal,
+        agent_response: str,
+    ) -> bool:
+        if (
+            repair_proposal is None
+            or self._approval_tracker is None
+            or self._config_registry is None
+        ):
+            return False
+
+        from schemas.autonomous_pipeline import ApprovalRequest, ChangeKind, RepoRiskTier
+        from skills.repo_change_guard import RepoChangeGuard
+
+        profile = self._config_registry.get_profile(triage_result.error_event.bot_id)
+        if profile is None:
+            return False
+
+        file_changes = list(repair_proposal.file_changes)
+        planned_files = repair_proposal.candidate_files or [
+            file_change.file_path for file_change in file_changes
+        ]
+        if not planned_files and not (repair_proposal.fix_plan or agent_response):
+            return False
+
+        guard = RepoChangeGuard()
+        blocked_paths = guard.blocked_paths(profile, planned_files) if planned_files else []
+        if blocked_paths:
+            await self._notify(
+                notification_type="triage_result",
+                priority=self._severity_to_priority(triage_result.severity),
+                title=f"Triage [{triage_result.severity.value.upper()}] {triage_result.error_event.bot_id}",
+                body=(
+                    "Blocked bug-fix proposal outside allowed_edit_paths: "
+                    f"{', '.join(blocked_paths)}"
+                )[:2000],
+            )
+            return True
+        risk_tier = RepoRiskTier.REQUIRES_APPROVAL
+        if planned_files:
+            permission_result = guard.check_paths(profile, planned_files)
+            risk_tier = self._permission_tier_to_risk(permission_result.tier)
+
+        import hashlib
+
+        request_id = hashlib.sha256(
+            (
+                f"{triage_result.error_event.bot_id}:{triage_result.error_event.error_type}:"
+                f"{triage_result.error_event.message}:{'|'.join(planned_files)}"
+            ).encode(),
+        ).hexdigest()[:12]
+
+        request = self._approval_tracker.get_by_id(request_id)
+        if request is None:
+            request = ApprovalRequest(
+                request_id=request_id,
+                suggestion_id=request_id,
+                bot_id=triage_result.error_event.bot_id,
+                change_kind=ChangeKind.BUG_FIX,
+                title=repair_proposal.issue_title or f"Fix {triage_result.error_event.error_type}",
+                summary=repair_proposal.fix_plan or triage_result.error_event.message,
+                file_changes=file_changes,
+                planned_files=planned_files,
+                verification_commands=profile.verification_commands,
+                risk_tier=risk_tier,
+                draft_pr=risk_tier == RepoRiskTier.AUTO,
+                implementation_notes=repair_proposal.risk_notes,
+            )
+            self._approval_tracker.create_request(request)
+        elif request.pr_url:
+            triage_result.pr_url = request.pr_url
+            self._record_triage_followup(triage_result)
+            await self._notify(
+                notification_type="triage_result",
+                priority=self._severity_to_priority(triage_result.severity),
+                title=f"Triage [{triage_result.severity.value.upper()}] {request.bot_id}",
+                body=(
+                    f"Existing bug-fix PR: {request.pr_url}\n\n"
+                    f"{(repair_proposal.fix_plan or agent_response or triage_result.error_event.message)[:1700]}"
+                ),
+            )
+            return True
+
+        self._event_stream.broadcast("triage_bug_fix_request_created", {
+            "request_id": request.request_id,
+            "bot_id": request.bot_id,
+            "risk_tier": request.risk_tier.value,
+            "planned_files": request.planned_files,
+        })
+
+        if request.risk_tier == RepoRiskTier.AUTO and self._approval_handler is not None:
+            approval_message = await self._approval_handler.handle_approve(request.request_id)
+            updated = self._approval_tracker.get_by_id(request.request_id)
+            if updated and updated.pr_url:
+                triage_result.pr_url = updated.pr_url
+                self._record_triage_followup(triage_result)
+            auto_body = approval_message
+            if updated and updated.pr_url:
+                auto_body = repair_proposal.fix_plan or agent_response or approval_message
+            await self._notify(
+                notification_type="triage_result",
+                priority=self._severity_to_priority(triage_result.severity),
+                title=f"Triage [{triage_result.severity.value.upper()}] {request.bot_id}",
+                body=auto_body[:2000],
+            )
+            return True
+
+        await self._notify(
+            notification_type="triage_result",
+            priority=self._severity_to_priority(triage_result.severity),
+            title=f"Triage [{triage_result.severity.value.upper()}] {request.bot_id}",
+            body=(
+                f"Created {request.risk_tier.value} bug-fix request `{request.request_id}` "
+                f"for {', '.join(planned_files)}.\n\n"
+                f"{(repair_proposal.fix_plan or agent_response)[:1600]}"
+            ),
+        )
+        return True
+
+    async def _handle_investigation_triage(
+        self,
+        triage_result,
+        repair_proposal,
+        agent_response: str,
+    ) -> bool:
+        if repair_proposal is None or self._pr_builder is None or self._config_registry is None:
+            return False
+
+        from schemas.autonomous_pipeline import GitHubIssueRequest
+
+        profile = self._config_registry.get_profile(triage_result.error_event.bot_id)
+        if profile is None:
+            return False
+
+        repo_task = None
+        repo_dir = None
+        try:
+            if self._repo_workspace_manager is not None:
+                repo_task = self._repo_workspace_manager.prepare_workspace(
+                    profile,
+                    f"triage-issue-{triage_result.error_event.bot_id}-{triage_result.timestamp.strftime('%Y%m%d%H%M%S')}",
+                )
+                repo_dir = Path(repo_task.worktree_dir)
+            elif profile.repo_dir:
+                repo_dir = Path(profile.repo_dir)
+            if repo_dir is None:
+                return False
+
+            category = triage_result.error_event.category.value if triage_result.error_event.category else "unknown"
+            dedupe_key = (
+                f"{triage_result.error_event.bot_id}:{triage_result.error_event.error_type}:"
+                f"{triage_result.error_event.message[:80]}"
+            )
+            issue_request = GitHubIssueRequest(
+                bot_id=triage_result.error_event.bot_id,
+                title=repair_proposal.issue_title or f"Investigate {triage_result.error_event.error_type}",
+                body=repair_proposal.issue_body or agent_response or triage_result.error_event.message,
+                repo_dir=str(repo_dir),
+                labels=[
+                    "trading-assistant",
+                    f"severity/{triage_result.severity.value}",
+                    f"category/{category}",
+                ],
+                dedupe_key=dedupe_key,
+                repo_task=repo_task,
+            )
+            result = await self._pr_builder.create_issue(issue_request)
+        finally:
+            if repo_task and self._repo_workspace_manager is not None:
+                try:
+                    self._repo_workspace_manager.cleanup(repo_task)
+                except Exception:
+                    logger.warning("Failed to clean up triage issue workspace %s", repo_task.task_id)
+
+        issue_url = result.issue_url or result.existing_issue_url
+        if not result.success or not issue_url:
+            return False
+
+        triage_result.github_issue_url = issue_url
+        self._record_triage_followup(triage_result)
+        self._event_stream.broadcast("triage_issue_created", {
+            "bot_id": triage_result.error_event.bot_id,
+            "issue_url": issue_url,
+            "existing_issue_url": result.existing_issue_url or "",
+        })
+        await self._notify(
+            notification_type="triage_result",
+            priority=self._severity_to_priority(triage_result.severity),
+            title=f"Triage [{triage_result.severity.value.upper()}] {triage_result.error_event.bot_id}",
+            body=(
+                f"Investigation issue: {issue_url}\n\n"
+                f"{(repair_proposal.fix_plan or agent_response or triage_result.error_event.message)[:1700]}"
+            ),
+        )
+        return True
+
+    def _record_triage_followup(self, triage_result) -> None:
+        try:
+            from skills.failure_log import FailureLog
+
+            FailureLog(self._failure_log_path).record_triage(triage_result)
+        except Exception:
+            logger.warning("Failed to append triage follow-up", exc_info=True)
+
+    @staticmethod
+    def _permission_tier_to_risk(permission_tier) -> str:
+        from schemas.autonomous_pipeline import RepoRiskTier
+        from schemas.permissions import PermissionTier
+
+        if permission_tier == PermissionTier.AUTO:
+            return RepoRiskTier.AUTO
+        if permission_tier == PermissionTier.REQUIRES_DOUBLE_APPROVAL:
+            return RepoRiskTier.REQUIRES_DOUBLE_APPROVAL
+        return RepoRiskTier.REQUIRES_APPROVAL
 
     def _record_allocation_change(self, correction, details: dict) -> None:
         """Persist an approved allocation change via AllocationTracker."""
@@ -1101,14 +1415,7 @@ class Handlers:
                 cat = category_map.get(raw_cat, PatternCategory.ENTRY_SIGNAL)
                 target_bots = [b for b in bots if b != proposal.bot_id]
 
-                # Find linked suggestion_id for this bot from suggestion_ids mapping
-                linked_sid = ""
-                if suggestion_ids:
-                    for sid, stitle in suggestion_ids.items():
-                        # Link if the suggestion title is similar to the proposal
-                        if stitle and proposal.title and stitle.lower() in proposal.title.lower():
-                            linked_sid = sid
-                            break
+                linked_sid = proposal.linked_suggestion_id or ""
 
                 entry = PatternEntry(
                     title=proposal.title,
@@ -1297,7 +1604,7 @@ class Handlers:
     def _record_agent_suggestions(
         self, validation_result, run_id: str, parsed=None,
     ) -> dict[str, str]:
-        """Record Claude's approved suggestions from validation into SuggestionTracker.
+        """Record approved suggestions from validation into SuggestionTracker.
 
         Maps AgentSuggestion → SuggestionRecord with deterministic IDs and hypothesis linking.
         Only approved (not blocked) suggestions are recorded.
@@ -1312,12 +1619,31 @@ class Handlers:
         import hashlib
         from schemas.suggestion_tracking import SuggestionRecord
 
-        # Build hypothesis_id map from structural proposals
-        hypothesis_map: dict[str, str] = {}
+        # Build structural proposal lookup by explicit linked suggestion id.
+        structural_context_map: dict[str, dict] = {}
+        fallback_context_by_bot: dict[str, list[dict]] = {}
         if parsed and parsed.structural_proposals:
             for proposal in parsed.structural_proposals:
-                if proposal.hypothesis_id and proposal.bot_id:
-                    hypothesis_map[proposal.bot_id] = proposal.hypothesis_id
+                context = {
+                    "notes": proposal.description,
+                    "file_changes": [
+                        fc.model_dump(mode="json")
+                        for fc in getattr(proposal, "file_changes", [])
+                    ],
+                    "verification_commands": list(
+                        getattr(proposal, "verification_commands", []) or []
+                    ),
+                    "hypothesis_id": proposal.hypothesis_id,
+                }
+                if proposal.linked_suggestion_id:
+                    structural_context_map[proposal.linked_suggestion_id] = context
+                    continue
+                fallback_context_by_bot.setdefault(proposal.bot_id or "", []).append(context)
+
+        approved_counts_by_bot: dict[str, int] = {}
+        for suggestion in validation_result.approved_suggestions:
+            bot_id = suggestion.bot_id or ""
+            approved_counts_by_bot[bot_id] = approved_counts_by_bot.get(bot_id, 0) + 1
 
         id_map: dict[str, str] = {}
         for idx, suggestion in enumerate(validation_result.approved_suggestions):
@@ -1325,9 +1651,9 @@ class Handlers:
             bot_id = suggestion.bot_id or ""
             category = suggestion.category or "parameter"
 
-            # Deterministic ID: SHA256(run_id + index + title)[:12]
             raw = f"{run_id}:agent:{idx}:{title}"
-            suggestion_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
+            existing_id = getattr(suggestion, "suggestion_id", "")
+            suggestion_id = existing_id if isinstance(existing_id, str) and existing_id else hashlib.sha256(raw.encode()).hexdigest()[:12]
 
             # Map category to tier using shared mapping
             from schemas.agent_response import CATEGORY_TO_TIER
@@ -1335,6 +1661,13 @@ class Handlers:
             tier = CATEGORY_TO_TIER.get(category, "parameter")
 
             confidence = float(getattr(suggestion, "confidence", 0.0) or 0.0)
+            structural_context = structural_context_map.get(suggestion_id)
+            if structural_context is None:
+                fallback_contexts = fallback_context_by_bot.get(bot_id, [])
+                # Preserve precise explicit links, but still allow the legacy
+                # one-suggestion/one-proposal hypothesis mapping for same-bot runs.
+                if approved_counts_by_bot.get(bot_id, 0) == 1 and len(fallback_contexts) == 1:
+                    structural_context = fallback_contexts[0]
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -1344,7 +1677,12 @@ class Handlers:
                 source_report_id=run_id,
                 description=suggestion.evidence_summary or "",
                 confidence=confidence,
-                hypothesis_id=hypothesis_map.get(bot_id),
+                hypothesis_id=(
+                    structural_context.get("hypothesis_id")
+                    if structural_context is not None
+                    else None
+                ),
+                implementation_context=structural_context,
             )
 
             recorded = self._suggestion_tracker.record(record)
@@ -1382,6 +1720,7 @@ class Handlers:
             entry = {
                 "run_id": run_id,
                 "agent_type": agent_type,
+                "handler": agent_type,
                 "status": status,
                 "started_at": started_at,
                 "finished_at": finished_at,
@@ -1762,18 +2101,17 @@ class Handlers:
 
             kwargs: dict = {}
             for event_type, param_name in enriched_types.items():
-                raw_file = bot_raw / f"{event_type}.jsonl"
-                if raw_file.exists():
-                    events: list[dict] = []
-                    for line in raw_file.read_text(encoding="utf-8").splitlines():
-                        line = line.strip()
-                        if line:
-                            try:
-                                events.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                continue
-                    if events:
-                        kwargs[param_name] = events
+                events = self._load_raw_json_records(bot_raw, event_type)
+                if events:
+                    kwargs[param_name] = events
+
+            daily_snapshots = self._load_raw_json_records(bot_raw, "daily_snapshot")
+            if daily_snapshots:
+                kwargs["daily_snapshot"] = daily_snapshots[-1]
+
+            coordinator_events = self._load_raw_json_records(bot_raw, "coordinator_action")
+            if coordinator_events:
+                kwargs["coordination_events"] = coordinator_events
 
             if kwargs:
                 try:
@@ -1790,6 +2128,36 @@ class Handlers:
                         "Failed to build enriched curated for %s/%s", date, bot_id,
                         exc_info=True,
                     )
+
+    def _load_raw_json_records(self, bot_raw: Path, event_type: str) -> list[dict]:
+        """Load JSON/JSONL raw event records, skipping malformed lines."""
+        records: list[dict] = []
+        candidate_paths = [
+            bot_raw / f"{event_type}.jsonl",
+            bot_raw / f"{event_type}.json",
+        ]
+        for path in candidate_paths:
+            if not path.exists():
+                continue
+            if path.suffix == ".json":
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    records.append(data)
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(data, dict):
+                    records.append(data)
+        return records
 
     def _get_latest_heartbeat_time(self, bot_id: str) -> datetime | None:
         """Get the latest heartbeat timestamp for a bot from heartbeat files."""

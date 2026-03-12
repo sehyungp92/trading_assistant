@@ -1,4 +1,4 @@
-"""Prompt assembler — builds the context package for the daily analysis Claude invocation.
+"""Prompt assembler — builds the context package for the daily analysis runtime invocation.
 
 Follows the prompt structure from roadmap section 2.4:
   SYSTEM PROMPT: policies + corrections + patterns

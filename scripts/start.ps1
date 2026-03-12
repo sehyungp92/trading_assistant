@@ -1,119 +1,104 @@
-# start.ps1 — Start the trading assistant orchestrator as a hidden background process.
-# Features: log rotation, health check, watchdog with auto-restart.
+# Start the trading assistant orchestrator as a supervised hidden background process.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 
 $ErrorActionPreference = "Stop"
 
-# Resolve project root (parent of scripts/)
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$CommonScript = Join-Path $ProjectRoot "scripts\start-common.ps1"
+
+if (-not (Test-Path $CommonScript)) {
+    throw "Missing shared startup helpers at $CommonScript"
+}
+
+. $CommonScript
 Set-Location $ProjectRoot
 
-# Activate virtual environment
-$VenvActivate = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
-if (Test-Path $VenvActivate) {
-    & $VenvActivate
-} else {
-    Write-Warning "No .venv found at $VenvActivate — using system Python"
+$LogDir = Join-Path $ProjectRoot "logs"
+$RunDir = Join-Path $ProjectRoot "run"
+$LogFile = Join-Path $LogDir "orchestrator.log"
+$ErrFile = Join-Path $LogDir "orchestrator.err.log"
+$PidFile = Join-Path $RunDir "orchestrator.pid"
+$LockFile = Join-Path $RunDir "orchestrator.supervisor.lock"
+
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+
+$SupervisorLock = Enter-OrchestratorSupervisorLock -LockFile $LockFile
+if (-not $SupervisorLock) {
+    Write-Host "Trading assistant supervisor already running."
+    return
 }
 
-# Check if already running
-$Existing = Get-Process -Name "pythonw" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*uvicorn orchestrator.app*" }
-if ($Existing) {
-    Write-Host "Trading assistant already running (PID $($Existing.Id))"
-    exit 0
-}
-
-# --- Log rotation ---
-function Rotate-LogFile {
-    param([string]$LogPath, [int]$MaxSizeMB = 10, [int]$MaxFiles = 5)
-    if (-not (Test-Path $LogPath)) { return }
-    $file = Get-Item $LogPath
-    if ($file.Length -lt ($MaxSizeMB * 1MB)) { return }
-
-    # Shift existing rotated files: .4 -> .5 (delete), .3 -> .4, etc.
-    for ($i = $MaxFiles; $i -ge 1; $i--) {
-        $src = "$LogPath.$i"
-        if ($i -eq $MaxFiles) {
-            if (Test-Path $src) { Remove-Item $src -Force }
-        } else {
-            $dst = "$LogPath.$($i + 1)"
-            if (Test-Path $src) { Rename-Item $src $dst -Force }
-        }
-    }
-    Rename-Item $LogPath "$LogPath.1" -Force
-    Write-Host "Rotated $LogPath (was $([math]::Round($file.Length / 1MB, 1)) MB)"
-}
-
-$LogFile = Join-Path $ProjectRoot "logs\orchestrator.log"
-$ErrFile = "$LogFile.err"
-$LogDir = Split-Path $LogFile
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-
-Rotate-LogFile -LogPath $LogFile
-Rotate-LogFile -LogPath $ErrFile
-
-# --- Health check function ---
-function Wait-ForHealth {
-    param([int]$TimeoutSeconds = 30)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-            if ($response.StatusCode -eq 200) {
-                Write-Host "Health check passed"
-                return $true
-            }
-        } catch {
-            # Not ready yet
-        }
-        Start-Sleep -Seconds 2
-    }
-    return $false
-}
-
-# --- Watchdog loop ---
-$MaxRestarts = 5
-$RestartCount = 0
-
-while ($RestartCount -lt $MaxRestarts) {
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-    if ($RestartCount -gt 0) {
-        Write-Host "[$timestamp] Restart attempt $RestartCount/$MaxRestarts..."
-        Start-Sleep -Seconds 10
+try {
+    $Pythonw = Resolve-OrchestratorPythonw -ProjectRoot $ProjectRoot
+    if (-not $Pythonw) {
+        $message = "No usable pythonw interpreter found. Checked .venv, venv, then PATH."
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $line = "[$timestamp] ERROR: $message"
+        Add-Content -Path $ErrFile -Value $line -Encoding ASCII
+        throw $message
     }
 
-    # Start as hidden background process
-    $proc = Start-Process -WindowStyle Hidden -FilePath "pythonw" -ArgumentList @(
+    if (Test-OrchestratorAlreadyRunning -PidFile $PidFile) {
+        Write-Host "Trading assistant already running and healthy."
+        return
+    }
+
+    $Arguments = @(
         "-m", "uvicorn", "orchestrator.app:app",
         "--host", "127.0.0.1",
         "--port", "8000"
-    ) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $LogFile -RedirectStandardError $ErrFile -PassThru
+    )
 
-    Write-Host "[$timestamp] Started trading assistant (PID $($proc.Id)). Log: $LogFile"
+    $RestartDelaySeconds = 5
+    $MaxRestartDelaySeconds = 60
 
-    # Wait for health
-    $healthy = Wait-ForHealth -TimeoutSeconds 30
-    if (-not $healthy) {
-        Write-Host "[$timestamp] ERROR: Health check failed after 30s"
-        if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    while ($true) {
+        Rotate-OrchestratorLog -LogPath $LogFile
+        Rotate-OrchestratorLog -LogPath $ErrFile
+
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $proc = Start-Process `
+            -WindowStyle Hidden `
+            -FilePath $Pythonw `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $ProjectRoot `
+            -RedirectStandardOutput $LogFile `
+            -RedirectStandardError $ErrFile `
+            -PassThru
+
+        Set-Content -Path $PidFile -Value $proc.Id -Encoding ASCII
+        Write-Host "[$timestamp] Started trading assistant supervisor child (PID $($proc.Id)) using $Pythonw"
+
+        if (-not (Wait-OrchestratorHealthy -TimeoutSeconds 60)) {
+            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Write-Host "[$timestamp] Health check failed. Restarting in $RestartDelaySeconds second(s)."
+            if (-not $proc.HasExited) {
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds $RestartDelaySeconds
+            $RestartDelaySeconds = [Math]::Min($RestartDelaySeconds * 2, $MaxRestartDelaySeconds)
+            continue
         }
-        $RestartCount++
-        continue
+
+        $RestartDelaySeconds = 5
+        Wait-Process -Id $proc.Id
+
+        $exitCode = 0
+        try {
+            $proc.Refresh()
+            $exitCode = $proc.ExitCode
+        } catch {
+        }
+
+        Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Write-Host "[$timestamp] Trading assistant exited with code $exitCode. Restarting in $RestartDelaySeconds second(s)."
+        Start-Sleep -Seconds $RestartDelaySeconds
+        $RestartDelaySeconds = [Math]::Min($RestartDelaySeconds * 2, $MaxRestartDelaySeconds)
     }
-
-    # Monitor — wait for process to exit
-    $proc.WaitForExit()
-    $exitCode = $proc.ExitCode
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] Process exited with code $exitCode"
-    $RestartCount++
-}
-
-if ($RestartCount -ge $MaxRestarts) {
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$timestamp] ERROR: Max restarts ($MaxRestarts) reached. Giving up."
-    exit 1
+} finally {
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    Exit-OrchestratorSupervisorLock -LockHandle $SupervisorLock -LockFile $LockFile
 }

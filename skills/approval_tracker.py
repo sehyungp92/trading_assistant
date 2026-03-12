@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus
+from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus, RepoRiskTier
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,14 @@ class ApprovalTracker:
             raise ValueError(f"Request {request_id} not found")
         if target.status != ApprovalStatus.PENDING:
             raise ValueError(f"Request {request_id} is {target.status.value}, not PENDING")
+        if (
+            target.risk_tier == RepoRiskTier.REQUIRES_DOUBLE_APPROVAL
+            and target.approval_count == 0
+        ):
+            target.approval_count = 1
+            self._save_all(requests)
+            return target
+        target.approval_count += 1
         target.status = ApprovalStatus.APPROVED
         target.resolved_at = datetime.now(timezone.utc)
         target.resolved_by = resolved_by
@@ -89,6 +97,21 @@ class ApprovalTracker:
     def get_pending(self) -> list[ApprovalRequest]:
         return [r for r in self._load_all() if r.status == ApprovalStatus.PENDING]
 
+    def find_pending_for_suggestion(self, suggestion_id: str) -> ApprovalRequest | None:
+        for request in self.get_pending():
+            if request.suggestion_id == suggestion_id:
+                return request
+        return None
+
+    def find_latest_for_suggestion(self, suggestion_id: str) -> ApprovalRequest | None:
+        matches = [
+            request for request in self._load_all()
+            if request.suggestion_id == suggestion_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda request: request.created_at)
+
     def get_approved_with_prs(self) -> list[ApprovalRequest]:
         """Return APPROVED requests that have a non-empty pr_url (for review monitoring)."""
         return [
@@ -107,6 +130,29 @@ class ApprovalTracker:
         for r in requests:
             if r.request_id == request_id:
                 r.pr_url = pr_url
+                break
+        self._save_all(requests)
+
+    def set_pr_result(
+        self,
+        request_id: str,
+        pr_url: str,
+        diff_summary: list[str] | None = None,
+    ) -> None:
+        requests = self._load_all()
+        for request in requests:
+            if request.request_id == request_id:
+                request.pr_url = pr_url
+                if diff_summary is not None:
+                    request.diff_summary = diff_summary
+                break
+        self._save_all(requests)
+
+    def set_issue_url(self, request_id: str, issue_url: str) -> None:
+        requests = self._load_all()
+        for request in requests:
+            if request.request_id == request_id:
+                request.issue_url = issue_url
                 break
         self._save_all(requests)
 

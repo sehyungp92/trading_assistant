@@ -2,6 +2,7 @@
 """Tests for ApprovalHandler."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,8 +14,10 @@ from schemas.autonomous_pipeline import (
     ApprovalStatus,
     BacktestComparison,
     BacktestContext,
+    ChangeKind,
     PreflightResult,
     PRResult,
+    RepoRiskTier,
 )
 from schemas.wfo_results import SimulationMetrics
 from skills.approval_handler import ApprovalHandler
@@ -22,6 +25,7 @@ from skills.approval_tracker import ApprovalTracker
 from skills.config_registry import ConfigRegistry
 from skills.file_change_generator import FileChangeGenerator
 from skills.github_pr import PRBuilder
+from skills.repo_workspace import RepoWorkspaceManager
 from skills.suggestion_tracker import SuggestionTracker
 
 
@@ -61,6 +65,14 @@ def _make_comparison() -> BacktestComparison:
         proposed=SimulationMetrics(sharpe_ratio=1.2, profit_factor=1.8, total_trades=25, win_count=17),
         passes_safety=True,
     )
+
+
+def _init_git_repo(repo_dir: Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
 
 
 @pytest.fixture
@@ -105,8 +117,14 @@ class TestApprovalHandler:
 
     @pytest.mark.asyncio
     async def test_approve_pr_failure_reverts(self, components):
-        handler, tracker, _, _ = components
+        handler, tracker, sug_tracker, _ = components
         _create_pending_request(tracker)
+        from schemas.suggestion_tracking import SuggestionRecord
+
+        sug_tracker.record(SuggestionRecord(
+            suggestion_id="s1", bot_id="test_bot",
+            title="test", tier="parameter", source_report_id="r1",
+        ))
         # Make PR builder fail
         handler._pr_builder = PRBuilder(dry_run=False)
         with patch.object(handler._pr_builder, "create_pr", new_callable=AsyncMock,
@@ -114,6 +132,8 @@ class TestApprovalHandler:
             result = await handler.handle_approve("req1")
         assert "failed" in result.lower()
         assert tracker.get_by_id("req1").status == ApprovalStatus.PENDING
+        s1 = [s for s in sug_tracker.load_all() if s.get("suggestion_id") == "s1"]
+        assert s1[0].get("status") == "proposed"
 
     @pytest.mark.asyncio
     async def test_approve_non_pending_returns_error(self, components):
@@ -188,6 +208,26 @@ class TestApprovalHandler:
         handler, _, _, _ = components
         result = await handler.handle_approve("nonexistent")
         assert "not found" in result
+
+    @pytest.mark.asyncio
+    async def test_double_approval_request_requires_two_passes(self, components):
+        handler, tracker, _, _ = components
+        req = ApprovalRequest(
+            request_id="req-double",
+            suggestion_id="s1",
+            bot_id="test_bot",
+            risk_tier=RepoRiskTier.REQUIRES_DOUBLE_APPROVAL,
+            param_changes=[{"param_name": "quality_min", "current": 0.6, "proposed": 0.7}],
+        )
+        tracker.create_request(req)
+        first = await handler.handle_approve("req-double")
+        assert "first approval recorded" in first.lower()
+        assert tracker.get_by_id("req-double").status == ApprovalStatus.PENDING
+        assert tracker.get_by_id("req-double").approval_count == 1
+
+        second = await handler.handle_approve("req-double")
+        assert "dry-run" in second.lower() or "pr created" in second.lower()
+        assert tracker.get_by_id("req-double").status == ApprovalStatus.APPROVED
 
 
 class TestApprovalCardEditing:
@@ -292,7 +332,7 @@ class TestApprovalHandlerDedup:
                           return_value=PRResult(
                               success=True,
                               existing_pr_url="https://github.com/x/y/pull/42",
-                              branch_name="ta/test",
+                              branch_name="codex/test",
                           )):
             result = await handler.handle_approve("req1")
         assert "Existing PR" in result
@@ -323,3 +363,128 @@ class TestApprovalHandlerDedup:
             result = await handler.handle_approve("req1")
         assert "preflight" in result.lower()
         assert approval_tracker.get_by_id("req1").status == ApprovalStatus.PENDING
+
+
+class TestApprovalHandlerWorkspace:
+    @pytest.mark.asyncio
+    async def test_workspace_cleanup_after_approve(self, tmp_path: Path):
+        registry = _setup_registry(tmp_path)
+        repo_dir = Path(registry.get_profile("test_bot").repo_dir)
+        _init_git_repo(repo_dir)
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        handler = ApprovalHandler(
+            approval_tracker=approval_tracker,
+            suggestion_tracker=SuggestionTracker(tmp_path / "findings"),
+            file_change_generator=FileChangeGenerator(),
+            pr_builder=PRBuilder(dry_run=True),
+            config_registry=registry,
+            repo_workspace_manager=RepoWorkspaceManager(
+                cache_root=tmp_path / "cache",
+                task_root=tmp_path / "repo_tasks",
+            ),
+        )
+        _create_pending_request(approval_tracker)
+
+        await handler.handle_approve("req1")
+        assert not (tmp_path / "repo_tasks" / "req1" / "worktree").exists()
+        assert (repo_dir / "config.yaml").read_text(encoding="utf-8").startswith("alpha:")
+
+    @pytest.mark.asyncio
+    async def test_structural_request_can_use_repo_task_runner(self, tmp_path: Path):
+        registry = _setup_registry(tmp_path)
+        profile = registry.get_profile("test_bot")
+        profile.structural_context_paths = ["config.yaml"]
+        repo_dir = Path(profile.repo_dir)
+        _init_git_repo(repo_dir)
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        repo_task_runner = MagicMock()
+
+        async def _invoke(agent_type, prompt_package, run_id, allowed_tools):
+            assert agent_type == "weekly_analysis"
+            assert "config.yaml" in prompt_package.data["repo_context"]["context_files"]
+            worktree_dir = Path(prompt_package.data["repo_context"]["worktree_dir"])
+            target = worktree_dir / "tests" / "test_structural.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("def test_structural():\n    assert True\n", encoding="utf-8")
+            return MagicMock(success=True, response="Implemented structural change")
+
+        repo_task_runner.invoke = AsyncMock(side_effect=_invoke)
+
+        handler = ApprovalHandler(
+            approval_tracker=approval_tracker,
+            suggestion_tracker=SuggestionTracker(tmp_path / "findings"),
+            file_change_generator=FileChangeGenerator(),
+            pr_builder=PRBuilder(dry_run=True),
+            config_registry=registry,
+            repo_workspace_manager=RepoWorkspaceManager(
+                cache_root=tmp_path / "cache",
+                task_root=tmp_path / "repo_tasks",
+            ),
+            repo_task_runner=repo_task_runner,
+        )
+        approval_tracker.create_request(ApprovalRequest(
+            request_id="req-struct",
+            suggestion_id="s-struct",
+            bot_id="test_bot",
+            change_kind=ChangeKind.STRUCTURAL_CHANGE,
+            planned_files=["tests/test_structural.py"],
+            implementation_notes="Add a regression test for the approved structural change.",
+        ))
+
+        result = await handler.handle_approve("req-struct")
+
+        assert "dry-run" in result.lower() or "pr created" in result.lower()
+        stored = approval_tracker.get_by_id("req-struct")
+        assert stored.status == ApprovalStatus.APPROVED
+        assert stored.diff_summary == ["tests/test_structural.py"]
+        repo_task_runner.invoke.assert_called_once()
+        assert not (repo_dir / "tests" / "test_structural.py").exists()
+
+    @pytest.mark.asyncio
+    async def test_repo_task_runner_retries_without_tool_allowlist(self, tmp_path: Path):
+        registry = _setup_registry(tmp_path)
+        repo_dir = Path(registry.get_profile("test_bot").repo_dir)
+        _init_git_repo(repo_dir)
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        repo_task_runner = MagicMock()
+
+        async def _invoke(agent_type, prompt_package, run_id, allowed_tools):
+            if allowed_tools is not None:
+                return MagicMock(success=False, error="unknown tool: Edit", response="")
+            worktree_dir = Path(prompt_package.data["repo_context"]["worktree_dir"])
+            target = worktree_dir / "tests" / "test_retry.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("def test_retry():\n    assert True\n", encoding="utf-8")
+            return MagicMock(success=True, response="Retried without allowlist")
+
+        repo_task_runner.invoke = AsyncMock(side_effect=_invoke)
+
+        handler = ApprovalHandler(
+            approval_tracker=approval_tracker,
+            suggestion_tracker=SuggestionTracker(tmp_path / "findings"),
+            file_change_generator=FileChangeGenerator(),
+            pr_builder=PRBuilder(dry_run=True),
+            config_registry=registry,
+            repo_workspace_manager=RepoWorkspaceManager(
+                cache_root=tmp_path / "cache",
+                task_root=tmp_path / "repo_tasks",
+            ),
+            repo_task_runner=repo_task_runner,
+        )
+        approval_tracker.create_request(ApprovalRequest(
+            request_id="req-retry",
+            suggestion_id="s-retry",
+            bot_id="test_bot",
+            change_kind=ChangeKind.STRUCTURAL_CHANGE,
+            planned_files=["tests/test_retry.py"],
+            implementation_notes="Add a retry regression test.",
+        ))
+
+        result = await handler.handle_approve("req-retry")
+
+        assert "dry-run" in result.lower() or "pr created" in result.lower()
+        assert repo_task_runner.invoke.await_count == 2
+        first_call = repo_task_runner.invoke.await_args_list[0]
+        second_call = repo_task_runner.invoke.await_args_list[1]
+        assert first_call.kwargs["allowed_tools"] is not None
+        assert second_call.kwargs["allowed_tools"] is None

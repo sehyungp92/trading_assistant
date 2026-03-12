@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus, PRResult
+from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus, ChangeKind, PRResult, RepoRiskTier
 from schemas.suggestion_tracking import SuggestionRecord
 from skills.approval_handler import ApprovalHandler
 from skills.approval_tracker import ApprovalTracker
@@ -193,6 +193,44 @@ class TestAutonomousIntegration:
         assert len(results) == 0
 
     @pytest.mark.asyncio
+    async def test_parameter_without_explicit_value_is_skipped(self, tmp_path: Path):
+        c = _setup_full(tmp_path)
+        c["suggestion_tracker"].record(SuggestionRecord(
+            suggestion_id="s1",
+            bot_id="test_bot",
+            title="Improve quality_min_threshold",
+            tier="parameter",
+            category="entry_signal",
+            source_report_id="r1",
+            confidence=0.8,
+        ))
+
+        results = await c["pipeline"].process_new_suggestions(["s1"])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_existing_request_skips_duplicate_processing(self, tmp_path: Path):
+        c = _setup_full(tmp_path)
+        c["suggestion_tracker"].record(SuggestionRecord(
+            suggestion_id="s1",
+            bot_id="test_bot",
+            title="Increase quality_min_threshold to 0.7",
+            tier="parameter",
+            category="entry_signal",
+            source_report_id="r1",
+            confidence=0.85,
+        ))
+        c["approval_tracker"].create_request(ApprovalRequest(
+            request_id="req-existing",
+            suggestion_id="s1",
+            bot_id="test_bot",
+            status=ApprovalStatus.APPROVED,
+        ))
+
+        results = await c["pipeline"].process_new_suggestions(["s1"], run_id="test")
+        assert results == []
+
+    @pytest.mark.asyncio
     async def test_safety_critical_param(self, tmp_path: Path):
         """Risk management suggestion uses tighter thresholds."""
         c = _setup_full(tmp_path)
@@ -295,3 +333,83 @@ class TestAutonomousIntegration:
         # Should not raise
         results = await c["pipeline"].process_new_suggestions(["s1"])
         assert len(results) == 0
+
+    @pytest.mark.asyncio
+    async def test_structural_suggestion_creates_request(self, tmp_path: Path):
+        c = _setup_full(tmp_path)
+        c["suggestion_tracker"].record(SuggestionRecord(
+            suggestion_id="s-struct",
+            bot_id="test_bot",
+            title="Add regression test for entry gate",
+            tier="hypothesis",
+            category="structural",
+            source_report_id="r1",
+            confidence=0.9,
+            implementation_context={
+                "file_changes": [
+                    {
+                        "file_path": "tests/test_entry_gate.py",
+                        "new_content": "def test_gate():\n    assert True\n",
+                    }
+                ],
+                "verification_commands": ["pytest tests -q"],
+            },
+        ))
+
+        results = await c["pipeline"].process_new_suggestions(["s-struct"])
+        assert len(results) == 1
+        request = results[0]
+        assert request.change_kind == ChangeKind.STRUCTURAL_CHANGE
+        assert request.file_changes[0].file_path == "tests/test_entry_gate.py"
+        assert request.risk_tier == RepoRiskTier.AUTO
+        assert request.draft_pr is True
+
+    @pytest.mark.asyncio
+    async def test_structural_suggestion_with_notes_only_still_creates_request(self, tmp_path: Path):
+        c = _setup_full(tmp_path)
+        c["suggestion_tracker"].record(SuggestionRecord(
+            suggestion_id="s-struct-notes",
+            bot_id="test_bot",
+            title="Refactor entry decision flow",
+            tier="hypothesis",
+            category="structural",
+            source_report_id="r1",
+            confidence=0.9,
+            implementation_context={
+                "notes": "Extract the decision logic into a shared helper and keep behavior unchanged.",
+                "verification_commands": ["pytest tests -q"],
+            },
+        ))
+
+        results = await c["pipeline"].process_new_suggestions(["s-struct-notes"])
+        assert len(results) == 1
+        request = results[0]
+        assert request.change_kind == ChangeKind.STRUCTURAL_CHANGE
+        assert request.file_changes == []
+        assert request.implementation_notes.startswith("Extract the decision logic")
+        assert request.risk_tier == RepoRiskTier.REQUIRES_APPROVAL
+
+    @pytest.mark.asyncio
+    async def test_structural_risky_path_requires_double_approval(self, tmp_path: Path):
+        c = _setup_full(tmp_path)
+        c["suggestion_tracker"].record(SuggestionRecord(
+            suggestion_id="s-risky",
+            bot_id="test_bot",
+            title="Adjust deployment secret handling",
+            tier="hypothesis",
+            category="structural",
+            source_report_id="r1",
+            confidence=0.9,
+            implementation_context={
+                "file_changes": [
+                    {
+                        "file_path": ".env.local",
+                        "new_content": "TOKEN=abc\n",
+                    }
+                ],
+            },
+        ))
+
+        results = await c["pipeline"].process_new_suggestions(["s-risky"])
+        assert len(results) == 1
+        assert results[0].risk_tier == RepoRiskTier.REQUIRES_DOUBLE_APPROVAL

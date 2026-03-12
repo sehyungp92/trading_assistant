@@ -1,166 +1,138 @@
-"""Tests for startup catch-up logic."""
+"""Tests for tracked startup catch-up planning."""
+
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from orchestrator.catchup import StartupCatchup
-from schemas.bot_config import BotConfig
+from orchestrator.scheduler import ScheduledJobClass, ScheduledJobSpec
+from orchestrator.scheduled_runs import ScheduledRunStore
+
+
+async def _noop_job(scheduled_for=None) -> None:
+    return None
 
 
 @pytest.fixture
-def history_path(tmp_path: Path) -> Path:
-    return tmp_path / "run_history.jsonl"
+async def run_store(tmp_path: Path):
+    store = ScheduledRunStore(str(tmp_path / "scheduled_runs.db"))
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        await store.close()
+
+
+def _daily_spec(scope_key: str = "global") -> ScheduledJobSpec:
+    return ScheduledJobSpec(
+        name=f"daily_analysis_{scope_key}",
+        job_key="daily_analysis",
+        trigger="cron",
+        job_class=ScheduledJobClass.STATEFUL,
+        execute=_noop_job,
+        scope_key=scope_key,
+        hour=6,
+        minute=0,
+        catchup_limit=7,
+    )
+
+
+def _weekly_spec() -> ScheduledJobSpec:
+    return ScheduledJobSpec(
+        name="weekly_analysis",
+        job_key="weekly_summary",
+        trigger="cron",
+        job_class=ScheduledJobClass.STATEFUL,
+        execute=_noop_job,
+        scope_key="global",
+        day_of_week="sun",
+        hour=8,
+        minute=0,
+        catchup_limit=4,
+    )
+
+
+def _morning_spec(scope_key: str = "global") -> ScheduledJobSpec:
+    return ScheduledJobSpec(
+        name=f"morning_scan_{scope_key}",
+        job_key="morning_scan",
+        trigger="cron",
+        job_class=ScheduledJobClass.COALESCED,
+        execute=_noop_job,
+        scope_key=scope_key,
+        hour=7,
+        minute=0,
+        catchup_limit=1,
+    )
+
+
+def _interval_spec() -> ScheduledJobSpec:
+    return ScheduledJobSpec(
+        name="relay_poll",
+        job_key="relay_poll",
+        trigger="interval",
+        job_class=ScheduledJobClass.INTERVAL,
+        execute=_noop_job,
+        seconds=300,
+    )
 
 
 class TestStartupCatchup:
-    def test_no_history_triggers_daily_catchup(self, history_path):
-        catchup = StartupCatchup(run_history_path=history_path)
-        dailies = catchup.needs_daily_catchup()
-        assert len(dailies) == 1
-        assert "date" in dailies[0]
+    @pytest.mark.asyncio
+    async def test_no_false_daily_catchup_after_completed_run(self, run_store: ScheduledRunStore):
+        spec = _daily_spec()
+        now = datetime(2026, 3, 5, 9, 0, tzinfo=timezone.utc)
+        await run_store.set_baseline(datetime(2026, 3, 5, 0, 0, tzinfo=timezone.utc))
+        await run_store.mark_completed(spec.job_key, spec.scope_key, datetime(2026, 3, 5, 6, 0, tzinfo=timezone.utc))
 
-    def test_recent_run_no_catchup(self, history_path):
-        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"daily-{yesterday}",
-            "handler": "daily_analysis",
-            "status": "completed",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-        }) + "\n")
+        catchup = StartupCatchup([spec], run_store)
+        assert await catchup.build_plan(now=now) == []
 
-        catchup = StartupCatchup(run_history_path=history_path)
-        assert catchup.needs_daily_catchup() == []
+    @pytest.mark.asyncio
+    async def test_no_false_weekly_catchup_after_completed_run(self, run_store: ScheduledRunStore):
+        spec = _weekly_spec()
+        now = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        await run_store.set_baseline(datetime(2026, 3, 8, 0, 0, tzinfo=timezone.utc))
+        await run_store.mark_completed(spec.job_key, spec.scope_key, datetime(2026, 3, 8, 8, 0, tzinfo=timezone.utc))
 
-    def test_old_run_triggers_catchup(self, history_path):
-        old_date = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"daily-{old_date}",
-            "handler": "daily_analysis",
-            "status": "completed",
-            "started_at": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
-        }) + "\n")
+        catchup = StartupCatchup([spec], run_store)
+        assert await catchup.build_plan(now=now) == []
 
-        catchup = StartupCatchup(run_history_path=history_path)
-        dailies = catchup.needs_daily_catchup()
-        # 3-day-old run means 2 missed days (day -2 and day -1)
-        assert len(dailies) == 2
+    @pytest.mark.asyncio
+    async def test_multi_timezone_stateful_jobs_replay_each_missed_occurrence(self, run_store: ScheduledRunStore):
+        specs = [_daily_spec("bots:bot_a"), _daily_spec("bots:bot_b")]
+        now = datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
+        await run_store.set_baseline(datetime(2026, 3, 3, 0, 0, tzinfo=timezone.utc))
+        await run_store.mark_completed("daily_analysis", "bots:bot_a", datetime(2026, 3, 3, 6, 0, tzinfo=timezone.utc))
+        await run_store.mark_completed("daily_analysis", "bots:bot_b", datetime(2026, 3, 3, 6, 0, tzinfo=timezone.utc))
 
-    def test_multi_tz_catchup(self, history_path):
-        configs = {
-            "btc_bot": BotConfig(bot_id="btc_bot"),
-            "k_stock": BotConfig(
-                bot_id="k_stock", timezone="Asia/Seoul",
-                market_close_local="15:30",
-            ),
+        catchup = StartupCatchup(specs, run_store)
+        plan = await catchup.build_plan(now=now)
+
+        assert len(plan) == 4
+        assert {(item.spec.scope_key, item.scheduled_for.isoformat()) for item in plan} == {
+            ("bots:bot_a", "2026-03-04T06:00:00+00:00"),
+            ("bots:bot_a", "2026-03-05T06:00:00+00:00"),
+            ("bots:bot_b", "2026-03-04T06:00:00+00:00"),
+            ("bots:bot_b", "2026-03-05T06:00:00+00:00"),
         }
-        catchup = StartupCatchup(
-            run_history_path=history_path,
-            bot_configs=configs,
-        )
-        dailies = catchup.needs_daily_catchup()
-        # Two timezone groups means potentially two catch-ups
-        assert len(dailies) >= 1
-        for d in dailies:
-            assert "date" in d
-            assert "bots" in d
 
-    def test_weekly_no_history(self, history_path):
-        catchup = StartupCatchup(run_history_path=history_path)
-        assert catchup.needs_weekly_catchup() is True
+    @pytest.mark.asyncio
+    async def test_coalesced_jobs_only_replay_latest_occurrence(self, run_store: ScheduledRunStore):
+        spec = _morning_spec()
+        now = datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
+        await run_store.set_baseline(datetime(2026, 3, 3, 0, 0, tzinfo=timezone.utc))
 
-    def test_weekly_recent_run(self, history_path):
-        # Simulate a weekly run this week
-        now = datetime.now(timezone.utc)
-        days_since_sunday = (now.weekday() + 1) % 7
-        this_sunday = (now - timedelta(days=days_since_sunday)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"weekly-{this_sunday}",
-            "handler": "weekly_analysis",
-            "status": "completed",
-            "started_at": now.isoformat(),
-        }) + "\n")
+        catchup = StartupCatchup([spec], run_store)
+        plan = await catchup.build_plan(now=now)
 
-        catchup = StartupCatchup(run_history_path=history_path)
-        assert catchup.needs_weekly_catchup() is False
+        assert len(plan) == 1
+        assert plan[0].scheduled_for == datetime(2026, 3, 5, 7, 0, tzinfo=timezone.utc)
 
-    def test_build_catchup_events(self, history_path):
-        catchup = StartupCatchup(run_history_path=history_path)
-        events = catchup.build_catchup_events()
-        # Should include at least daily + weekly
-        types = [e["event_type"] for e in events]
-        assert "daily_analysis_trigger" in types
-        assert "weekly_summary_trigger" in types
-
-    def test_multi_day_gap_produces_multiple_catchups(self, history_path):
-        """3-day gap should produce 3 catchup entries."""
-        old_date = (datetime.now(timezone.utc) - timedelta(days=4)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"daily-{old_date}",
-            "handler": "daily_analysis",
-            "status": "completed",
-            "started_at": (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
-        }) + "\n")
-
-        catchup = StartupCatchup(run_history_path=history_path)
-        dailies = catchup.needs_daily_catchup()
-        # Should have 3 entries (days -3, -2, -1)
-        assert len(dailies) == 3
-        dates = [d["date"] for d in dailies]
-        # Verify chronological order
-        assert dates == sorted(dates)
-
-    def test_multi_day_gap_capped_at_max(self, history_path):
-        """Gaps larger than max_catchup_days are capped."""
-        old_date = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"daily-{old_date}",
-            "handler": "daily_analysis",
-            "status": "completed",
-            "started_at": (datetime.now(timezone.utc) - timedelta(days=20)).isoformat(),
-        }) + "\n")
-
-        catchup = StartupCatchup(run_history_path=history_path, max_catchup_days=5)
-        dailies = catchup.needs_daily_catchup()
-        assert len(dailies) == 5
-
-    def test_multi_day_gap_with_bot_configs(self, history_path):
-        """Multi-day gap with timezone-grouped bots."""
-        old_date = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
-        history_path.write_text(json.dumps({
-            "run_id": f"daily-{old_date}",
-            "handler": "daily_analysis",
-            "status": "completed",
-            "started_at": (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
-        }) + "\n")
-
-        configs = {
-            "btc_bot": BotConfig(bot_id="btc_bot"),
-        }
-        catchup = StartupCatchup(
-            run_history_path=history_path,
-            bot_configs=configs,
-        )
-        dailies = catchup.needs_daily_catchup()
-        # Should have 2 entries (days -2 and -1)
-        assert len(dailies) == 2
-        for d in dailies:
-            assert "bots" in d
-            assert "date" in d
-
-    def test_build_catchup_events_with_bots(self, history_path):
-        configs = {
-            "btc_bot": BotConfig(bot_id="btc_bot"),
-        }
-        catchup = StartupCatchup(
-            run_history_path=history_path,
-            bot_configs=configs,
-        )
-        events = catchup.build_catchup_events()
-        daily_events = [e for e in events if e["event_type"] == "daily_analysis_trigger"]
-        assert len(daily_events) >= 1
-        payload = json.loads(daily_events[0]["payload"])
-        assert "date" in payload
+    @pytest.mark.asyncio
+    async def test_interval_jobs_are_not_replayed(self, run_store: ScheduledRunStore):
+        catchup = StartupCatchup([_interval_spec()], run_store)
+        assert await catchup.build_plan(now=datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)) == []

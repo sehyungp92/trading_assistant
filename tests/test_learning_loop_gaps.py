@@ -402,13 +402,13 @@ class TestGap2PredictionEvaluation:
             ),
         ])
 
-        # Write corresponding curated data
-        bot_dir = curated_dir / "2026-03-05" / "bot1"
-        bot_dir.mkdir(parents=True)
-        (bot_dir / "summary.json").write_text(
-            json.dumps({"total_pnl": 100.0, "win_rate": 0.6}),
-            encoding="utf-8",
-        )
+        for date, total_pnl in [("2026-03-01", 50.0), ("2026-03-08", 100.0)]:
+            bot_dir = curated_dir / date / "bot1"
+            bot_dir.mkdir(parents=True, exist_ok=True)
+            (bot_dir / "summary.json").write_text(
+                json.dumps({"total_pnl": total_pnl, "win_rate": 0.6}),
+                encoding="utf-8",
+            )
 
         ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
         result = ctx.load_prediction_accuracy()

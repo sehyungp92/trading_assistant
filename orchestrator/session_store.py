@@ -12,6 +12,19 @@ from schemas.session import SessionRecord
 
 logger = logging.getLogger(__name__)
 
+_RECENT_SESSION_METADATA_KEYS = (
+    "provider",
+    "runtime",
+    "requested_model",
+    "effective_model",
+    "cost_usd",
+    "first_output_ms",
+    "stream_event_count",
+    "tool_call_count",
+    "auth_mode",
+    "run_id",
+)
+
 
 class SessionStore:
     """JSONL-based session persistence for analysis runs."""
@@ -27,6 +40,22 @@ class SessionStore:
 
     def _session_file(self, agent_type: str, date: str) -> Path:
         return self._session_dir(agent_type, date) / "sessions.jsonl"
+
+    def _recent_session_summary(self, record: SessionRecord) -> dict:
+        """Build a compact summary dict for prompt injection and APIs."""
+        summary = {
+            "agent_type": record.agent_type,
+            "date": record.timestamp.strftime("%Y-%m-%d"),
+            "duration_ms": record.duration_ms,
+            "token_usage": record.token_usage,
+            "response_summary": record.response_summary[:200],
+        }
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        for key in _RECENT_SESSION_METADATA_KEYS:
+            value = metadata.get(key)
+            if value not in (None, ""):
+                summary[key] = value
+        return summary
 
     def record_invocation(
         self,
@@ -111,13 +140,7 @@ class SessionStore:
                     continue
                 try:
                     record = SessionRecord.model_validate_json(line)
-                    results.append({
-                        "agent_type": record.agent_type,
-                        "date": record.timestamp.strftime("%Y-%m-%d"),
-                        "duration_ms": record.duration_ms,
-                        "token_usage": record.token_usage,
-                        "response_summary": record.response_summary[:200],
-                    })
+                    results.append(self._recent_session_summary(record))
                 except Exception:
                     continue
 
@@ -157,11 +180,15 @@ class SessionStore:
                     record = SessionRecord.model_validate_json(line)
                     if record.session_id not in seen_sessions:
                         seen_sessions.add(record.session_id)
-                        results.append(
-                            {
-                                "session_id": record.session_id,
-                                "agent_type": record.agent_type,
-                                "timestamp": record.timestamp.isoformat(),
-                            }
-                        )
+                        summary = {
+                            "session_id": record.session_id,
+                            "agent_type": record.agent_type,
+                            "timestamp": record.timestamp.isoformat(),
+                        }
+                        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+                        for key in _RECENT_SESSION_METADATA_KEYS:
+                            value = metadata.get(key)
+                            if value not in (None, ""):
+                                summary[key] = value
+                        results.append(summary)
         return results

@@ -1,5 +1,5 @@
 # analysis/response_validator.py
-"""Response validator — enforces constraints on Claude's suggestions and predictions.
+"""Response validator — enforces constraints on agent suggestions and predictions.
 
 Strips blocked suggestions, adjusts confidence based on calibration and track record,
 and appends Validator Notes to the report.

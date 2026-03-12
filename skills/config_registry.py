@@ -49,6 +49,10 @@ class ConfigRegistry:
                     bot_id=bot_id,
                     repo_url=data.get("repo_url", ""),
                     repo_dir=data.get("repo_dir", ""),
+                    default_branch=data.get("default_branch", "main"),
+                    allowed_edit_paths=data.get("allowed_edit_paths", []) or [],
+                    structural_context_paths=data.get("structural_context_paths", []) or [],
+                    verification_commands=data.get("verification_commands", []) or [],
                     parameters=params,
                     strategies=data.get("strategies", []),
                 )

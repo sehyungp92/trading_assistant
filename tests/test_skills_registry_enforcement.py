@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, patch
 
 from orchestrator.agent_runner import AgentRunner
 from orchestrator.app import create_app
@@ -11,7 +10,20 @@ from orchestrator.config import AppConfig
 from orchestrator.session_store import SessionStore
 from orchestrator.skills_registry import SkillsRegistry
 from schemas.agent_capabilities import AgentType
+from schemas.agent_preferences import AgentPreferences, AgentProvider, AgentSelection, ProviderReadiness
 from schemas.prompt_package import PromptPackage
+
+
+def _streaming_codex_process():
+    process = AsyncMock()
+    process.stdout = AsyncMock()
+    process.stdout.readline = AsyncMock(side_effect=[b'{"item":{"type":"message","text":"ok"}}\n', b""])
+    process.stderr = AsyncMock()
+    process.stderr.read = AsyncMock(return_value=b"")
+    process.wait = AsyncMock(return_value=0)
+    process.returncode = 0
+    process.kill = AsyncMock()
+    return process
 
 
 @pytest.fixture
@@ -57,14 +69,27 @@ async def test_invocation_with_allowed_agent_type_succeeds(tmp_path, session_sto
         session_store=session_store,
         skills_registry=registry,
         enforce_skills=False,
-        claude_path="echo",  # will fail but won't raise PermissionError
+        preferences=AgentPreferences(
+            default=AgentSelection(provider=AgentProvider.CODEX_PRO)
+        ),
+        codex_command="codex",
     )
+    runner._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
+        provider=AgentProvider.CODEX_PRO,
+        available=True,
+        runtime="codex_cli",
+    )
+    mock_proc = _streaming_codex_process()
     # daily_analysis has generate_report in allowed_actions, so no denial
-    result = await runner.invoke(
-        agent_type="daily_analysis",
-        prompt_package=sample_package,
-        run_id="test-run",
-    )
+    with (
+        patch.object(runner, "_require_resolved_command", return_value="/usr/bin/codex"),
+        patch("orchestrator.agent_runner.asyncio.create_subprocess_exec", return_value=mock_proc),
+    ):
+        result = await runner.invoke(
+            agent_type="daily_analysis",
+            prompt_package=sample_package,
+            run_id="test-run",
+        )
     # Should reach invocation (may fail on CLI but not on permission)
     assert result.session_id.startswith("test-run-")
 
@@ -87,16 +112,29 @@ async def test_invocation_with_forbidden_action_logs_warning(tmp_path, session_s
         session_store=session_store,
         skills_registry=registry,
         enforce_skills=False,
-        claude_path="echo",
+        preferences=AgentPreferences(
+            default=AgentSelection(provider=AgentProvider.CODEX_PRO)
+        ),
+        codex_command="codex",
     )
+    runner._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
+        provider=AgentProvider.CODEX_PRO,
+        available=True,
+        runtime="codex_cli",
+    )
+    mock_proc = _streaming_codex_process()
 
     import logging
     with caplog.at_level(logging.WARNING):
-        result = await runner.invoke(
-            agent_type="daily_analysis",
-            prompt_package=sample_package,
-            run_id="test-soft",
-        )
+        with (
+            patch.object(runner, "_require_resolved_command", return_value="/usr/bin/codex"),
+            patch("orchestrator.agent_runner.asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            result = await runner.invoke(
+                agent_type="daily_analysis",
+                prompt_package=sample_package,
+                run_id="test-soft",
+            )
     assert "SkillsRegistry denied" in caplog.text
     # But invocation still proceeds
     assert result.session_id.startswith("test-soft-")

@@ -77,3 +77,24 @@ class TestListSessions:
         sessions = store.list_sessions(agent_type="daily_analysis")
         assert len(sessions) == 1
         assert sessions[0]["agent_type"] == "daily_analysis"
+
+    def test_includes_optional_runtime_metadata(self, store):
+        store.record_invocation(
+            "s1",
+            "daily_analysis",
+            {},
+            "r",
+            metadata={
+                "provider": "claude_max",
+                "effective_model": "sonnet",
+                "first_output_ms": 140,
+                "tool_call_count": 3,
+            },
+        )
+
+        sessions = store.list_sessions(agent_type="daily_analysis")
+
+        assert sessions[0]["provider"] == "claude_max"
+        assert sessions[0]["effective_model"] == "sonnet"
+        assert sessions[0]["first_output_ms"] == 140
+        assert sessions[0]["tool_call_count"] == 3

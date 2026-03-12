@@ -264,7 +264,7 @@ class TestDeploymentMonitor:
             return_value=PRResult(
                 success=True,
                 pr_url="https://github.com/user/repo/pull/99",
-                branch_name="ta/rollback-dep1xxxx",
+                branch_name="codex/rollback-dep1xxxx",
             )
         )
 
@@ -300,7 +300,7 @@ class TestDeploymentMonitor:
         # Verify the PRRequest was constructed correctly
         call_args = mock_pr_builder.create_pr.call_args
         pr_request = call_args[0][0]
-        assert pr_request.branch_name == "ta/rollback-dep1abcd"
+        assert pr_request.branch_name == "codex/rollback-dep1abcd"
         assert "ROLLBACK" in pr_request.title
         # Without file_change_generator, fallback produces descriptive diff_preview
         assert "Revert sl_pct" in pr_request.file_changes[0].diff_preview
@@ -531,7 +531,7 @@ class TestCheckDeploymentsHandler:
             return_value=PRResult(
                 success=True,
                 pr_url="https://github.com/user/repo/pull/99",
-                branch_name="ta/rollback-dep1",
+                branch_name="codex/rollback-dep1",
             )
         )
 

@@ -1,5 +1,5 @@
 # analysis/response_parser.py
-"""Response parser — extracts structured data from Claude's markdown response.
+"""Response parser — extracts structured data from an agent markdown response.
 
 Looks for a <!-- STRUCTURED_OUTPUT ... --> block in the response and parses
 the JSON content into a ParsedAnalysis model.
@@ -37,7 +37,7 @@ _BLOCK_PATTERN = re.compile(
 
 
 def parse_response(response: str) -> ParsedAnalysis:
-    """Parse a Claude response, extracting the structured output block.
+    """Parse an agent response, extracting the structured output block.
 
     If no block is found or JSON is malformed, returns ParsedAnalysis with
     parse_success=False and empty lists. The raw_report is always preserved.

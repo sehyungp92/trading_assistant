@@ -12,7 +12,10 @@ from orchestrator.agent_runner import AgentResult
 from orchestrator.event_stream import EventStream
 from orchestrator.handlers import Handlers
 from orchestrator.orchestrator_brain import Action, ActionType
+from schemas.agent_response import AgentSuggestion, ParsedAnalysis, StructuralProposal
+from schemas.autonomous_pipeline import ApprovalRequest, BotConfigProfile, ChangeKind, GitHubIssueResult
 from schemas.notifications import NotificationPreferences, NotificationPriority
+from skills.approval_tracker import ApprovalTracker
 
 
 @pytest.fixture
@@ -113,6 +116,7 @@ class TestDailyAnalysis:
         mock_agent_runner.invoke.assert_called_once()
         call_kwargs = mock_agent_runner.invoke.call_args
         assert call_kwargs.kwargs.get("agent_type") or call_kwargs[1].get("agent_type", call_kwargs[0][0]) == "daily_analysis"
+        assert call_kwargs.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
         mock_dispatcher.dispatch.assert_called_once()
 
     @pytest.mark.asyncio
@@ -120,7 +124,7 @@ class TestDailyAnalysis:
         self, handlers: Handlers, mock_agent_runner, mock_dispatcher, event_stream: EventStream,
         tmp_path: Path,
     ):
-        """Quality gate FAIL (degraded) -> still invoke Claude with available data."""
+        """Quality gate FAIL (degraded) -> still invoke the agent runtime with available data."""
         date = "2026-03-02"
         # Create trade data to pass minimum-data threshold
         for bot in ["bot1", "bot2"]:
@@ -136,6 +140,7 @@ class TestDailyAnalysis:
 
         # Agent SHOULD be invoked (graceful degradation)
         mock_agent_runner.invoke.assert_called_once()
+        assert mock_agent_runner.invoke.call_args.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
         # Dispatcher called for the success notification
         assert mock_dispatcher.dispatch.call_count >= 1
 
@@ -160,6 +165,7 @@ class TestWeeklyAnalysis:
         mock_agent_runner.invoke.assert_called_once()
         call_args = mock_agent_runner.invoke.call_args
         assert "weekly" in str(call_args)
+        assert call_args.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
 
 
 class TestWFO:
@@ -179,6 +185,8 @@ class TestWFO:
 
         # Agent should be invoked (WFO runner handles empty trades gracefully)
         mock_agent_runner.invoke.assert_called_once()
+        call_args = mock_agent_runner.invoke.call_args
+        assert call_args.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
 
     @pytest.mark.asyncio
     async def test_reject_sends_critical_notification(
@@ -200,6 +208,24 @@ class TestWFO:
         payload = mock_dispatcher.dispatch.call_args[0][0]
         assert payload.priority == NotificationPriority.CRITICAL
         assert "REJECT" in payload.title
+
+    @pytest.mark.asyncio
+    async def test_missing_data_start_is_derived_from_config(
+        self, handlers: Handlers, tmp_path: Path
+    ):
+        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+
+        action = _make_action(
+            ActionType.SPAWN_WFO,
+            bot_id="bot1",
+            details={"bot_id": "bot1", "data_end": "2026-03-01"},
+        )
+
+        with patch.object(handlers, "_load_trades_for_wfo", return_value=([], [])) as mock_loader:
+            await handlers.handle_wfo(action)
+
+        assert mock_loader.call_args.kwargs["date_end"] == "2026-03-01"
+        assert mock_loader.call_args.kwargs["date_start"] == "2025-03-06"
 
 
 class TestTriage:
@@ -252,12 +278,13 @@ class TestTriage:
         mock_agent_runner.invoke.assert_called_once()
         call_args = mock_agent_runner.invoke.call_args
         assert "triage" in str(call_args)
+        assert call_args.kwargs["allowed_tools"] == ["Read", "Bash", "Grep", "Glob"]
 
     @pytest.mark.asyncio
     async def test_needs_human_skips_claude_but_notifies(
         self, handlers: Handlers, mock_agent_runner, mock_dispatcher, tmp_path: Path
     ):
-        """NEEDS_HUMAN -> no Claude invocation, but notify."""
+        """NEEDS_HUMAN -> no agent-runtime invocation, but notify."""
         (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
         (tmp_path / "src").mkdir(parents=True, exist_ok=True)
 
@@ -302,6 +329,340 @@ class TestTriage:
         mock_dispatcher.dispatch.assert_called_once()
         payload = mock_dispatcher.dispatch.call_args[0][0]
         assert "needs_human" in payload.notification_type
+
+    @pytest.mark.asyncio
+    async def test_known_fix_creates_bug_fix_request(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        approval_handler = MagicMock()
+        approval_handler.handle_approve = AsyncMock(return_value="PR created: https://github.com/x/y/pull/1")
+        config_registry = MagicMock()
+        config_registry.get_profile.return_value = BotConfigProfile(
+            bot_id="bot1",
+            repo_dir=str(tmp_path),
+            verification_commands=[],
+        )
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            approval_handler=approval_handler,
+            approval_tracker=approval_tracker,
+            config_registry=config_registry,
+        )
+        mock_agent_runner.invoke.return_value = AgentResult(
+            response="""<!-- TRIAGE_RESULT
+{"proposal_type":"bug_fix","confidence":0.9,"candidate_files":["tests/test_bot.py"],"issue_title":"Fix missing import","fix_plan":"Add a regression test.","file_changes":[{"file_path":"tests/test_bot.py","new_content":"def test_ok():\\n    assert True\\n"}]}
+-->""",
+            run_dir=tmp_path / "runs" / "triage",
+            success=True,
+        )
+
+        from schemas.bug_triage import BugComplexity, BugSeverity, ErrorEvent, TriageOutcome, TriageResult
+
+        action = _make_action(
+            ActionType.SPAWN_TRIAGE,
+            bot_id="bot1",
+            details={"bot_id": "bot1", "error_type": "ImportError", "message": "No module", "stack_trace": "Traceback"},
+        )
+        triage_result = TriageResult(
+            error_event=ErrorEvent(bot_id="bot1", error_type="ImportError", message="No module", stack_trace="Traceback"),
+            severity=BugSeverity.HIGH,
+            complexity=BugComplexity.OBVIOUS_FIX,
+            outcome=TriageOutcome.KNOWN_FIX,
+        )
+
+        with patch("skills.run_bug_triage.TriageRunner") as MockRunner:
+            MockRunner.return_value.triage.return_value = triage_result
+            await handlers.handle_triage(action)
+
+        approval_handler.handle_approve.assert_called_once()
+        pending = approval_tracker.get_pending()
+        assert len(pending) == 1
+        assert pending[0].change_kind == ChangeKind.BUG_FIX
+
+    @pytest.mark.asyncio
+    async def test_investigation_creates_issue_and_links_failure_log(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        pr_builder = MagicMock()
+        pr_builder.create_issue = AsyncMock(return_value=GitHubIssueResult(
+            success=True,
+            issue_url="https://github.com/x/y/issues/7",
+        ))
+        config_registry = MagicMock()
+        config_registry.get_profile.return_value = BotConfigProfile(
+            bot_id="bot1",
+            repo_dir=str(tmp_path),
+            verification_commands=[],
+        )
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            pr_builder=pr_builder,
+            config_registry=config_registry,
+        )
+        mock_agent_runner.invoke.return_value = AgentResult(
+            response="""<!-- TRIAGE_RESULT
+{"proposal_type":"investigation","confidence":0.7,"candidate_files":["connector.py"],"issue_title":"Investigate retry loop","issue_body":"Stack trace and context.","fix_plan":"Inspect reconnect path."}
+-->""",
+            run_dir=tmp_path / "runs" / "triage",
+            success=True,
+        )
+
+        from schemas.bug_triage import BugComplexity, BugSeverity, ErrorEvent, TriageOutcome, TriageResult
+
+        action = _make_action(
+            ActionType.SPAWN_TRIAGE,
+            bot_id="bot1",
+            details={"bot_id": "bot1", "error_type": "RuntimeError", "message": "retry loop", "stack_trace": "Traceback"},
+        )
+        triage_result = TriageResult(
+            error_event=ErrorEvent(bot_id="bot1", error_type="RuntimeError", message="retry loop", stack_trace="Traceback"),
+            severity=BugSeverity.HIGH,
+            complexity=BugComplexity.MULTI_FILE,
+            outcome=TriageOutcome.NEEDS_INVESTIGATION,
+        )
+
+        with patch("skills.run_bug_triage.TriageRunner") as MockRunner:
+            MockRunner.return_value.triage.return_value = triage_result
+            await handlers.handle_triage(action)
+
+        pr_builder.create_issue.assert_called_once()
+        assert "https://github.com/x/y/issues/7" in (tmp_path / "failure_log.jsonl").read_text(encoding="utf-8")
+
+
+class TestFeedbackRouting:
+    @pytest.mark.asyncio
+    async def test_feedback_accept_routes_to_pending_approval(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        approval_tracker.create_request(
+            ApprovalRequest(
+                request_id="req-1",
+                suggestion_id="abc123",
+                bot_id="bot1",
+            ),
+        )
+        approval_handler = MagicMock()
+        approval_handler.handle_approve = AsyncMock(return_value="approved")
+        suggestion_tracker = MagicMock()
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            suggestion_tracker=suggestion_tracker,
+            approval_handler=approval_handler,
+            approval_tracker=approval_tracker,
+        )
+
+        action = _make_action(
+            ActionType.PROCESS_FEEDBACK,
+            bot_id="bot1",
+            details={"text": "approve suggestion #abc123", "report_id": "r1"},
+        )
+        await handlers.handle_feedback(action)
+
+        approval_handler.handle_approve.assert_called_once_with("req-1")
+        suggestion_tracker.implement.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_feedback_accept_does_not_mark_implemented_when_approval_stays_pending(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        approval_tracker = ApprovalTracker(tmp_path / "approvals.jsonl")
+        approval_tracker.create_request(
+            ApprovalRequest(
+                request_id="req-1",
+                suggestion_id="abc123",
+                bot_id="bot1",
+            ),
+        )
+        approval_handler = MagicMock()
+        approval_handler.handle_approve = AsyncMock(return_value="PR creation failed")
+        suggestion_tracker = MagicMock()
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            suggestion_tracker=suggestion_tracker,
+            approval_handler=approval_handler,
+            approval_tracker=approval_tracker,
+        )
+
+        action = _make_action(
+            ActionType.PROCESS_FEEDBACK,
+            bot_id="bot1",
+            details={"text": "approve suggestion #abc123", "report_id": "r1"},
+        )
+        await handlers.handle_feedback(action)
+
+        approval_handler.handle_approve.assert_called_once_with("req-1")
+        suggestion_tracker.implement.assert_not_called()
+        recent = event_stream.get_recent()
+        assert not any(e.event_type == "suggestion_accepted" for e in recent)
+
+
+class TestStructuralLinking:
+    def test_structural_proposals_link_by_explicit_id(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1", "bot2"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            suggestion_tracker=MagicMock(),
+        )
+        handlers._suggestion_tracker.load_all.return_value = []
+        handlers._suggestion_tracker.record.return_value = True
+
+        validation = MagicMock()
+        validation.approved_suggestions = [
+            AgentSuggestion(
+                suggestion_id="sg-struct-1",
+                bot_id="bot1",
+                category="structural",
+                title="Rename engine module",
+                evidence_summary="code duplication",
+                confidence=0.8,
+            ),
+        ]
+        parsed = ParsedAnalysis(
+            structural_proposals=[
+                StructuralProposal(
+                    hypothesis_id="hyp-1",
+                    linked_suggestion_id="sg-struct-1",
+                    bot_id="bot1",
+                    title="Completely different pattern title",
+                    description="Extract common execution helper",
+                ),
+            ],
+        )
+
+        suggestion_ids = handlers._record_agent_suggestions(validation, "run-1", parsed)
+        handlers._extract_and_record_patterns(parsed, ["bot1", "bot2"], suggestion_ids)
+
+        from skills.pattern_library import PatternLibrary
+
+        lib = PatternLibrary(tmp_path / "memory" / "findings")
+        entries = lib.load_all()
+        assert len(entries) == 1
+        assert entries[0].linked_suggestion_id == "sg-struct-1"
+
+    def test_structural_patterns_preserve_explicit_link_without_same_run_mapping(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1", "bot2"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            suggestion_tracker=MagicMock(),
+        )
+
+        parsed = ParsedAnalysis(
+            structural_proposals=[
+                StructuralProposal(
+                    hypothesis_id="hyp-1",
+                    linked_suggestion_id="sg-existing",
+                    bot_id="bot1",
+                    title="Extract execution helper",
+                    description="Reduce duplication",
+                ),
+            ],
+        )
+
+        handlers._extract_and_record_patterns(parsed, ["bot1", "bot2"], suggestion_ids={})
+
+        from skills.pattern_library import PatternLibrary
+
+        lib = PatternLibrary(tmp_path / "memory" / "findings")
+        entries = lib.load_all()
+        assert len(entries) == 1
+        assert entries[0].linked_suggestion_id == "sg-existing"
+
+    def test_agent_suggestions_only_link_hypotheses_by_explicit_suggestion_id(self, tmp_path: Path, mock_agent_runner, mock_dispatcher, event_stream: EventStream):
+        tracker = MagicMock()
+        tracker.record.return_value = True
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "data" / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            heartbeat_dir=tmp_path / "heartbeats",
+            failure_log_path=tmp_path / "failure_log.jsonl",
+            suggestion_tracker=tracker,
+        )
+
+        validation = MagicMock()
+        validation.approved_suggestions = [
+            AgentSuggestion(
+                suggestion_id="sg-param",
+                bot_id="bot1",
+                category="entry_signal",
+                title="Tighten filter",
+                evidence_summary="good evidence",
+                confidence=0.8,
+            ),
+        ]
+        parsed = ParsedAnalysis(
+            structural_proposals=[
+                StructuralProposal(
+                    hypothesis_id="hyp-1",
+                    linked_suggestion_id="sg-other",
+                    bot_id="bot1",
+                    title="Different structural idea",
+                    description="Not linked to sg-param",
+                ),
+            ],
+        )
+
+        handlers._record_agent_suggestions(validation, "run-1", parsed)
+        recorded = tracker.record.call_args[0][0]
+        assert recorded.hypothesis_id is None
 
 
 class TestAlert:

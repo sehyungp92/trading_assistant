@@ -1,0 +1,122 @@
+"""Tests for Windows startup helper scripts."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+import pytest
+
+
+START_COMMON = Path(__file__).resolve().parents[1] / "scripts" / "start-common.ps1"
+
+
+def _run_powershell(command: str) -> str:
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only startup script tests")
+def test_resolve_interpreter_prefers_dotvenv(tmp_path: Path):
+    project_root = tmp_path
+    dot_venv = project_root / ".venv" / "Scripts"
+    venv = project_root / "venv" / "Scripts"
+    dot_venv.mkdir(parents=True)
+    venv.mkdir(parents=True)
+    (dot_venv / "pythonw.exe").write_bytes(b"")
+    (venv / "pythonw.exe").write_bytes(b"")
+
+    output = _run_powershell(
+        f". '{START_COMMON}'; Resolve-OrchestratorPythonw -ProjectRoot '{project_root}'"
+    )
+
+    assert output.endswith(str(dot_venv / "pythonw.exe"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only startup script tests")
+def test_resolve_interpreter_falls_back_to_venv(tmp_path: Path):
+    project_root = tmp_path
+    venv = project_root / "venv" / "Scripts"
+    venv.mkdir(parents=True)
+    (venv / "pythonw.exe").write_bytes(b"")
+
+    output = _run_powershell(
+        f". '{START_COMMON}'; Resolve-OrchestratorPythonw -ProjectRoot '{project_root}'"
+    )
+
+    assert output.endswith(str(venv / "pythonw.exe"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only startup script tests")
+def test_healthy_existing_process_prevents_duplicate_start(tmp_path: Path):
+    pid_file = tmp_path / "orchestrator.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    class _HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/health":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format, *args):  # noqa: A003
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        output = _run_powershell(
+            ". '{0}'; Test-OrchestratorAlreadyRunning -PidFile '{1}' -HealthUrl 'http://127.0.0.1:{2}/health'".format(
+                START_COMMON,
+                pid_file,
+                server.server_port,
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert output == "True"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only startup script tests")
+def test_supervisor_lock_allows_only_one_owner(tmp_path: Path):
+    lock_file = tmp_path / "orchestrator.supervisor.lock"
+
+    output = _run_powershell(
+        ". '{0}'; "
+        "$first = Enter-OrchestratorSupervisorLock -LockFile '{1}'; "
+        "$second = Enter-OrchestratorSupervisorLock -LockFile '{1}'; "
+        "try {{ Write-Output ([bool]$first); Write-Output ([bool]$second) }} "
+        "finally {{ "
+        "if ($second) {{ Exit-OrchestratorSupervisorLock -LockHandle $second -LockFile '{1}' }}; "
+        "if ($first) {{ Exit-OrchestratorSupervisorLock -LockHandle $first -LockFile '{1}' }} "
+        "}}".format(
+            START_COMMON,
+            lock_file,
+        )
+    )
+
+    assert output.splitlines() == ["True", "False"]

@@ -2,12 +2,12 @@
 """Strategy refinement engine — deterministic 4-tier suggestion generator.
 
 Analyzes weekly metrics and produces strategy suggestions. All rules-based,
-no LLM calls. Claude interprets these in the weekly report prompt.
+no LLM calls. The configured analysis provider interprets these in the weekly report prompt.
 
 Tier 1 (Parameter): e.g. stop-loss too tight, threshold misaligned
 Tier 2 (Filter): filter cost exceeds benefit over the week
 Tier 3 (Strategy Variant): regime mismatch → suggest regime gate
-Tier 4 (Hypothesis): reserved for Claude to synthesize in the weekly report
+Tier 4 (Hypothesis): reserved for the analysis runtime to synthesize in the weekly report
 """
 from __future__ import annotations
 

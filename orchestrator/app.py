@@ -7,18 +7,21 @@ For production, use create_app() factory to configure paths.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from comms.dispatcher import NotificationDispatcher
+from comms.telegram_handlers import TelegramCallbackResponse, TelegramCallbackRouter
+from comms.telegram_renderer import TelegramRenderer
 from orchestrator.adapters.vps_receiver import VPSReceiver
 from orchestrator.agent_runner import AgentRunner
+from orchestrator.catchup import StartupCatchup, bootstrap_run_store_from_history
 from orchestrator.latency_tracker import LatencyTracker
 from orchestrator.config import AppConfig
 from orchestrator.conversation_tracker import ConversationTracker
@@ -28,12 +31,25 @@ from orchestrator.handlers import Handlers
 from orchestrator.memory_consolidator import MemoryConsolidator
 from orchestrator.monitoring import MonitoringCheck, MonitoringLoop
 from orchestrator.orchestrator_brain import OrchestratorBrain
-from orchestrator.scheduler import SchedulerConfig, create_scheduler_jobs
+from orchestrator.scheduler import (
+    SchedulerConfig,
+    ScheduledJobRunner,
+    ScheduledJobSpec,
+    build_scheduled_job_specs,
+    job_specs_to_scheduler_jobs,
+)
+from orchestrator.scheduled_runs import ScheduledRunStore
 from orchestrator.session_store import SessionStore
 from orchestrator.skills_registry import SkillsRegistry
 from orchestrator.subagent import SubagentManager
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.worker import Worker
+from schemas.agent_preferences import (
+    AgentPreferences,
+    AgentProvider,
+    AgentSelection,
+    AgentWorkflow,
+)
 from schemas.notifications import (
     NotificationChannel,
     NotificationPayload,
@@ -42,6 +58,65 @@ from schemas.notifications import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _scope_token(scope_key: str) -> str:
+    return hashlib.sha256(scope_key.encode("utf-8")).hexdigest()[:10]
+
+
+def _build_scheduled_event(
+    *,
+    job_key: str,
+    scope_key: str,
+    scheduled_for: datetime,
+    event_type: str,
+    bot_id: str,
+    payload: dict,
+) -> dict:
+    scheduled_for = scheduled_for.astimezone(timezone.utc).replace(microsecond=0)
+    received_at = _utc_now()
+    event_id = (
+        f"{job_key}-{_scope_token(scope_key)}-"
+        f"{scheduled_for.strftime('%Y%m%dT%H%M')}"
+    )
+    return {
+        "event_id": event_id,
+        "bot_id": bot_id,
+        "event_type": event_type,
+        "payload": json.dumps(payload),
+        "exchange_timestamp": scheduled_for.isoformat(),
+        "received_at": received_at.isoformat(),
+    }
+
+
+def _normalize_queue_event(event: dict) -> dict:
+    normalized = dict(event)
+    missing = [
+        field for field in ("event_id", "bot_id", "event_type", "payload")
+        if field not in normalized
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required event field(s): {', '.join(missing)}",
+        )
+
+    payload = normalized["payload"]
+    if isinstance(payload, (dict, list)):
+        normalized["payload"] = json.dumps(payload)
+    elif not isinstance(payload, str):
+        raise HTTPException(
+            status_code=400,
+            detail="'payload' must be a JSON string, object, or array",
+        )
+
+    received_at = normalized.setdefault("received_at", _utc_now().isoformat())
+    normalized.setdefault("exchange_timestamp", received_at)
+    return normalized
 
 
 def _load_notification_prefs(prefs_path: Path) -> NotificationPreferences:
@@ -56,6 +131,59 @@ def _load_notification_prefs(prefs_path: Path) -> NotificationPreferences:
 
 def _save_notification_prefs(prefs: NotificationPreferences, prefs_path: Path) -> None:
     """Persist notification preferences to disk."""
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs_path.write_text(prefs.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _selection_from_env(provider_raw: str, model_raw: str = "") -> AgentSelection | None:
+    provider_name = provider_raw.strip().lower()
+    if not provider_name:
+        return None
+    try:
+        provider = AgentProvider(provider_name)
+    except ValueError:
+        logger.warning("Ignoring invalid AGENT provider value: %r", provider_raw)
+        return None
+    model = model_raw.strip() or None
+    return AgentSelection(provider=provider, model=model)
+
+
+def _seed_agent_preferences(config: AppConfig) -> AgentPreferences:
+    default_selection = _selection_from_env(
+        config.agent_default_provider,
+        config.agent_default_model,
+    ) or AgentSelection(provider=AgentProvider.CLAUDE_MAX)
+
+    overrides: dict[AgentWorkflow, AgentSelection | None] = {}
+    workflow_env_map = (
+        (AgentWorkflow.DAILY_ANALYSIS, config.daily_agent_provider, config.daily_agent_model),
+        (AgentWorkflow.WEEKLY_ANALYSIS, config.weekly_agent_provider, config.weekly_agent_model),
+        (AgentWorkflow.WFO, config.wfo_agent_provider, config.wfo_agent_model),
+        (AgentWorkflow.TRIAGE, config.triage_agent_provider, config.triage_agent_model),
+    )
+    for workflow, provider_raw, model_raw in workflow_env_map:
+        selection = _selection_from_env(provider_raw, model_raw)
+        if selection is not None:
+            overrides[workflow] = selection
+
+    return AgentPreferences(default=default_selection, overrides=overrides)
+
+
+def _load_agent_preferences(
+    prefs_path: Path,
+    config: AppConfig,
+) -> AgentPreferences:
+    """Load agent preferences from disk or build initial values from env."""
+    if prefs_path.exists():
+        try:
+            return AgentPreferences(**json.loads(prefs_path.read_text(encoding="utf-8")))
+        except Exception:
+            logger.warning("Could not load agent prefs from %s, using defaults", prefs_path)
+    return _seed_agent_preferences(config)
+
+
+def _save_agent_preferences(prefs: AgentPreferences, prefs_path: Path) -> None:
+    """Persist agent preferences to disk."""
     prefs_path.parent.mkdir(parents=True, exist_ok=True)
     prefs_path.write_text(prefs.model_dump_json(indent=2), encoding="utf-8")
 
@@ -154,6 +282,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     db_path = Path(db_dir)
     queue = EventQueue(db_path=str(db_path / "events.db"))
     registry = TaskRegistry(db_path=str(db_path / "tasks.db"))
+    scheduled_run_store = ScheduledRunStore(db_path=str(db_path / "scheduled_runs.db"))
     brain = OrchestratorBrain()
     event_stream = EventStream()
     conversation_tracker = ConversationTracker()
@@ -161,12 +290,17 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         queue=queue, registry=registry, brain=brain,
         event_stream=event_stream, conversation_tracker=conversation_tracker,
         raw_data_dir=db_path / "raw",
+        bot_configs=config.bot_configs,
     )
     session_store = SessionStore(base_dir=str(db_path / ".assistant" / "sessions"))
     subagent_mgr = SubagentManager()
 
     # Latency tracker — shared across VPSReceiver, monitoring, and /metrics
     latency_tracker = LatencyTracker()
+    prefs_path = db_path / "data" / "notification_prefs.json"
+    notification_prefs = _load_notification_prefs(prefs_path)
+    agent_prefs_path = db_path / "data" / "agent_preferences.json"
+    agent_preferences = _load_agent_preferences(agent_prefs_path, config)
 
     # Integration layer components
     dispatcher = NotificationDispatcher()
@@ -174,7 +308,15 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     agent_runner = AgentRunner(
         runs_dir=db_path / "runs",
         session_store=session_store,
+        claude_command=config.claude_command,
+        claude_command_args=config.claude_command_args,
+        codex_command=config.codex_command,
+        codex_command_args=config.codex_command_args,
         skills_registry=skills_registry,
+        preferences=agent_preferences,
+        zai_api_key=config.zai_api_key,
+        openrouter_api_key=config.openrouter_api_key,
+        event_stream=event_stream,
     )
     monitoring_loop = MonitoringLoop(
         checks=[MonitoringCheck(
@@ -200,40 +342,47 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             telegram_adapter = adapter
             break
 
+    callback_router = TelegramCallbackRouter() if telegram_adapter is not None else None
+    telegram_renderer = TelegramRenderer() if telegram_adapter is not None else None
+
     # SuggestionTracker — shared path with ContextBuilder (memory/findings/)
     from skills.suggestion_tracker import SuggestionTracker
 
     suggestion_tracker = SuggestionTracker(store_dir=db_path / "memory" / "findings")
 
-    # Load persisted notification preferences
-    prefs_path = db_path / "data" / "notification_prefs.json"
-    notification_prefs = _load_notification_prefs(prefs_path)
-
     # Autonomous pipeline (feature-flagged)
     autonomous_pipeline = None
     approval_tracker = None
     approval_handler = None
+    config_registry = None
+    file_change_gen = None
+    pr_builder = None
+    repo_workspace_manager = None
+    repo_task_runner = None
     if config.autonomous_enabled:
+        from orchestrator.repo_task_runner import RepoTaskRunner
         from skills.approval_handler import ApprovalHandler
         from skills.approval_tracker import ApprovalTracker
         from skills.autonomous_pipeline import AutonomousPipeline
         from skills.config_registry import ConfigRegistry as _ConfigRegistry
         from skills.file_change_generator import FileChangeGenerator
         from skills.github_pr import PRBuilder
+        from skills.repo_workspace import RepoWorkspaceManager
         from skills.suggestion_backtester import SuggestionBacktester
 
         config_registry = _ConfigRegistry(Path(config.bot_config_dir))
         backtester = SuggestionBacktester(config_registry, db_path)
         approval_tracker = ApprovalTracker(db_path / "memory" / "findings" / "approvals.jsonl")
         file_change_gen = FileChangeGenerator()
-        pr_builder = PRBuilder(dry_run=False)
+        pr_builder = PRBuilder(dry_run=False, github_token=config.github_token)
+        repo_workspace_manager = RepoWorkspaceManager(
+            cache_root=Path(config.bot_repo_cache_dir),
+            task_root=db_path / "runs" / "repo_tasks",
+        )
+        repo_task_runner = RepoTaskRunner(agent_runner)
 
         # Telegram bot/renderer (may be None if not configured)
         telegram_bot = telegram_adapter  # Extracted from channel_adapters above
-        telegram_renderer = None
-        if config.telegram_bot_token:
-            from comms.telegram_renderer import TelegramRenderer
-            telegram_renderer = TelegramRenderer()
 
         approval_handler = ApprovalHandler(
             approval_tracker=approval_tracker,
@@ -243,6 +392,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             config_registry=config_registry,
             event_stream=event_stream,
             telegram_bot=telegram_bot,
+            repo_workspace_manager=repo_workspace_manager,
+            repo_task_runner=repo_task_runner,
         )
         autonomous_pipeline = AutonomousPipeline(
             config_registry=config_registry,
@@ -358,6 +509,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         brain=brain,
         suggestion_tracker=suggestion_tracker,
         autonomous_pipeline=autonomous_pipeline,
+        approval_handler=approval_handler,
+        approval_tracker=approval_tracker,
+        pr_builder=pr_builder,
+        config_registry=config_registry,
+        repo_workspace_manager=repo_workspace_manager,
         deployment_monitor=deployment_monitor,
         threshold_learner=threshold_learner,
         experiment_manager=experiment_manager,
@@ -380,12 +536,120 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         "wfo", lambda a=action: handlers.handle_wfo(a))
     worker.on_feedback = handlers.handle_feedback
 
+    def _store_agent_preferences(preferences: AgentPreferences) -> None:
+        agent_runner.update_preferences(preferences)
+        _save_agent_preferences(preferences, agent_prefs_path)
+        try:
+            app.state.agent_preferences = agent_runner.get_preferences()
+        except NameError:
+            pass
+
+    def _render_agent_settings_response(
+        scope: AgentWorkflow | str | None,
+        *,
+        edit_message: bool,
+        answer: str,
+    ) -> TelegramCallbackResponse:
+        if telegram_renderer is None:
+            return TelegramCallbackResponse(text="Telegram settings are unavailable.", answer=answer)
+        text, keyboard = telegram_renderer.render_agent_settings(
+            agent_runner.get_preferences_view(),
+            scope=scope,
+        )
+        return TelegramCallbackResponse(
+            text=text,
+            keyboard=keyboard,
+            answer=answer,
+            edit_message=edit_message,
+        )
+
+    async def _settings_command(**kwargs) -> TelegramCallbackResponse:
+        return _render_agent_settings_response(
+            None,
+            edit_message=False,
+            answer="Agent settings",
+        )
+
+    async def _settings_home(**kwargs) -> TelegramCallbackResponse:
+        return _render_agent_settings_response(
+            None,
+            edit_message=True,
+            answer="Agent settings",
+        )
+
+    async def _settings_scope(scope_name: str) -> TelegramCallbackResponse:
+        if scope_name == "global":
+            return _render_agent_settings_response(
+                "global",
+                edit_message=True,
+                answer="Global provider",
+            )
+        try:
+            workflow = AgentWorkflow(scope_name)
+        except ValueError as exc:
+            return TelegramCallbackResponse(text=f"Unknown settings scope: {exc}", answer="Invalid scope")
+        return _render_agent_settings_response(
+            workflow,
+            edit_message=True,
+            answer=f"{scope_name} settings",
+        )
+
+    async def _settings_set(payload: str) -> TelegramCallbackResponse:
+        scope_name, provider_name = (payload.split("|", 1) + [""])[:2]
+        try:
+            provider = AgentProvider(provider_name)
+        except ValueError:
+            return TelegramCallbackResponse(text="Unknown provider.", answer="Invalid provider")
+
+        prefs = agent_runner.get_preferences()
+        if scope_name == "global":
+            prefs.default = AgentSelection(provider=provider)
+            render_scope: AgentWorkflow | str | None = "global"
+        else:
+            try:
+                workflow = AgentWorkflow(scope_name)
+            except ValueError:
+                return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
+            prefs.overrides[workflow] = AgentSelection(provider=provider)
+            render_scope = workflow
+
+        try:
+            _store_agent_preferences(prefs)
+        except ValueError as exc:
+            return TelegramCallbackResponse(text=str(exc), answer="Provider unavailable")
+
+        return _render_agent_settings_response(
+            render_scope,
+            edit_message=True,
+            answer="Provider updated",
+        )
+
+    async def _settings_clear(scope_name: str) -> TelegramCallbackResponse:
+        try:
+            workflow = AgentWorkflow(scope_name)
+        except ValueError:
+            return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
+
+        prefs = agent_runner.get_preferences()
+        prefs.overrides.pop(workflow, None)
+        _store_agent_preferences(prefs)
+        return _render_agent_settings_response(
+            workflow,
+            edit_message=True,
+            answer="Override cleared",
+        )
+
+    if callback_router is not None:
+        callback_router.register("cmd_settings", _settings_command)
+        callback_router.register("agent_settings_home", _settings_home)
+        callback_router.register("agent_settings_scope_", _settings_scope)
+        callback_router.register("agent_settings_set_", _settings_set)
+        callback_router.register("agent_settings_clear_", _settings_clear)
+        telegram_adapter.set_callback_router(callback_router)
+
     # Register Telegram approval callbacks when autonomous pipeline is enabled
     if approval_handler is not None:
-        from comms.telegram_handlers import TelegramCallbackRouter
-
-        # Get or create callback router
-        callback_router = TelegramCallbackRouter()
+        callback_router = callback_router or TelegramCallbackRouter()
 
         async def _on_approve_callback(request_id: str) -> str:
             response = await approval_handler.handle_approve(request_id)
@@ -440,18 +704,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
         callback_router.register("cmd_pending", _pending_command)
 
-        # Connect callback router to Telegram adapter for incoming updates
-        if telegram_adapter is not None:
-            telegram_adapter.set_callback_router(callback_router)
-
         logger.info("Telegram approval callbacks registered")
 
     # Register experiment Telegram callbacks (independent of autonomous pipeline)
     if experiment_manager is not None and telegram_adapter is not None:
-        if not (approval_handler is not None):
-            # callback_router not created above; create one now
-            from comms.telegram_handlers import TelegramCallbackRouter
-            callback_router = TelegramCallbackRouter()
+        callback_router = callback_router or TelegramCallbackRouter()
 
         async def _on_start_experiment(experiment_id: str) -> str:
             try:
@@ -471,7 +728,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         callback_router.register("start_experiment_", _on_start_experiment)
         callback_router.register("cancel_experiment_", _on_cancel_experiment)
 
-        telegram_adapter.set_callback_router(callback_router)
         logger.info("Experiment Telegram callbacks registered")
 
     # Relay polling — only active when RELAY_URL is configured
@@ -490,11 +746,14 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     scanner = ProactiveScanner()
     curated_dir = db_path / "data" / "curated"
 
-    async def _morning_scan(bot_ids: list[str] | None = None) -> None:
+    async def _morning_scan(
+        bot_ids: list[str] | None = None,
+        scheduled_for: datetime | None = None,
+    ) -> None:
         """Gather overnight data and dispatch morning scan notifications."""
         from orchestrator.tz_utils import bot_trading_date
-        from datetime import timedelta
 
+        reference_time = (scheduled_for or _utc_now()).astimezone(timezone.utc)
         scan_bots = bot_ids or config.bot_ids
         errors: list[dict] = []
         unusual_losses: list[dict] = []
@@ -515,7 +774,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             else:
                 tz = "UTC"
             # "yesterday" in the bot's local timezone
-            yesterday = bot_trading_date(tz, datetime.now(timezone.utc) - timedelta(days=1))
+            yesterday = bot_trading_date(tz, reference_time - timedelta(days=1))
             summary_path = curated_dir / yesterday / bot_id / "summary.json"
             if summary_path.exists():
                 try:
@@ -532,33 +791,37 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     logger.warning("Morning scan: could not read summary for %s/%s", bot_id, yesterday)
 
         result = scanner.morning_scan(events=[], errors=errors, unusual_losses=unusual_losses)
-        hour_utc = datetime.now(timezone.utc).hour
+        hour_utc = reference_time.hour
         for payload in result.payloads:
             try:
                 await dispatcher.dispatch(payload, notification_prefs, hour_utc)
             except Exception:
                 logger.exception("Morning scan dispatch failed")
 
-    async def _evening_report(bot_ids: list[str] | None = None) -> None:
+    async def _evening_report(
+        bot_ids: list[str] | None = None,
+        scheduled_for: datetime | None = None,
+    ) -> None:
         """Check if daily report is ready and send evening notification."""
         from orchestrator.tz_utils import bot_trading_date
 
+        reference_time = (scheduled_for or _utc_now()).astimezone(timezone.utc)
         scan_bots = bot_ids or config.bot_ids
         daily_report_ready = False
-        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date = reference_time.strftime("%Y-%m-%d")
         if scan_bots:
             for bot_id in scan_bots:
                 if config.bot_configs and bot_id in config.bot_configs:
                     tz = config.bot_configs[bot_id].timezone
                 else:
                     tz = "UTC"
-                bot_date = bot_trading_date(tz)
+                bot_date = bot_trading_date(tz, reference_time)
                 if (curated_dir / bot_date / bot_id / "summary.json").exists():
                     daily_report_ready = True
                     break
 
         result = scanner.evening_scan(date=date, daily_report_ready=daily_report_ready)
-        hour_utc = datetime.now(timezone.utc).hour
+        hour_utc = reference_time.hour
         for payload in result.payloads:
             try:
                 await dispatcher.dispatch(payload, notification_prefs, hour_utc)
@@ -576,7 +839,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     hypothesis_library = HypothesisLibrary(db_path / "memory" / "findings")
 
-    async def _measure_outcomes() -> None:
+    async def _measure_outcomes(scheduled_for: datetime | None = None) -> None:
         """Measure outcomes of implemented suggestions and link to hypotheses."""
         suggestions = suggestion_tracker.load_all()
         implemented = [
@@ -651,7 +914,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             logger.warning("Prediction evaluation failed during outcome measurement")
 
     # TransferOutcomeMeasurer — runs weekly to measure cross-bot transfer outcomes
-    async def _measure_transfer_outcomes() -> None:
+    async def _measure_transfer_outcomes(scheduled_for: datetime | None = None) -> None:
         """Measure outcomes of cross-bot pattern transfers."""
         try:
             from skills.pattern_library import PatternLibrary
@@ -676,7 +939,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         base_dir=db_path,
     )
 
-    async def _consolidate_memory() -> None:
+    async def _consolidate_memory(scheduled_for: datetime | None = None) -> None:
         """Rebuild memory index and conditionally consolidate findings."""
         try:
             consolidator.rebuild_index()
@@ -726,145 +989,240 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # AuditTrailConsumer — persists SSE events to JSONL
     audit_consumer = AuditTrailConsumer(log_dir=db_path / "logs")
 
-    # Build per-timezone daily analysis triggers
-    daily_analysis_fns: list[dict] | None = None
-    _default_daily_fn = None
-    tz_groups: dict[str, list[str]] = {}
+
+    def _bot_scope_key(bot_ids: list[str]) -> str:
+        if not bot_ids:
+            return "global"
+        return f"bots:{','.join(sorted(bot_ids))}"
+
+    async def _worker_job(scheduled_for: datetime | None = None) -> None:
+        await worker.process_batch()
+
+    async def _monitoring_job(scheduled_for: datetime | None = None) -> None:
+        await monitoring_loop.run_all()
+
+    async def _relay_job(scheduled_for: datetime | None = None) -> None:
+        if vps_receiver is None:
+            await _noop_relay()
+            return
+        await vps_receiver.poll()
+
+    async def _stale_recovery_job(scheduled_for: datetime | None = None) -> None:
+        await queue.recover_stale()
+
+    async def _weekly_summary_trigger(scheduled_for: datetime | None = None) -> None:
+        run_at = (scheduled_for or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+        week_end = run_at.date()
+        week_start = week_end - timedelta(days=6)
+        await queue.enqueue(_build_scheduled_event(
+            job_key="weekly_summary",
+            scope_key="global",
+            scheduled_for=run_at,
+            event_type="weekly_summary_trigger",
+            bot_id="system",
+            payload={
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+            },
+        ))
+
+    async def _approval_expiry_job(scheduled_for: datetime | None = None) -> None:
+        if approval_tracker is None:
+            return
+        await _expire_approvals_with_notification(
+            approval_tracker,
+            telegram_adapter,
+            dispatcher,
+            notification_prefs,
+        )
+
+    async def _pr_review_job(scheduled_for: datetime | None = None) -> None:
+        await _check_pr_reviews()
+
+    async def _deployment_check_job(scheduled_for: datetime | None = None) -> None:
+        if deployment_monitor is None:
+            return
+        await handlers._check_deployments()
+
+    async def _threshold_learning_job(scheduled_for: datetime | None = None) -> None:
+        if threshold_learner is None:
+            return
+        await asyncio.to_thread(threshold_learner.learn_thresholds)
+
+    async def _experiment_check_job(scheduled_for: datetime | None = None) -> None:
+        await _check_experiments()
+
+    scheduler_config = SchedulerConfig()
+    scheduled_job_runner = ScheduledJobRunner(scheduled_run_store)
+    scheduled_job_specs: list[ScheduledJobSpec]
+    tracked_daily_fns: list[dict] | None = None
+    tracked_morning_fns: list[dict] | None = None
+    tracked_evening_fns: list[dict] | None = None
+    tracked_wfo_fns: list[dict] | None = None
+    tracked_daily_fn = None
+    tracked_morning_fn = None
+    tracked_evening_fn = None
 
     if config.bot_configs:
-        from orchestrator.tz_utils import group_bots_by_analysis_time, bot_trading_date
+        from orchestrator.tz_utils import (
+            bot_trading_date as _bot_trading_date,
+            group_bots_by_analysis_time as _group_bots_by_analysis_time,
+            market_close_utc as _market_close_utc,
+        )
 
-        tz_groups = group_bots_by_analysis_time(config.bot_configs)
-        if len(tz_groups) > 1:
-            # Multiple timezone groups — create per-group triggers
-            daily_analysis_fns = []
-            for time_key, bot_list in tz_groups.items():
-                h, m = (int(x) for x in time_key.split(":"))
-                # Capture bot_list in closure
-                def _make_trigger(bots: list[str]):
-                    async def _trigger() -> None:
-                        tz_name = config.bot_configs[bots[0]].timezone
-                        date = bot_trading_date(tz_name)
-                        await queue.enqueue({
-                            "event_type": "daily_analysis_trigger",
-                            "bot_id": "system",
-                            "event_id": f"daily-trigger-{date}-{bots[0]}",
-                            "payload": json.dumps({"bots": bots, "date": date}),
-                        })
-                    return _trigger
-                daily_analysis_fns.append({
-                    "fn": _make_trigger(bot_list),
-                    "hour": h,
-                    "minute": m,
-                    "name_suffix": time_key.replace(":", ""),
-                })
-        else:
-            # All bots in same timezone group — use single trigger
-            _default_daily_fn = lambda: queue.enqueue({
-                "event_type": "daily_analysis_trigger",
-                "bot_id": "system",
-                "event_id": f"daily-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-                "payload": "{}",
-            })
-    else:
-        _default_daily_fn = lambda: queue.enqueue({
-            "event_type": "daily_analysis_trigger",
-            "bot_id": "system",
-            "event_id": f"daily-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-            "payload": "{}",
-        })
+        tracked_daily_fns = []
+        tracked_morning_fns = []
+        tracked_evening_fns = []
+        tracked_groups = _group_bots_by_analysis_time(config.bot_configs)
 
-    # Build per-timezone morning/evening scan triggers
-    morning_scan_fns: list[dict] | None = None
-    evening_report_fns: list[dict] | None = None
-    _default_morning_fn = _morning_scan
-    _default_evening_fn = _evening_report
-
-    if config.bot_configs and daily_analysis_fns and len(daily_analysis_fns) > 1:
-        # Multiple timezone groups — create per-group scanner triggers
-        from orchestrator.tz_utils import market_close_utc as _market_close_utc
-
-        morning_scan_fns = []
-        evening_report_fns = []
-        for time_key, bot_list in tz_groups.items():
+        for time_key, bot_list in tracked_groups.items():
+            trigger_hour, trigger_minute = (int(value) for value in time_key.split(":"))
+            scope_key = _bot_scope_key(bot_list)
+            suffix = time_key.replace(":", "")
+            tz_name = config.bot_configs[bot_list[0]].timezone
             cfg0 = config.bot_configs[bot_list[0]]
             close_utc = _market_close_utc(cfg0.timezone, cfg0.market_close_local)
-            # Morning scan: 9 hours before market close (e.g. ~7 AM local)
             morning_utc = close_utc - timedelta(hours=9)
-            # Evening report: 1 hour after market close
             evening_utc = close_utc + timedelta(hours=1)
 
-            def _make_morning(bots: list[str]):
-                async def _trigger() -> None:
-                    await _morning_scan(bot_ids=bots)
+            def _make_daily_trigger(bots: list[str], tz_name: str, scope_key: str):
+                async def _trigger(scheduled_for: datetime | None = None) -> None:
+                    run_at = (scheduled_for or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+                    await queue.enqueue(_build_scheduled_event(
+                        job_key="daily_analysis",
+                        scope_key=scope_key,
+                        scheduled_for=run_at,
+                        event_type="daily_analysis_trigger",
+                        bot_id="system",
+                        payload={
+                            "bots": bots,
+                            "date": _bot_trading_date(tz_name, run_at),
+                            "run_scope": scope_key,
+                        },
+                    ))
+
                 return _trigger
 
-            def _make_evening(bots: list[str]):
-                async def _trigger() -> None:
-                    await _evening_report(bot_ids=bots)
+            def _make_morning_trigger(bots: list[str]):
+                async def _trigger(scheduled_for: datetime | None = None) -> None:
+                    await _morning_scan(bot_ids=bots, scheduled_for=scheduled_for)
+
                 return _trigger
 
-            morning_scan_fns.append({
-                "fn": _make_morning(bot_list),
+            def _make_evening_trigger(bots: list[str]):
+                async def _trigger(scheduled_for: datetime | None = None) -> None:
+                    await _evening_report(bot_ids=bots, scheduled_for=scheduled_for)
+
+                return _trigger
+
+            tracked_daily_fns.append({
+                "fn": _make_daily_trigger(bot_list, tz_name, scope_key),
+                "hour": trigger_hour,
+                "minute": trigger_minute,
+                "name_suffix": suffix,
+                "scope_key": scope_key,
+            })
+            tracked_morning_fns.append({
+                "fn": _make_morning_trigger(bot_list),
                 "hour": morning_utc.hour,
                 "minute": morning_utc.minute,
-                "name_suffix": time_key.replace(":", ""),
+                "name_suffix": suffix,
+                "scope_key": scope_key,
             })
-            evening_report_fns.append({
-                "fn": _make_evening(bot_list),
+            tracked_evening_fns.append({
+                "fn": _make_evening_trigger(bot_list),
                 "hour": evening_utc.hour,
                 "minute": evening_utc.minute,
-                "name_suffix": time_key.replace(":", ""),
+                "name_suffix": suffix,
+                "scope_key": scope_key,
             })
-        _default_morning_fn = None
-        _default_evening_fn = None
+    else:
+        scope_key = _bot_scope_key(config.bot_ids)
 
-    # Build scheduler jobs
-    scheduler_config = SchedulerConfig()
-    scheduler_jobs = create_scheduler_jobs(
+        async def _global_daily_trigger(scheduled_for: datetime | None = None) -> None:
+            run_at = (scheduled_for or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+            await queue.enqueue(_build_scheduled_event(
+                job_key="daily_analysis",
+                scope_key=scope_key,
+                scheduled_for=run_at,
+                event_type="daily_analysis_trigger",
+                bot_id="system",
+                payload={
+                    "bots": config.bot_ids,
+                    "date": run_at.strftime("%Y-%m-%d"),
+                    "run_scope": scope_key,
+                },
+            ))
+
+        async def _global_morning_trigger(scheduled_for: datetime | None = None) -> None:
+            await _morning_scan(bot_ids=config.bot_ids or None, scheduled_for=scheduled_for)
+
+        async def _global_evening_trigger(scheduled_for: datetime | None = None) -> None:
+            await _evening_report(bot_ids=config.bot_ids or None, scheduled_for=scheduled_for)
+
+        tracked_daily_fn = _global_daily_trigger
+        tracked_morning_fn = _global_morning_trigger
+        tracked_evening_fn = _global_evening_trigger
+
+    if config.bot_ids:
+        tracked_wfo_fns = []
+        for bot_id in config.bot_ids:
+            scope_key = f"bot:{bot_id}"
+
+            def _make_wfo_trigger(bot_id: str, scope_key: str):
+                async def _trigger(scheduled_for: datetime | None = None) -> None:
+                    run_at = (scheduled_for or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+                    await queue.enqueue(_build_scheduled_event(
+                        job_key="wfo",
+                        scope_key=scope_key,
+                        scheduled_for=run_at,
+                        event_type="wfo_trigger",
+                        bot_id=bot_id,
+                        payload={
+                            "bot_id": bot_id,
+                            "data_end": run_at.date().isoformat(),
+                        },
+                    ))
+
+                return _trigger
+
+            tracked_wfo_fns.append({
+                "fn": _make_wfo_trigger(bot_id, scope_key),
+                "name_suffix": bot_id,
+                "scope_key": scope_key,
+            })
+
+    scheduled_job_specs = build_scheduled_job_specs(
         config=scheduler_config,
-        worker_fn=lambda: worker.process_batch(),
-        monitoring_fn=lambda: monitoring_loop.run_all(),
-        relay_fn=vps_receiver.poll if vps_receiver else _noop_relay,
-        daily_analysis_fn=_default_daily_fn,
-        daily_analysis_fns=daily_analysis_fns,
-        weekly_analysis_fn=lambda: queue.enqueue({
-            "event_type": "weekly_summary_trigger",
-            "bot_id": "system",
-            "event_id": f"weekly-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-            "payload": "{}",
-        }),
-        wfo_fn=lambda: queue.enqueue({
-            "event_type": "wfo_trigger",
-            "bot_id": "system",
-            "event_id": f"wfo-trigger-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-            "payload": "{}",
-        }),
-        stale_event_recovery_fn=lambda: queue.recover_stale(),
-        morning_scan_fn=_default_morning_fn,
-        evening_report_fn=_default_evening_fn,
-        morning_scan_fns=morning_scan_fns,
-        evening_report_fns=evening_report_fns,
+        worker_fn=_worker_job,
+        monitoring_fn=_monitoring_job,
+        relay_fn=_relay_job,
+        daily_analysis_fn=tracked_daily_fn,
+        daily_analysis_fns=tracked_daily_fns,
+        weekly_analysis_fn=_weekly_summary_trigger,
+        wfo_fns=tracked_wfo_fns,
+        stale_event_recovery_fn=_stale_recovery_job,
+        morning_scan_fn=tracked_morning_fn,
+        evening_report_fn=tracked_evening_fn,
+        morning_scan_fns=tracked_morning_fns,
+        evening_report_fns=tracked_evening_fns,
         outcome_measurement_fn=_measure_outcomes,
         memory_consolidation_fn=_consolidate_memory,
         transfer_outcome_fn=_measure_transfer_outcomes,
-        approval_expiry_fn=(lambda: _expire_approvals_with_notification(
-            approval_tracker, telegram_adapter, dispatcher, notification_prefs,
-        )) if approval_tracker else None,
-        pr_review_check_fn=_check_pr_reviews if approval_tracker else None,
-        deployment_check_fn=handlers._check_deployments if deployment_monitor else None,
-        threshold_learning_fn=(
-            (lambda: asyncio.to_thread(threshold_learner.learn_thresholds))
-            if threshold_learner else None
-        ),
-        experiment_check_fn=_check_experiments if experiment_manager else None,
+        approval_expiry_fn=_approval_expiry_job if approval_tracker else None,
+        pr_review_check_fn=_pr_review_job if approval_tracker else None,
+        deployment_check_fn=_deployment_check_job if deployment_monitor else None,
+        threshold_learning_fn=_threshold_learning_job if threshold_learner else None,
+        experiment_check_fn=_experiment_check_job if experiment_manager else None,
     )
+    scheduler_jobs = job_specs_to_scheduler_jobs(scheduled_job_specs, scheduled_job_runner)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
             await queue.initialize()
             await registry.initialize()
+            await scheduled_run_store.initialize()
 
             # Validate bot timezones (fail fast on invalid IANA zones)
             for bid, cfg in (config.bot_configs or {}).items():
@@ -899,17 +1257,42 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     logger.warning("Startup drain failed — will retry via scheduler")
 
             # Catch up on missed scheduled jobs (e.g., laptop was off)
+            run_history_path = db_path / "data" / "run_history.jsonl"
             try:
-                from orchestrator.catchup import StartupCatchup
+                seeded_baseline = None
+                store_was_empty = await scheduled_run_store.is_empty()
+                if store_was_empty:
+                    seeded_baseline = await bootstrap_run_store_from_history(
+                        scheduled_run_store,
+                        scheduled_job_specs,
+                        run_history_path,
+                    )
+                if store_was_empty and await scheduled_run_store.get_baseline() is None:
+                    await scheduled_run_store.set_baseline(seeded_baseline or _utc_now())
 
-                run_history_path = db_path / "data" / "run_history.jsonl"
                 catchup = StartupCatchup(
-                    run_history_path=run_history_path,
-                    bot_configs=config.bot_configs or None,
+                    job_specs=scheduled_job_specs,
+                    run_store=scheduled_run_store,
                 )
-                for event in catchup.build_catchup_events():
-                    logger.info("Startup catch-up: enqueuing %s", event.get("event_id"))
-                    await queue.enqueue(event)
+                for occurrence in await catchup.build_plan(now=_utc_now()):
+                    logger.info(
+                        "Startup catch-up: running %s (%s @ %s)",
+                        occurrence.spec.job_key,
+                        occurrence.spec.scope_key,
+                        occurrence.scheduled_for.isoformat(),
+                    )
+                    try:
+                        await scheduled_job_runner.run(
+                            occurrence.spec,
+                            scheduled_for=occurrence.scheduled_for,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Scheduled catch-up failed for %s (%s)",
+                            occurrence.spec.job_key,
+                            occurrence.spec.scope_key,
+                            exc_info=True,
+                        )
             except Exception:
                 logger.warning("Startup catch-up failed", exc_info=True)
 
@@ -953,6 +1336,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
         await queue.close()
         await registry.close()
+        await scheduled_run_store.close()
 
     app = FastAPI(title="Trading Assistant Orchestrator", lifespan=lifespan)
     app.state.start_time = datetime.now(timezone.utc)
@@ -961,12 +1345,15 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # (httpx ASGITransport does not trigger lifespan events)
     app.state.queue = queue
     app.state.registry = registry
+    app.state.scheduled_run_store = scheduled_run_store
+    app.state.scheduled_job_specs = scheduled_job_specs
     app.state.worker = worker
     app.state.event_stream = event_stream
     app.state.session_store = session_store
     app.state.subagent_mgr = subagent_mgr
     app.state.dispatcher = dispatcher
     app.state.agent_runner = agent_runner
+    app.state.agent_preferences = agent_runner.get_preferences()
     app.state.brain = brain
     app.state.handlers = handlers
     app.state.monitoring_loop = monitoring_loop
@@ -981,10 +1368,13 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     app.state.autonomous_pipeline = autonomous_pipeline
     app.state.approval_tracker = approval_tracker
     app.state.approval_handler = approval_handler
+    app.state.repo_task_runner = repo_task_runner
     app.state.deployment_monitor = deployment_monitor
     app.state.threshold_learner = threshold_learner
     app.state.experiment_manager = experiment_manager
     app.state.experiment_config_gen = experiment_config_gen
+    app.state.telegram_callback_router = callback_router
+    app.state.telegram_renderer = telegram_renderer
 
     @app.get("/health")
     async def health():
@@ -1029,7 +1419,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     @app.post("/ingest")
     async def ingest_event(event: dict):
         """Direct event ingest — bypasses relay, useful for testing."""
-        event.setdefault("received_at", datetime.now(timezone.utc).isoformat())
+        event = _normalize_queue_event(event)
         # Record latency for directly ingested events too
         ex_ts = event.get("exchange_timestamp", "")
         rx_ts = event.get("received_at", "")
@@ -1087,6 +1477,21 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             raise HTTPException(status_code=404, detail="Event not found in dead-letter queue")
         return {"status": "requeued", "event_id": event_id}
 
+    @app.get("/agent/preferences")
+    async def get_agent_preferences():
+        return agent_runner.get_preferences_view().model_dump(mode="json")
+
+    @app.put("/agent/preferences")
+    async def update_agent_preferences(prefs: AgentPreferences):
+        try:
+            agent_runner.update_preferences(prefs)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        app.state.agent_preferences = agent_runner.get_preferences()
+        _save_agent_preferences(app.state.agent_preferences, agent_prefs_path)
+        return agent_runner.get_preferences_view().model_dump(mode="json")
+
     @app.get("/notifications/preferences")
     async def get_notification_preferences():
         return app.state.notification_preferences.model_dump()
@@ -1108,17 +1513,20 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         """
         text = body.get("text", "")
         if not text:
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="'text' field is required")
         import secrets
+
+        event_time = _utc_now()
         feedback_event = {
             "event_type": "user_feedback",
             "bot_id": body.get("bot_id", "user"),
-            "event_id": f"feedback-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}",
+            "event_id": f"feedback-{event_time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(6)}",
             "payload": json.dumps({
                 "text": text,
                 "report_id": body.get("report_id", "unknown"),
             }),
+            "exchange_timestamp": event_time.isoformat(),
+            "received_at": event_time.isoformat(),
         }
         inserted = await queue.enqueue(feedback_event)
         return {"inserted": inserted, "event_id": feedback_event["event_id"]}

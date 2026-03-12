@@ -106,6 +106,37 @@ class OrchestratorBrain:
             return handler(self, event_id, bot_id, event)
         return self._handle_unknown(event_id, bot_id, event)
 
+    def _queue_for_daily_event(
+        self,
+        event_id: str,
+        bot_id: str,
+        event: dict,
+        event_type: str | None = None,
+    ) -> list[Action]:
+        raw_event_type = event_type or event.get("event_type", "")
+        return [Action(
+            type=ActionType.QUEUE_FOR_DAILY,
+            event_id=event_id,
+            bot_id=bot_id,
+            details={
+                "event_type": raw_event_type,
+                "payload": self._extract_persistable_payload(event),
+                "exchange_timestamp": event.get("exchange_timestamp"),
+            },
+        )]
+
+    @staticmethod
+    def _extract_persistable_payload(event: dict) -> object:
+        payload = event.get("payload")
+        if payload not in (None, ""):
+            return payload
+
+        return {
+            key: value
+            for key, value in event.items()
+            if key not in {"event_id", "bot_id", "event_type", "received_at", "chain_id"}
+        }
+
     def _handle_trade(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
@@ -143,17 +174,51 @@ class OrchestratorBrain:
     def _handle_heartbeat(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.UPDATE_HEARTBEAT, event_id=event_id, bot_id=bot_id)]
 
+    def _payload_details(self, event: dict) -> dict:
+        payload = event.get("payload", {})
+        if isinstance(payload, dict):
+            return dict(payload)
+        if not isinstance(payload, str) or not payload.strip():
+            return {}
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
     def _handle_daily_analysis_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.SPAWN_DAILY_ANALYSIS, event_id=event_id, bot_id=bot_id)]
+        return [Action(
+            type=ActionType.SPAWN_DAILY_ANALYSIS,
+            event_id=event_id,
+            bot_id=bot_id,
+            details=self._payload_details(event),
+        )]
 
     def _handle_weekly_summary_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.SPAWN_WEEKLY_SUMMARY, event_id=event_id, bot_id=bot_id)]
+        return [Action(
+            type=ActionType.SPAWN_WEEKLY_SUMMARY,
+            event_id=event_id,
+            bot_id=bot_id,
+            details=self._payload_details(event),
+        )]
 
     def _handle_wfo_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.SPAWN_WFO, event_id=event_id, bot_id=bot_id)]
+        details = self._payload_details(event)
+        details.setdefault("bot_id", bot_id)
+        return [Action(
+            type=ActionType.SPAWN_WFO,
+            event_id=event_id,
+            bot_id=bot_id,
+            details=details,
+        )]
 
     def _handle_notification_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.SEND_NOTIFICATION, event_id=event_id, bot_id=bot_id)]
+        return [Action(
+            type=ActionType.SEND_NOTIFICATION,
+            event_id=event_id,
+            bot_id=bot_id,
+            details=self._payload_details(event),
+        )]
 
     def _handle_user_feedback(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         payload = json.loads(event.get("payload", "{}"))
@@ -166,10 +231,10 @@ class OrchestratorBrain:
         sizing adjustments) and are consumed by the daily metrics pipeline to
         produce coordinator_impact.json.
         """
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "coordinator_action")
 
     def _handle_daily_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "daily_snapshot")
 
     def _handle_order(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
@@ -193,16 +258,13 @@ class OrchestratorBrain:
         return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
 
     def _handle_indicator_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id,
-                        details={"event_type": "indicator_snapshot", "payload": event.get("payload", "{}")})]
+        return self._queue_for_daily_event(event_id, bot_id, event, "indicator_snapshot")
 
     def _handle_orderbook_context(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id,
-                        details={"event_type": "orderbook_context", "payload": event.get("payload", "{}")})]
+        return self._queue_for_daily_event(event_id, bot_id, event, "orderbook_context")
 
     def _handle_filter_decision(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id,
-                        details={"event_type": "filter_decision", "payload": event.get("payload", "{}")})]
+        return self._queue_for_daily_event(event_id, bot_id, event, "filter_decision")
 
     def _handle_parameter_change(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         """Route parameter changes — safety-critical params get immediate alert."""
@@ -222,8 +284,7 @@ class OrchestratorBrain:
                 bot_id=bot_id,
                 details={"param_name": param_name, "safety_critical": True, **payload},
             )]
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id,
-                        details={"event_type": "parameter_change", "payload": event.get("payload", "{}")})]
+        return self._queue_for_daily_event(event_id, bot_id, event, "parameter_change")
 
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.LOG_UNKNOWN, event_id=event_id, bot_id=bot_id)]

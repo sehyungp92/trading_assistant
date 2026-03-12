@@ -6,7 +6,7 @@ from curated daily summaries, and records outcomes via SuggestionTracker.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from schemas.outcome_measurement import OutcomeMeasurement
@@ -33,7 +33,7 @@ class AutoOutcomeMeasurer:
     ) -> OutcomeMeasurement | None:
         """Compare performance before and after a suggestion was implemented."""
         impl_date = datetime.strptime(implemented_date, "%Y-%m-%d")
-        today = datetime.now()
+        today = datetime.now(timezone.utc)
 
         before_start = impl_date - timedelta(days=before_days)
         after_end = impl_date + timedelta(days=after_days)
@@ -44,8 +44,8 @@ class AutoOutcomeMeasurer:
         if not before_summaries or not after_summaries:
             return None
 
-        before_pnl = sum(s.get("gross_pnl", 0) for s in before_summaries)
-        after_pnl = sum(s.get("gross_pnl", 0) for s in after_summaries)
+        before_pnl = sum(self._summary_pnl(s) for s in before_summaries)
+        after_pnl = sum(self._summary_pnl(s) for s in after_summaries)
 
         before_wins = sum(s.get("win_count", 0) for s in before_summaries)
         before_total = sum(s.get("total_trades", 0) for s in before_summaries)
@@ -96,6 +96,17 @@ class AutoOutcomeMeasurer:
                     "new_params": curr,
                 })
         return changes
+
+    @staticmethod
+    def _summary_pnl(summary: dict) -> float:
+        """Prefer net PnL because it reflects fees/slippage in live trading."""
+        value = summary.get("net_pnl")
+        if value is None:
+            value = summary.get("gross_pnl", 0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _load_summaries(
         self, bot_id: str, start: datetime, end: datetime

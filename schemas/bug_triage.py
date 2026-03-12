@@ -1,8 +1,4 @@
-"""Bug triage schemas — error events, severity, complexity, and triage outcomes.
-
-Used by the deterministic severity classifier and bug complexity classifier
-to route errors through the triage pipeline.
-"""
+"""Schemas for deterministic bug triage and structured repair proposals."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,6 +6,8 @@ from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+from schemas.autonomous_pipeline import FileChange
 
 
 class BugSeverity(str, Enum):
@@ -24,20 +22,26 @@ class BugSeverity(str, Enum):
 
 
 class BugComplexity(str, Enum):
-    OBVIOUS_FIX = "obvious_fix"       # stack trace → obvious fix, dep bumps, config
-    SINGLE_FUNCTION = "single_function"  # single-function logic errors
-    MULTI_FILE = "multi_file"         # touches multiple files
-    STATE_DEPENDENT = "state_dependent"  # timing, exchange edge cases
+    OBVIOUS_FIX = "obvious_fix"
+    SINGLE_FUNCTION = "single_function"
+    MULTI_FILE = "multi_file"
+    STATE_DEPENDENT = "state_dependent"
     UNKNOWN = "unknown"
 
 
 class TriageOutcome(str, Enum):
-    KNOWN_FIX = "known_fix"                   # auto-fix → draft PR
-    NEEDS_INVESTIGATION = "needs_investigation"  # create GitHub issue
-    NEEDS_HUMAN = "needs_human"               # Telegram alert with summary
-    QUEUED_FOR_DAILY = "queued_for_daily"     # MEDIUM severity
-    QUEUED_FOR_WEEKLY = "queued_for_weekly"   # LOW severity
-    ALERTED = "alerted"                       # CRITICAL → immediate alert
+    KNOWN_FIX = "known_fix"
+    NEEDS_INVESTIGATION = "needs_investigation"
+    NEEDS_HUMAN = "needs_human"
+    QUEUED_FOR_DAILY = "queued_for_daily"
+    QUEUED_FOR_WEEKLY = "queued_for_weekly"
+    ALERTED = "alerted"
+
+
+class TriageProposalType(str, Enum):
+    BUG_FIX = "bug_fix"
+    INVESTIGATION = "investigation"
+    HUMAN = "human"
 
 
 class ErrorCategory(str, Enum):
@@ -58,27 +62,40 @@ class ErrorEvent(BaseModel):
     """An error event received from a VPS bot sidecar."""
 
     bot_id: str
-    error_type: str             # e.g. "RuntimeError", "ConnectionError"
-    message: str                # error message text
-    stack_trace: str            # full traceback
-    source_file: str = ""       # file where error originated
-    source_line: int = 0        # line number
-    severity: Optional[BugSeverity] = None    # set by classifier
-    category: Optional[ErrorCategory] = None  # set by classifier
-    context: dict = {}          # arbitrary context from the bot
+    error_type: str
+    message: str
+    stack_trace: str
+    source_file: str = ""
+    source_line: int = 0
+    severity: Optional[BugSeverity] = None
+    category: Optional[ErrorCategory] = None
+    context: dict = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class TriageResult(BaseModel):
-    """The outcome of triaging an error event."""
+    """The outcome of deterministic triage."""
 
     error_event: ErrorEvent
     severity: BugSeverity
     complexity: BugComplexity
     outcome: TriageOutcome
     suggested_fix: str = ""
-    affected_files: list[str] = []
+    affected_files: list[str] = Field(default_factory=list)
     github_issue_url: str = ""
     pr_url: str = ""
-    past_rejections: list[str] = []
+    past_rejections: list[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TriageRepairProposal(BaseModel):
+    """Structured output expected from the triage analysis agent."""
+
+    proposal_type: TriageProposalType = TriageProposalType.BUG_FIX
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    candidate_files: list[str] = Field(default_factory=list)
+    issue_title: str = ""
+    issue_body: str = ""
+    fix_plan: str = ""
+    risk_notes: str = ""
+    file_changes: list[FileChange] = Field(default_factory=list)

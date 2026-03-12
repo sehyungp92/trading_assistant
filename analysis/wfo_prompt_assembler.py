@@ -1,5 +1,5 @@
 # analysis/wfo_prompt_assembler.py
-"""WFO prompt assembler — builds context package for Claude WFO analysis.
+"""WFO prompt assembler — builds context package for WFO analysis runtime.
 
 Uses ContextBuilder for shared policy loading. Adds WFO-specific
 data: optimization report, skill context, safety flags.

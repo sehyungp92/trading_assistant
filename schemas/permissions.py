@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import IntEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PermissionTier(IntEnum):
@@ -17,5 +17,5 @@ class PermissionTier(IntEnum):
 class PermissionCheckResult(BaseModel):
     tier: PermissionTier
     allowed: bool  # True only for AUTO tier
-    flagged_files: list[str] = []
+    flagged_files: list[str] = Field(default_factory=list)
     reason: str = ""

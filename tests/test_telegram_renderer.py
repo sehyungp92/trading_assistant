@@ -2,6 +2,13 @@
 """Tests for Telegram-specific message renderer."""
 from comms.telegram_renderer import TelegramRenderer
 from comms.renderer import MessageRenderer
+from schemas.agent_preferences import (
+    AgentPreferencesView,
+    AgentProvider,
+    AgentSelection,
+    AgentWorkflow,
+    ProviderReadiness,
+)
 from schemas.notifications import (
     ControlPanelState,
     BotStatusLine,
@@ -172,3 +179,93 @@ class TestTelegramEscaping:
         text = TelegramRenderer().render_alert(payload)
         assert "Bot" in text
         assert "342" in text
+
+
+class TestTelegramAgentSettings:
+    def _view(self) -> AgentPreferencesView:
+        return AgentPreferencesView(
+            default=AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="sonnet"),
+            overrides={
+                AgentWorkflow.WFO: AgentSelection(
+                    provider=AgentProvider.CODEX_PRO,
+                    model="gpt-5.4",
+                ),
+            },
+            effective={
+                AgentWorkflow.DAILY_ANALYSIS: AgentSelection(
+                    provider=AgentProvider.CLAUDE_MAX,
+                    model="sonnet",
+                ),
+                AgentWorkflow.WEEKLY_ANALYSIS: AgentSelection(
+                    provider=AgentProvider.CLAUDE_MAX,
+                    model="sonnet",
+                ),
+                AgentWorkflow.WFO: AgentSelection(
+                    provider=AgentProvider.CODEX_PRO,
+                    model="gpt-5.4",
+                ),
+                AgentWorkflow.TRIAGE: AgentSelection(
+                    provider=AgentProvider.CLAUDE_MAX,
+                    model="sonnet",
+                ),
+            },
+            providers=[
+                ProviderReadiness(
+                    provider=AgentProvider.CLAUDE_MAX,
+                    available=True,
+                    runtime="claude_cli",
+                ),
+                ProviderReadiness(
+                    provider=AgentProvider.CODEX_PRO,
+                    available=True,
+                    runtime="codex_cli",
+                ),
+                ProviderReadiness(
+                    provider=AgentProvider.ZAI_CODING_PLAN,
+                    available=False,
+                    runtime="claude_cli",
+                    reason="ZAI_API_KEY is not configured",
+                ),
+                ProviderReadiness(
+                    provider=AgentProvider.OPENROUTER,
+                    available=False,
+                    runtime="claude_cli",
+                    reason="OPENROUTER_API_KEY is not configured",
+                ),
+            ],
+        )
+
+    def test_renders_agent_settings_home(self):
+        text, keyboard = TelegramRenderer().render_agent_settings(self._view())
+
+        assert "Agent Settings" in text
+        assert "Global: Claude Max (sonnet)" in text
+        assert "WFO: Codex Pro (gpt-5.4) (override)" in text
+        assert "ZAI_API_KEY is not configured" in text
+        button_labels = [btn["text"] for row in keyboard for btn in row]
+        assert "Global" in button_labels
+        assert "Daily" in button_labels
+        assert "Triage" in button_labels
+
+    def test_renders_global_scope_buttons(self):
+        text, keyboard = TelegramRenderer().render_agent_settings(self._view(), scope="global")
+
+        assert "Agent Settings - Global" in text
+        assert "Choose the provider used when a workflow has no override" in text
+        callback_values = [btn["callback_data"] for row in keyboard for btn in row]
+        assert "agent_settings_set_global|claude_max" in callback_values
+        assert "agent_settings_set_global|openrouter" in callback_values
+        assert "agent_settings_home" in callback_values
+
+    def test_renders_workflow_scope_with_use_global(self):
+        text, keyboard = TelegramRenderer().render_agent_settings(
+            self._view(),
+            scope=AgentWorkflow.WFO,
+        )
+
+        assert "Agent Settings - WFO" in text
+        assert "Effective: Codex Pro (gpt-5.4)" in text
+        assert "Override: Codex Pro (gpt-5.4)" in text
+        callback_values = [btn["callback_data"] for row in keyboard for btn in row]
+        assert "agent_settings_set_wfo|codex_pro" in callback_values
+        assert "agent_settings_clear_wfo" in callback_values

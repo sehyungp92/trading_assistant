@@ -11,6 +11,7 @@ from schemas.autonomous_pipeline import (
     BacktestComparison,
     BacktestContext,
     FileChange,
+    GitHubIssueRequest,
     PRRequest,
     ReviewState,
 )
@@ -24,7 +25,7 @@ def _make_request(**kwargs) -> PRRequest:
         suggestion_id=kwargs.get("suggestion_id", "s1"),
         bot_id=kwargs.get("bot_id", "bot1"),
         repo_dir=kwargs.get("repo_dir", "/repos/bot1"),
-        branch_name=kwargs.get("branch_name", "ta/suggestion-s1-2026-03-07"),
+        branch_name=kwargs.get("branch_name", "codex/suggestion-s1-2026-03-07"),
         title=kwargs.get("title", "Increase quality threshold"),
         body=kwargs.get("body", "Backtest results look good"),
         file_changes=kwargs.get("file_changes", [
@@ -38,6 +39,12 @@ def _make_request(**kwargs) -> PRRequest:
     )
 
 
+def _temp_repo_dir(tmp_path: Path) -> Path:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(exist_ok=True)
+    return repo_dir
+
+
 class TestPRBuilder:
     @pytest.mark.asyncio
     async def test_dry_run_skips_git(self):
@@ -45,26 +52,26 @@ class TestPRBuilder:
         result = await builder.create_pr(_make_request())
         assert result.success is True
         assert "dry-run" in result.error
-        assert result.branch_name == "ta/suggestion-s1-2026-03-07"
+        assert result.branch_name == "codex/suggestion-s1-2026-03-07"
 
     @pytest.mark.asyncio
-    async def test_successful_pr_creation(self):
+    async def test_successful_pr_creation(self, tmp_path: Path):
         builder = PRBuilder()
         with patch.object(builder, "_run_git", new_callable=AsyncMock) as mock_git, \
              patch.object(builder, "_run_cmd", new_callable=AsyncMock) as mock_cmd:
             mock_git.return_value = (0, "", "")
             mock_cmd.return_value = (0, "https://github.com/user/repo/pull/42\n", "")
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
             assert result.success is True
             assert result.pr_url == "https://github.com/user/repo/pull/42"
 
     @pytest.mark.asyncio
     async def test_branch_name_format(self):
-        req = _make_request(branch_name="ta/suggestion-abc12345-2026-03-07")
-        assert req.branch_name.startswith("ta/suggestion-")
+        req = _make_request(branch_name="codex/suggestion-abc12345-2026-03-07")
+        assert req.branch_name.startswith("codex/suggestion-")
 
     @pytest.mark.asyncio
-    async def test_commit_message_format(self):
+    async def test_commit_message_format(self, tmp_path: Path):
         builder = PRBuilder()
         calls = []
 
@@ -74,14 +81,14 @@ class TestPRBuilder:
 
         with patch.object(builder, "_run_git", side_effect=mock_git), \
              patch.object(builder, "_run_cmd", new_callable=AsyncMock, return_value=(0, "url", "")):
-            await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
 
         commit_calls = [c for c in calls if c[0] == "commit"]
         assert len(commit_calls) == 1
         assert "trading-assistant:" in commit_calls[0][2]
 
     @pytest.mark.asyncio
-    async def test_git_pull_failure(self):
+    async def test_git_pull_failure(self, tmp_path: Path):
         builder = PRBuilder()
         call_count = [0]
 
@@ -98,12 +105,12 @@ class TestPRBuilder:
             return (0, "", "")
 
         with patch.object(builder, "_run_git", side_effect=mock_git):
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
             assert result.success is False
             assert "git pull failed" in result.error
 
     @pytest.mark.asyncio
-    async def test_gh_pr_create_failure(self):
+    async def test_gh_pr_create_failure(self, tmp_path: Path):
         builder = PRBuilder()
         call_count = [0]
 
@@ -116,7 +123,7 @@ class TestPRBuilder:
 
         with patch.object(builder, "_run_git", side_effect=mock_git), \
              patch.object(builder, "_run_cmd", side_effect=mock_cmd):
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
             assert result.success is False
             assert "gh pr create failed" in result.error
 
@@ -158,6 +165,42 @@ class TestPRBuilder:
         ]
         result = await builder.create_pr(_make_request(file_changes=changes))
         assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_create_pr_stages_only_changed_files(self, tmp_path: Path):
+        builder = PRBuilder()
+        calls = []
+
+        async def mock_git(args, cwd):
+            calls.append(args)
+            if args[0] == "ls-remote" and "--heads" in args:
+                return (0, "", "")
+            return (0, "", "")
+
+        with patch.object(builder, "_run_git", side_effect=mock_git), \
+             patch.object(builder, "_run_cmd", new_callable=AsyncMock, return_value=(0, "https://github.com/x/y/pull/1\n", "")):
+            await builder.create_pr(_make_request(
+                repo_dir=str(_temp_repo_dir(tmp_path)),
+                file_changes=[
+                    FileChange(file_path="a.yaml", original_content="x: 1", new_content="x: 2"),
+                    FileChange(file_path="b.py", original_content="Y = 1", new_content="Y = 2"),
+                ],
+            ))
+
+        add_calls = [call for call in calls if call[0] == "add"]
+        assert add_calls == [["add", "--", "a.yaml", "b.py"]]
+
+    @pytest.mark.asyncio
+    async def test_create_pr_rejects_no_material_changes(self, tmp_path: Path):
+        builder = PRBuilder()
+        result = await builder.create_pr(_make_request(
+            repo_dir=str(_temp_repo_dir(tmp_path)),
+            file_changes=[
+                FileChange(file_path="config.yaml", original_content="x: 1", new_content="x: 1"),
+            ],
+        ))
+        assert result.success is False
+        assert "No material file changes" in result.error
 
     def test_pr_title_format(self):
         req = _make_request(title="Increase quality threshold")
@@ -212,20 +255,20 @@ class TestPreflightCheck:
         assert result.preflight is None
 
     @pytest.mark.asyncio
-    async def test_create_pr_blocks_on_preflight_failure(self):
+    async def test_create_pr_blocks_on_preflight_failure(self, tmp_path: Path):
         builder = PRBuilder()
         with patch.object(builder, "_run_git", new_callable=AsyncMock) as mock_git:
             mock_git.side_effect = [
                 (0, "", ""),                # clean
                 (128, "", "unreachable"),    # remote fail
             ]
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
         assert result.success is False
         assert result.preflight is not None
         assert not result.preflight.passed
 
     @pytest.mark.asyncio
-    async def test_create_pr_proceeds_with_dirty_tree(self):
+    async def test_create_pr_proceeds_with_dirty_tree(self, tmp_path: Path):
         builder = PRBuilder()
         with patch.object(builder, "_run_git", new_callable=AsyncMock) as mock_git, \
              patch.object(builder, "_run_cmd", new_callable=AsyncMock) as mock_cmd:
@@ -242,7 +285,7 @@ class TestPreflightCheck:
                 (0, "", ""),                 # push
             ]
             mock_cmd.return_value = (0, "https://github.com/x/y/pull/1\n", "")
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
         assert result.success is True
 
 
@@ -251,25 +294,25 @@ class TestBranchPRDedup:
     async def test_no_existing_branch(self):
         builder = PRBuilder()
         with patch.object(builder, "_run_git", new_callable=AsyncMock, return_value=(0, "", "")):
-            exists, url = await builder.check_existing_pr("ta/test", Path("/tmp"))
+            exists, url = await builder.check_existing_pr("codex/test", Path("/tmp"))
         assert exists is False
         assert url is None
 
     @pytest.mark.asyncio
     async def test_branch_with_open_pr(self):
         builder = PRBuilder()
-        with patch.object(builder, "_run_git", new_callable=AsyncMock, return_value=(0, "abc refs/heads/ta/test", "")), \
+        with patch.object(builder, "_run_git", new_callable=AsyncMock, return_value=(0, "abc refs/heads/codex/test", "")), \
              patch.object(builder, "_run_cmd", new_callable=AsyncMock, return_value=(0, '[{"number":42,"url":"https://github.com/x/y/pull/42"}]', "")):
-            exists, url = await builder.check_existing_pr("ta/test", Path("/tmp"))
+            exists, url = await builder.check_existing_pr("codex/test", Path("/tmp"))
         assert exists is True
         assert url == "https://github.com/x/y/pull/42"
 
     @pytest.mark.asyncio
     async def test_branch_no_open_pr(self):
         builder = PRBuilder()
-        with patch.object(builder, "_run_git", new_callable=AsyncMock, return_value=(0, "abc refs/heads/ta/test", "")), \
+        with patch.object(builder, "_run_git", new_callable=AsyncMock, return_value=(0, "abc refs/heads/codex/test", "")), \
              patch.object(builder, "_run_cmd", new_callable=AsyncMock, return_value=(0, "[]", "")):
-            exists, url = await builder.check_existing_pr("ta/test", Path("/tmp"))
+            exists, url = await builder.check_existing_pr("codex/test", Path("/tmp"))
         assert exists is True
         assert url is None
 
@@ -280,16 +323,75 @@ class TestBranchPRDedup:
         assert result.existing_pr_url is None
 
     @pytest.mark.asyncio
-    async def test_create_pr_returns_existing(self):
+    async def test_create_pr_returns_existing(self, tmp_path: Path):
         builder = PRBuilder()
         with patch.object(builder, "preflight_check", new_callable=AsyncMock) as mock_pf, \
              patch.object(builder, "check_existing_pr", new_callable=AsyncMock) as mock_dedup:
             from schemas.autonomous_pipeline import PreflightResult
             mock_pf.return_value = PreflightResult(passed=True)
             mock_dedup.return_value = (True, "https://github.com/x/y/pull/42")
-            result = await builder.create_pr(_make_request(repo_dir=str(Path.cwd())))
+            result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))
         assert result.success is True
         assert result.existing_pr_url == "https://github.com/x/y/pull/42"
+
+
+class TestIssueCreation:
+    @pytest.mark.asyncio
+    async def test_create_issue_returns_existing(self):
+        builder = PRBuilder()
+        request = GitHubIssueRequest(
+            bot_id="bot1",
+            title="Investigate crash",
+            body="details",
+            repo_dir=str(Path.cwd()),
+            dedupe_key="bot1:ImportError",
+        )
+        with patch.object(builder, "_run_cmd", new_callable=AsyncMock) as mock_cmd:
+            mock_cmd.return_value = (0, '[{"number": 4, "title": "Investigate crash", "url": "https://github.com/x/y/issues/4"}]', "")
+            result = await builder.create_issue(request)
+        assert result.success is True
+        assert result.existing_issue_url == "https://github.com/x/y/issues/4"
+
+    @pytest.mark.asyncio
+    async def test_create_issue_success(self):
+        builder = PRBuilder()
+        request = GitHubIssueRequest(
+            bot_id="bot1",
+            title="Investigate crash",
+            body="details",
+            repo_dir=str(Path.cwd()),
+            labels=["trading-assistant"],
+        )
+
+        async def mock_cmd(args, cwd, timeout_seconds=60):
+            if args[:3] == ["gh", "issue", "list"]:
+                return (0, "[]", "")
+            return (0, "https://github.com/x/y/issues/7\n", "")
+
+        with patch.object(builder, "_run_cmd", side_effect=mock_cmd):
+            result = await builder.create_issue(request)
+        assert result.success is True
+        assert result.issue_url == "https://github.com/x/y/issues/7"
+
+    @pytest.mark.asyncio
+    async def test_create_issue_dedupes_by_dedupe_key_search(self):
+        builder = PRBuilder()
+        request = GitHubIssueRequest(
+            bot_id="bot1",
+            title="Investigate crash",
+            body="details",
+            repo_dir=str(Path.cwd()),
+            dedupe_key="bot1:ImportError:No module named foo",
+        )
+        with patch.object(builder, "_run_cmd", new_callable=AsyncMock) as mock_cmd:
+            mock_cmd.return_value = (
+                0,
+                '[{"number": 9, "title": "Some other issue title", "url": "https://github.com/x/y/issues/9"}]',
+                "",
+            )
+            result = await builder.create_issue(request)
+        assert result.success is True
+        assert result.existing_issue_url == "https://github.com/x/y/issues/9"
 
 
 class TestDiffPreview:
