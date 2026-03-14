@@ -27,4 +27,4 @@ Restricted paths: `strategies/*`, `risk/*`, `execution/*`, `sizing/*`, `filters/
 - modify_exchange_connectivity
 - change_permission_gates
 
-Restricted paths: `deploy/*`, `infra/*`, `.env*`, `keys/*`, `kill_switch*`, `memory/policies/*`
+Restricted paths: `deploy/*`, `infra/*`, `.env*`, `keys/*`, `kill_switch*`, `memory/policies/*`, `skills/ground_truth_computer.py`

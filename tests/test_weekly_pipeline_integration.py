@@ -76,8 +76,8 @@ def _setup_memory(memory_dir: Path) -> None:
 
 def _setup_runs(runs_dir: Path) -> None:
     """Create 7 days of daily report stubs."""
-    for date in _DATES:
-        run_dir = runs_dir / date / "daily-report"
+    for index, date in enumerate(_DATES):
+        run_dir = runs_dir / f"daily-{date}-run{index}"
         run_dir.mkdir(parents=True)
         (run_dir / "daily_report.md").write_text(f"# Daily Report {date}\nAll good.")
 

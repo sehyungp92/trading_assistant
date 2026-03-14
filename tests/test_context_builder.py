@@ -127,7 +127,7 @@ class TestLoadRejectedSuggestions:
         suggestions_path = findings / "suggestions.jsonl"
         suggestions_path.write_text(
             '{"suggestion_id":"s001","bot_id":"bot1","title":"Widen stop","status":"rejected","rejection_reason":"No evidence"}\n'
-            '{"suggestion_id":"s002","bot_id":"bot1","title":"Remove filter","status":"implemented"}\n'
+            '{"suggestion_id":"s002","bot_id":"bot1","title":"Remove filter","status":"deployed"}\n'
         )
         ctx = ContextBuilder(memory_dir=tmp_path)
         rejected = ctx.load_rejected_suggestions()
@@ -216,3 +216,112 @@ class TestLoadAllocationHistory:
         ctx = ContextBuilder(memory_dir=tmp_path)
         pkg = ctx.base_package()
         assert "allocation_history" not in pkg.data
+
+
+class TestLoadSearchReports:
+    def test_loads_recent_search_reports(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        reports = [
+            {"suggestion_id": f"s{i}", "bot_id": "bot1", "param_name": "p1",
+             "routing": "approve", "best_value": 0.7, "discard_reason": "",
+             "exploration_summary": "ok", "searched_at": "2026-03-01T00:00:00Z"}
+            for i in range(8)
+        ]
+        with (findings / "search_reports.jsonl").open("w") as f:
+            for r in reports:
+                f.write(json.dumps(r) + "\n")
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        result = ctx.load_search_reports(lookback_n=5)
+        assert len(result) == 5  # Only last 5
+
+    def test_filters_by_bot_id(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        reports = [
+            {"bot_id": "bot1", "param_name": "p1", "routing": "approve"},
+            {"bot_id": "bot2", "param_name": "p2", "routing": "discard"},
+        ]
+        with (findings / "search_reports.jsonl").open("w") as f:
+            for r in reports:
+                f.write(json.dumps(r) + "\n")
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        result = ctx.load_search_reports(bot_id="bot1")
+        assert len(result) == 1
+        assert result[0]["param_name"] == "p1"
+
+    def test_base_package_includes_search_reports(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        (findings / "search_reports.jsonl").write_text(
+            json.dumps({"bot_id": "bot1", "param_name": "p1", "routing": "approve"}) + "\n"
+        )
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        pkg = ctx.base_package()
+        assert "search_reports" in pkg.data
+        assert len(pkg.data["search_reports"]) == 1
+
+
+class TestLoadBacktestReliability:
+    def test_loads_per_category_reliability(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        records = []
+        for i in range(5):
+            records.append({
+                "suggestion_id": f"s{i}", "bot_id": "bot1",
+                "param_category": "signal", "predicted_improvement": 1.1,
+                "predicted_routing": "approve",
+                "prediction_correct": i < 4,  # 4/5 = 0.80
+            })
+        with (findings / "backtest_calibration.jsonl").open("w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        result = ctx.load_backtest_reliability()
+        assert "signal" in result
+        assert result["signal"] == 0.8
+
+    def test_excludes_categories_below_min_samples(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        records = [
+            {"bot_id": "bot1", "param_category": "exit",
+             "prediction_correct": True},
+            {"bot_id": "bot1", "param_category": "exit",
+             "prediction_correct": False},
+        ]
+        with (findings / "backtest_calibration.jsonl").open("w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        result = ctx.load_backtest_reliability()
+        assert "exit" not in result  # Only 2 samples, need >= 3
+
+    def test_base_package_includes_backtest_reliability(self, tmp_path):
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        records = [
+            {"bot_id": "bot1", "param_category": "signal",
+             "prediction_correct": True}
+            for _ in range(4)
+        ]
+        with (findings / "backtest_calibration.jsonl").open("w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        pkg = ctx.base_package()
+        assert "backtest_reliability" in pkg.data
+        assert pkg.data["backtest_reliability"]["signal"] == 1.0

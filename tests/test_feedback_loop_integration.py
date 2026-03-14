@@ -97,8 +97,8 @@ class TestFeedbackLoopIntegration:
         assert any(s["suggestion_id"] == "abc123" for s in pkg.data["active_suggestions"])
 
     @pytest.mark.asyncio
-    async def test_accept_suggestion_sets_implemented(self, tmp_path):
-        """4-5. User accepts suggestion → status transitions to IMPLEMENTED."""
+    async def test_accept_suggestion_sets_accepted(self, tmp_path):
+        """4-5. User accepts suggestion → status transitions to ACCEPTED."""
         h, tracker, es = _make_handlers(tmp_path)
 
         # Record a suggestion first
@@ -118,11 +118,12 @@ class TestFeedbackLoopIntegration:
 
         all_recs = tracker.load_all()
         match = [r for r in all_recs if r["suggestion_id"] == "abc123"]
-        assert match[0]["status"] == "implemented"
-        assert match[0]["resolved_at"] is not None
+        assert match[0]["status"] == SuggestionStatus.ACCEPTED.value
+        assert match[0]["accepted_at"] is not None
+        assert match[0]["resolved_at"] is None
 
-    def test_outcome_measurement_on_implemented(self, tmp_path):
-        """6. AutoOutcomeMeasurer finds IMPLEMENTED and measures it."""
+    def test_outcome_measurement_on_deployed(self, tmp_path):
+        """6. AutoOutcomeMeasurer finds DEPLOYED and measures it."""
         memory_dir = tmp_path / "memory"
         findings_dir = memory_dir / "findings"
         findings_dir.mkdir(parents=True)
@@ -132,7 +133,8 @@ class TestFeedbackLoopIntegration:
             suggestion_id="abc123", bot_id="bot1", title="Widen stop",
             tier="parameter", source_report_id="weekly-2026-03-01",
         ))
-        tracker.implement("abc123")
+        tracker.accept("abc123")
+        tracker.mark_deployed("abc123")
 
         # Simulate outcome measurement
         outcome = SuggestionOutcome(

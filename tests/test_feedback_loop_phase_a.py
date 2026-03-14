@@ -363,7 +363,7 @@ class TestFeedbackPatterns:
 
         suggestions = tracker.load_all()
         match = [s for s in suggestions if s["suggestion_id"] == "abc123"]
-        assert match[0]["status"] == "implemented"
+        assert match[0]["status"] == "accepted"
 
     @pytest.mark.asyncio
     async def test_handle_feedback_reject_routes_to_tracker(self, tmp_path):
@@ -414,7 +414,6 @@ class TestWeeklyInstructions:
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
         assert "suggestion_id" in _WEEKLY_INSTRUCTIONS
-        assert "approve suggestion" in _WEEKLY_INSTRUCTIONS
 
     def test_metadata_populated_after_recording(self, tmp_path):
         from orchestrator.handlers import Handlers

@@ -71,8 +71,9 @@ class TestQualityGateIntegration:
                    "regime_analysis.json", "filter_analysis.json",
                    "root_cause_summary.json", "hourly_performance.json",
                    "slippage_stats.json", "factor_attribution.json",
-                   "exit_efficiency.json"]:
-            (bot_dir / f).write_text("{}")
+                   "exit_efficiency.json", "trades.jsonl", "missed.jsonl"]:
+            (bot_dir / f).write_text("" if f.endswith(".jsonl") else "{}")
+        (tmp_path / "2026-03-01" / "portfolio_risk_card.json").write_text("{}")
 
         gate = QualityGate("r1", "2026-03-01", ["bot1"], tmp_path)
         checklist = gate.run()

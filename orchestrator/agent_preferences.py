@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from orchestrator.provider_cooldown import ProviderCooldownTracker
 from schemas.agent_preferences import (
     AgentPreferences,
     AgentPreferencesView,
@@ -10,13 +11,14 @@ from schemas.agent_preferences import (
     AgentSelection,
     AgentWorkflow,
     ProviderReadiness,
+    WorkflowTuning,
 )
 
 DEFAULT_PROVIDER_MODELS: dict[AgentProvider, str] = {
     AgentProvider.CLAUDE_MAX: "sonnet",
     AgentProvider.CODEX_PRO: "gpt-5.4",
-    AgentProvider.ZAI_CODING_PLAN: "glm-4.7",
-    AgentProvider.OPENROUTER: "anthropic/claude-sonnet-4.5",
+    AgentProvider.ZAI_CODING_PLAN: "glm-5",
+    AgentProvider.OPENROUTER: "minimax/minimax-m2.5",
 }
 
 WORKFLOW_ORDER: tuple[AgentWorkflow, ...] = (
@@ -25,6 +27,13 @@ WORKFLOW_ORDER: tuple[AgentWorkflow, ...] = (
     AgentWorkflow.WFO,
     AgentWorkflow.TRIAGE,
 )
+
+DEFAULT_WORKFLOW_TUNING: dict[AgentWorkflow, WorkflowTuning] = {
+    AgentWorkflow.DAILY_ANALYSIS: WorkflowTuning(timeout_seconds=600, max_turns=5),
+    AgentWorkflow.WEEKLY_ANALYSIS: WorkflowTuning(timeout_seconds=900, max_turns=8),
+    AgentWorkflow.WFO: WorkflowTuning(timeout_seconds=1200, max_turns=15),
+    AgentWorkflow.TRIAGE: WorkflowTuning(timeout_seconds=300, max_turns=4),
+}
 
 
 class AgentPreferencesManager:
@@ -107,6 +116,84 @@ class AgentPreferencesManager:
                 )
 
         return errors
+
+    def resolve_tuning(
+        self,
+        workflow: AgentWorkflow | None,
+        *,
+        max_turns_override: int | None = None,
+        allowed_tools_override: list[str] | None = None,
+    ) -> WorkflowTuning:
+        """Resolve effective tuning for a workflow.
+
+        Merges: caller overrides > user preferences > built-in defaults.
+        """
+        default = DEFAULT_WORKFLOW_TUNING.get(workflow) if workflow else None
+        user = self._preferences.workflow_tuning.get(workflow) if workflow else None
+
+        def _attr(obj: WorkflowTuning | None, name: str):
+            return getattr(obj, name, None) if obj is not None else None
+
+        def _first_set(*values):
+            for v in values:
+                if v is not None:
+                    return v
+            return None
+
+        timeout = _first_set(_attr(user, "timeout_seconds"), _attr(default, "timeout_seconds"))
+        max_turns = _first_set(max_turns_override, _attr(user, "max_turns"), _attr(default, "max_turns"))
+        allowed_tools = _first_set(allowed_tools_override, _attr(user, "allowed_tools"), _attr(default, "allowed_tools"))
+
+        return WorkflowTuning(
+            timeout_seconds=timeout,
+            max_turns=max_turns,
+            allowed_tools=allowed_tools,
+        )
+
+    def resolve_with_fallbacks(
+        self,
+        workflow: AgentWorkflow | None,
+        model_override: str | None = None,
+        cooldown_tracker: ProviderCooldownTracker | None = None,
+    ) -> list[tuple[AgentSelection, str | None]]:
+        """Return ordered list of (selection, requested_model) candidates.
+
+        The primary selection is first, followed by fallback_chain entries,
+        skipping providers that are in cooldown or unavailable.
+        """
+        primary_selection, requested_model = self.resolve_selection(workflow, model_override)
+
+        # Gather provider availability
+        provider_status: dict[AgentProvider, bool] = {}
+        if self._provider_status_resolver:
+            for status in self._provider_status_resolver():
+                provider_status[status.provider] = status.available
+
+        candidates: list[tuple[AgentSelection, str | None]] = []
+        seen_providers: set[AgentProvider] = set()
+
+        def _add_candidate(provider: AgentProvider, model: str | None, req_model: str | None) -> None:
+            if provider in seen_providers:
+                return
+            seen_providers.add(provider)
+            if cooldown_tracker and cooldown_tracker.is_cooled_down(provider):
+                return
+            if provider_status.get(provider) is False:
+                return
+            effective_model = model or DEFAULT_PROVIDER_MODELS.get(provider, "")
+            candidates.append((
+                AgentSelection(provider=provider, model=effective_model),
+                req_model,
+            ))
+
+        # Primary first
+        _add_candidate(primary_selection.provider, primary_selection.model, requested_model)
+
+        # Fallback chain
+        for entry in self._preferences.fallback_chain:
+            _add_candidate(entry.provider, entry.model, None)
+
+        return candidates
 
     def _requested_selection(self, workflow: AgentWorkflow | None) -> AgentSelection:
         if workflow is not None:

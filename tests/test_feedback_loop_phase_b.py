@@ -21,19 +21,18 @@ class TestOutcomeInstructions:
     def test_weekly_instructions_reference_retrospective(self):
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "RETROSPECTIVE REVIEW" in _WEEKLY_INSTRUCTIONS
-        assert "weekly_retrospective" in _WEEKLY_INSTRUCTIONS
+        assert "RETROSPECTIVE QUESTIONS" in _WEEKLY_INSTRUCTIONS
 
     def test_weekly_instructions_reference_outcome_measurements(self):
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "SUGGESTION OUTCOMES" in _WEEKLY_INSTRUCTIONS
         assert "outcome_measurements" in _WEEKLY_INSTRUCTIONS
 
     def test_daily_instructions_reference_outcome_measurements(self):
         from analysis.prompt_assembler import _INSTRUCTIONS
 
-        assert "outcome_measurements" in _INSTRUCTIONS
+        # Daily focused instructions reference quantified impact and evidence base
+        assert "evidence base" in _INSTRUCTIONS
 
 
 # --- B2: ForecastTracker ---
@@ -194,7 +193,6 @@ class TestForecastWiring:
     def test_weekly_instructions_reference_calibration(self):
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "FORECAST CALIBRATION" in _WEEKLY_INSTRUCTIONS
         assert "forecast_meta_analysis" in _WEEKLY_INSTRUCTIONS
 
     def test_base_package_includes_active_suggestions(self, tmp_path):

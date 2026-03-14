@@ -67,8 +67,30 @@ APScheduler `misfire_grace_time` also allows late-firing (12h for daily, 48h for
 ## Event Flow
 
 ```
-VPS Bot → Relay VPS → (poll) → EventQueue → Brain → Worker → Handler → Claude CLI → Notification
+VPS Bot → Relay VPS → (poll) → EventQueue → Brain → Worker → Handler → Agent Runtime → Notification
 ```
+
+## Multi-LLM Configuration
+
+The system supports multiple agent runtime providers. Set via env vars or
+the `/api/agent-preferences` endpoint.
+
+| Provider | Runtime | Env Vars |
+|----------|---------|----------|
+| `claude_max` (default) | Claude CLI | Claude Max subscription |
+| `codex_pro` | Codex CLI | ChatGPT Plus/Pro login |
+| `zai_coding_plan` | Claude CLI (redirected) | `ZAI_API_KEY` |
+| `openrouter` | Claude CLI (redirected) | `OPENROUTER_API_KEY` |
+
+Key files: `orchestrator/agent_runner.py`, `orchestrator/agent_preferences.py`,
+`orchestrator/provider_auth.py`, `orchestrator/invocation_builder.py`,
+`schemas/agent_preferences.py`.
+
+Features:
+- Per-workflow provider overrides (`AgentPreferences.overrides`)
+- Automatic fallback chains with cooldown (`orchestrator/provider_cooldown.py`)
+- Per-workflow tuning: timeout, max_turns, allowed_tools (`WorkflowTuning`)
+- Cost tracking per invocation (`orchestrator/cost_tracker.py` → `data/cost_log.jsonl`)
 
 ## Feedback Loop Flow
 

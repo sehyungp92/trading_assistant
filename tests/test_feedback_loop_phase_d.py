@@ -36,19 +36,19 @@ class TestActiveSuggestionsInDaily:
             tier="parameter", source_report_id="r1",
         ))
         tracker.reject("s002", "Bad idea")
-        # implemented
+        # deployed
         tracker.record(SuggestionRecord(
-            suggestion_id="s003", bot_id="bot1", title="Implemented one",
+            suggestion_id="s003", bot_id="bot1", title="Deployed one",
             tier="parameter", source_report_id="r1",
         ))
-        tracker.implement("s003")
+        tracker.mark_deployed("s003")
 
         ctx = ContextBuilder(tmp_path)
         active = ctx.load_active_suggestions()
         ids = [s["suggestion_id"] for s in active]
         assert "s001" in ids  # proposed
         assert "s002" not in ids  # rejected
-        assert "s003" in ids  # implemented
+        assert "s003" in ids  # deployed
 
     def test_applies_temporal_window(self, tmp_path):
         from analysis.context_builder import ContextBuilder
@@ -89,7 +89,7 @@ class TestActiveSuggestionsInDaily:
         from analysis.prompt_assembler import _INSTRUCTIONS
 
         assert "active_suggestions" in _INSTRUCTIONS
-        assert "IMPLEMENTED" in _INSTRUCTIONS
+        assert "DEPLOYED" in _INSTRUCTIONS
 
 
 # --- D1: Lifecycle broadcasts ---

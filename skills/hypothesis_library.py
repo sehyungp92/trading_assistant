@@ -291,8 +291,8 @@ class HypothesisLibrary:
         for r in records:
             if r.id == hypothesis_id:
                 r.times_rejected += 1
-                # Auto-retire: 3+ rejections AND negative effectiveness
-                if r.times_rejected >= 3 and r.effectiveness < 0:
+                # Auto-retire: 3+ rejections AND non-positive effectiveness
+                if r.times_rejected >= 3 and r.effectiveness <= 0:
                     r.status = "retired"
                 break
         self._save_all(records)
@@ -308,7 +308,7 @@ class HypothesisLibrary:
                 else:
                     r.outcomes_negative += 1
                 # Re-check retirement (outcome could worsen effectiveness)
-                if r.times_rejected >= 3 and r.effectiveness < 0:
+                if r.times_rejected >= 3 and r.effectiveness <= 0:
                     r.status = "retired"
                 break
         self._save_all(records)
@@ -360,6 +360,33 @@ class HypothesisLibrary:
         if promoted:
             self._save_all(records)
         return promoted
+
+    def create_from_reliability(self, summary) -> list[str]:
+        """Create candidate hypotheses from chronic bug classes in reliability summary.
+
+        Args:
+            summary: ReliabilitySummary instance.
+
+        Returns:
+            List of created hypothesis IDs.
+        """
+        created: list[str] = []
+        for bug_class in summary.chronic_bug_classes:
+            scorecard = summary.scorecards_by_class.get(bug_class)
+            if not scorecard:
+                continue
+            hyp_id = self.add_candidate(
+                title=f"Chronic {bug_class} reliability issue",
+                category=f"reliability_{bug_class}",
+                description=(
+                    f"Bug class '{bug_class}' has {scorecard.intervention_count} interventions "
+                    f"with recurrence rate {scorecard.recurrence_rate:.0%}. "
+                    f"Root cause may need structural fix rather than per-incident patching."
+                ),
+                evidence=f"recurrence_rate={scorecard.recurrence_rate}, interventions={scorecard.intervention_count}",
+            )
+            created.append(hyp_id)
+        return created
 
     def get_track_record(self) -> dict[str, dict]:
         """Return effectiveness scores for all hypotheses (for prompt injection)."""

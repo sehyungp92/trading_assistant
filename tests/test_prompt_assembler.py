@@ -123,7 +123,7 @@ class TestDailyPromptAssembler:
         prompt = assembler.assemble()
 
         assert prompt.instructions
-        assert "portfolio-level picture" in prompt.instructions
+        assert "ANALYTICAL TASKS" in prompt.instructions
         assert "actionable" in prompt.instructions.lower()
 
     def test_includes_corrections_context(self, curated_dir: Path, memory_dir: Path):
@@ -197,7 +197,7 @@ class TestDailyPromptAssembler:
         prompt = assembler.assemble()
         assert "slippage_stats" in prompt.data["bot1"]
 
-    def test_instructions_reference_factor_attribution(self, curated_dir: Path, memory_dir: Path):
+    def test_instructions_reference_evidence_base(self, curated_dir: Path, memory_dir: Path):
         assembler = DailyPromptAssembler(
             date="2026-03-01",
             bots=["bot1"],
@@ -205,7 +205,7 @@ class TestDailyPromptAssembler:
             memory_dir=memory_dir,
         )
         prompt = assembler.assemble()
-        assert "factor attribution" in prompt.instructions.lower()
+        assert "evidence base" in prompt.instructions.lower()
 
     def test_instructions_reference_exit_efficiency(self, curated_dir: Path, memory_dir: Path):
         assembler = DailyPromptAssembler(

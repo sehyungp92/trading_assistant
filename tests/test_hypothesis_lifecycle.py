@@ -80,15 +80,16 @@ class TestHypothesisLibrary:
         assert h.times_rejected == 1
         assert h.status == "active"  # not yet retired (only 1 rejection)
 
-    def test_auto_retirement_neutral_stays_active(self, tmp_path):
+    def test_auto_retirement_neutral_retires(self, tmp_path):
         lib = HypothesisLibrary(tmp_path)
         lib.seed_if_needed()
-        # 3 rejections + 0 outcomes = effectiveness 0.0 (neutral) → stays active
+        # 3 rejections + 0 outcomes = effectiveness 0.0 (neutral) → retires
+        # A hypothesis with zero evidence and 3+ rejections should not survive
         for _ in range(3):
             lib.record_rejection("h-crowding-diversify")
         records = lib.get_all_records()
         h = [r for r in records if r.id == "h-crowding-diversify"][0]
-        assert h.status == "active"
+        assert h.status == "retired"
         assert h.times_rejected == 3
 
     def test_auto_retirement_negative_effectiveness(self, tmp_path):

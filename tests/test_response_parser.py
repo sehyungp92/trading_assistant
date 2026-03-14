@@ -141,3 +141,91 @@ More text after the block.
         assert parsed.parse_success is True
         assert len(parsed.predictions) == 2
         assert len(parsed.suggestions) == 2
+
+
+class TestJsonFenceFallback:
+    """Multi-LLM parity: GPT/GLM models may emit ```json fences instead of
+    HTML comment blocks.  The parser must accept both."""
+
+    def test_json_fence_parsed(self):
+        """A response with ```json fence (no comment block) should parse."""
+        data = {
+            "predictions": [
+                {"bot_id": "bot1", "metric": "pnl", "direction": "improve", "confidence": 0.7}
+            ],
+            "suggestions": [
+                {"bot_id": "bot1", "title": "Tighten filter", "category": "filter_threshold", "confidence": 0.6}
+            ],
+        }
+        response = f"# Report\nGreat analysis.\n\n```json\n{json.dumps(data, indent=2)}\n```\n"
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert len(parsed.predictions) == 1
+        assert parsed.predictions[0].bot_id == "bot1"
+        assert len(parsed.suggestions) == 1
+        assert parsed.suggestions[0].title == "Tighten filter"
+
+    def test_comment_block_takes_priority_over_fence(self):
+        """When both formats are present, comment block wins."""
+        comment_data = {
+            "predictions": [
+                {"bot_id": "from_comment", "metric": "pnl", "direction": "improve", "confidence": 0.8}
+            ],
+        }
+        fence_data = {
+            "predictions": [
+                {"bot_id": "from_fence", "metric": "pnl", "direction": "decline", "confidence": 0.3}
+            ],
+        }
+        response = (
+            f"# Report\n"
+            f"```json\n{json.dumps(fence_data)}\n```\n\n"
+            f"<!-- STRUCTURED_OUTPUT\n{json.dumps(comment_data)}\n-->\n"
+        )
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.predictions[0].bot_id == "from_comment"
+
+    def test_malformed_fence_falls_through(self):
+        """Malformed ```json fence with no comment block → parse_success=False."""
+        response = "# Report\n```json\n{not valid}\n```\n"
+        parsed = parse_response(response)
+        assert parsed.parse_success is False
+
+    def test_fence_with_structural_proposals(self):
+        """Verify full schema parsing works via fence fallback."""
+        data = {
+            "predictions": [],
+            "suggestions": [],
+            "structural_proposals": [
+                {
+                    "hypothesis_id": "h-trailing-stop",
+                    "bot_id": "bot2",
+                    "title": "Trailing stop",
+                    "description": "Switch from fixed to trailing",
+                    "reversibility": "easy",
+                    "evidence": "exit_efficiency < 40%",
+                }
+            ],
+        }
+        response = f"# Weekly\n```json\n{json.dumps(data, indent=2)}\n```\n"
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert len(parsed.structural_proposals) == 1
+        assert parsed.structural_proposals[0].hypothesis_id == "h-trailing-stop"
+
+    def test_malformed_comment_falls_back_to_fence(self):
+        """If comment block has bad JSON but fence is valid, use the fence."""
+        fence_data = {
+            "predictions": [
+                {"bot_id": "bot1", "metric": "win_rate", "direction": "stable", "confidence": 0.5}
+            ],
+        }
+        response = (
+            f"# Report\n"
+            f"<!-- STRUCTURED_OUTPUT\n{{broken json}}\n-->\n\n"
+            f"```json\n{json.dumps(fence_data)}\n```\n"
+        )
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.predictions[0].bot_id == "bot1"

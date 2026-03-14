@@ -17,6 +17,7 @@ class TestOutcomeMeasurementSchema:
             pnl_before=100.0, pnl_after=200.0,
             win_rate_before=0.5, win_rate_after=0.6,
             drawdown_before=5.0, drawdown_after=4.0,
+            before_trade_count=10, after_trade_count=10,
         )
         assert m.verdict == Verdict.POSITIVE
         assert m.pnl_delta == 100.0
@@ -29,6 +30,7 @@ class TestOutcomeMeasurementSchema:
             window_days=7,
             pnl_before=200.0, pnl_after=50.0,
             win_rate_before=0.6, win_rate_after=0.4,
+            before_trade_count=10, after_trade_count=10,
         )
         assert m.verdict == Verdict.NEGATIVE
 
@@ -40,6 +42,7 @@ class TestOutcomeMeasurementSchema:
             window_days=7,
             pnl_before=100.0, pnl_after=102.0,
             win_rate_before=0.5, win_rate_after=0.51,
+            before_trade_count=10, after_trade_count=10,
         )
         assert m.verdict == Verdict.NEUTRAL
 

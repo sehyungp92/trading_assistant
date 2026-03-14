@@ -100,6 +100,14 @@ class SchedulerConfig:
     threshold_learning_hour: int = 9
     threshold_learning_minute: int = 30
     experiment_check_interval_seconds: int = 21600
+    reliability_verification_hour: int = 6
+    reliability_verification_minute: int = 30
+    discovery_day_of_week: str = "sat"
+    discovery_hour: int = 3
+    discovery_minute: int = 0
+    learning_cycle_day_of_week: str = "sun"
+    learning_cycle_hour: int = 11
+    learning_cycle_minute: int = 0
 
 
 def create_scheduler_jobs(
@@ -122,6 +130,9 @@ def create_scheduler_jobs(
     deployment_check_fn: LegacyScheduledFn | None = None,
     threshold_learning_fn: LegacyScheduledFn | None = None,
     experiment_check_fn: LegacyScheduledFn | None = None,
+    reliability_verification_fn: LegacyScheduledFn | None = None,
+    discovery_fn: LegacyScheduledFn | None = None,
+    learning_cycle_fn: LegacyScheduledFn | None = None,
     daily_analysis_fns: list[dict] | None = None,
     morning_scan_fns: list[dict] | None = None,
     evening_report_fns: list[dict] | None = None,
@@ -307,6 +318,17 @@ def create_scheduler_jobs(
             "coalesce": True,
         })
 
+    if reliability_verification_fn is not None:
+        jobs.append({
+            "name": "reliability_verification",
+            "func": reliability_verification_fn,
+            "trigger": "cron",
+            "hour": config.reliability_verification_hour,
+            "minute": config.reliability_verification_minute,
+            "misfire_grace_time": 43200,
+            "coalesce": True,
+        })
+
     if approval_expiry_fn is not None:
         jobs.append({
             "name": "approval_expiry",
@@ -354,6 +376,30 @@ def create_scheduler_jobs(
             "seconds": config.experiment_check_interval_seconds,
         })
 
+    if discovery_fn is not None:
+        jobs.append({
+            "name": "discovery_analysis",
+            "func": discovery_fn,
+            "trigger": "cron",
+            "day_of_week": config.discovery_day_of_week,
+            "hour": config.discovery_hour,
+            "minute": config.discovery_minute,
+            "misfire_grace_time": 172800,
+            "coalesce": True,
+        })
+
+    if learning_cycle_fn is not None:
+        jobs.append({
+            "name": "learning_cycle",
+            "func": learning_cycle_fn,
+            "trigger": "cron",
+            "day_of_week": config.learning_cycle_day_of_week,
+            "hour": config.learning_cycle_hour,
+            "minute": config.learning_cycle_minute,
+            "misfire_grace_time": 172800,
+            "coalesce": True,
+        })
+
     return jobs
 
 
@@ -377,6 +423,9 @@ def build_scheduled_job_specs(
     deployment_check_fn: TrackedScheduledFn | None = None,
     threshold_learning_fn: TrackedScheduledFn | None = None,
     experiment_check_fn: TrackedScheduledFn | None = None,
+    reliability_verification_fn: TrackedScheduledFn | None = None,
+    discovery_fn: TrackedScheduledFn | None = None,
+    learning_cycle_fn: TrackedScheduledFn | None = None,
     daily_analysis_fns: list[dict] | None = None,
     morning_scan_fns: list[dict] | None = None,
     evening_report_fns: list[dict] | None = None,
@@ -577,6 +626,44 @@ def build_scheduled_job_specs(
         job_key="experiment_check",
         seconds=config.experiment_check_interval_seconds,
         execute=experiment_check_fn,
+    )
+    _append_cron_specs(
+        specs,
+        base_name="reliability_verification",
+        job_key="reliability_verification",
+        job_class=ScheduledJobClass.COALESCED,
+        catchup_limit=1,
+        default_fn=reliability_verification_fn,
+        default_hour=config.reliability_verification_hour,
+        default_minute=config.reliability_verification_minute,
+        default_misfire_grace_time=43200,
+        default_coalesce=True,
+    )
+    _append_cron_specs(
+        specs,
+        base_name="discovery_analysis",
+        job_key="discovery_analysis",
+        job_class=ScheduledJobClass.COALESCED,
+        catchup_limit=1,
+        default_fn=discovery_fn,
+        default_day_of_week=config.discovery_day_of_week,
+        default_hour=config.discovery_hour,
+        default_minute=config.discovery_minute,
+        default_misfire_grace_time=172800,
+        default_coalesce=True,
+    )
+    _append_cron_specs(
+        specs,
+        base_name="learning_cycle",
+        job_key="learning_cycle",
+        job_class=ScheduledJobClass.COALESCED,
+        catchup_limit=1,
+        default_fn=learning_cycle_fn,
+        default_day_of_week=config.learning_cycle_day_of_week,
+        default_hour=config.learning_cycle_hour,
+        default_minute=config.learning_cycle_minute,
+        default_misfire_grace_time=172800,
+        default_coalesce=True,
     )
 
     return specs

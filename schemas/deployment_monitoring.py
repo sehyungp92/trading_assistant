@@ -41,6 +41,7 @@ class DeploymentRecord(BaseModel):
 
     deployment_id: str
     approval_request_id: str
+    suggestion_id: Optional[str] = None
     pr_url: str
     pr_number: int = 0
     bot_id: str

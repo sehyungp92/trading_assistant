@@ -31,9 +31,13 @@ class SuggestionScorer:
         self._findings_dir = findings_dir
 
     def compute_scorecard(self) -> CategoryScorecard:
-        """Compute per-(bot_id, category) win rates from outcomes and suggestions."""
+        """Compute per-(bot_id, category) win rates from outcomes and suggestions.
+
+        Applies category_overrides.jsonl confidence multipliers when present.
+        """
         suggestions = self._load_suggestions()
         outcomes = self._load_outcomes()
+        category_overrides = self._load_category_overrides()
 
         if not outcomes:
             return CategoryScorecard()
@@ -50,9 +54,14 @@ class SuggestionScorer:
             if sid:
                 id_to_info[sid] = (bot_id, category)
 
-        # Group outcomes by (bot_id, category)
+        # Group outcomes by (bot_id, category), filtering by measurement quality
+        _HIGH_QUALITY = {"high", "medium"}
         groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
         for outcome in outcomes:
+            # Only count outcomes with high or medium measurement quality
+            quality = outcome.get("measurement_quality", "high")  # legacy defaults to high
+            if quality not in _HIGH_QUALITY:
+                continue
             sid = outcome.get("suggestion_id", "")
             info = id_to_info.get(sid)
             if info:
@@ -60,15 +69,18 @@ class SuggestionScorer:
 
         scores: list[CategoryScore] = []
         for (bot_id, category), group_outcomes in groups.items():
-            positive = sum(1 for o in group_outcomes if o.get("pnl_delta_7d", 0) > 0)
+            positive = sum(1 for o in group_outcomes if self._is_positive(o))
             total = len(group_outcomes)
             win_rate = positive / total if total > 0 else 0.0
             avg_pnl = (
-                sum(o.get("pnl_delta_7d", 0) for o in group_outcomes) / total
+                sum(self._outcome_pnl_delta(o) for o in group_outcomes) / total
                 if total > 0 else 0.0
             )
             # confidence_multiplier: penalize poor track records, don't penalize insufficient data
-            if total >= 5:
+            override = category_overrides.get((bot_id, category))
+            if override is not None:
+                multiplier = override
+            elif total >= 5:
                 multiplier = max(0.3, win_rate)
             else:
                 multiplier = 1.0
@@ -83,6 +95,88 @@ class SuggestionScorer:
             ))
 
         return CategoryScorecard(scores=scores)
+
+    @staticmethod
+    def _is_positive(outcome: dict) -> bool:
+        """Check if an outcome is positive, preferring verdict field."""
+        verdict = outcome.get("verdict", "")
+        if verdict:
+            return verdict == "positive"
+        # Legacy fallback: check pnl_delta or pnl_delta_7d
+        delta = outcome.get("pnl_delta")
+        if delta is None:
+            delta = outcome.get("pnl_delta_7d", 0)
+        try:
+            return float(delta) > 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _outcome_pnl_delta(outcome: dict) -> float:
+        """Extract PnL delta from outcome, supporting both schemas."""
+        delta = outcome.get("pnl_delta")
+        if delta is None:
+            delta = outcome.get("pnl_delta_7d", 0)
+        try:
+            return float(delta)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def apply_recalibration(self, discard_items: list) -> None:
+        """Write category overrides from discard items.
+
+        Discarded categories get confidence_multiplier = 0.3, which
+        compute_scorecard() will pick up on next call.
+        """
+        overrides_path = self._findings_dir / "category_overrides.jsonl"
+        overrides_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Load existing overrides
+        existing: dict[tuple[str, str], dict] = {}
+        if overrides_path.exists():
+            for line in overrides_path.read_text(encoding="utf-8").strip().splitlines():
+                if line.strip():
+                    try:
+                        entry = json.loads(line)
+                        key = (entry.get("bot_id", ""), entry.get("category", ""))
+                        existing[key] = entry
+                    except json.JSONDecodeError:
+                        pass
+
+        # Update/add overrides from discard items
+        from datetime import datetime, timezone
+        for item in discard_items:
+            bot_id = item.bot_id if hasattr(item, "bot_id") else item.get("bot_id", "")
+            category = item.category if hasattr(item, "category") else item.get("category", "")
+            key = (bot_id, category)
+            existing[key] = {
+                "bot_id": bot_id,
+                "category": category,
+                "confidence_multiplier": 0.3,
+                "reason": item.reason if hasattr(item, "reason") else item.get("reason", "discarded"),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        # Rewrite file
+        with open(overrides_path, "w", encoding="utf-8") as f:
+            for entry in existing.values():
+                f.write(json.dumps(entry) + "\n")
+
+    def _load_category_overrides(self) -> dict[tuple[str, str], float]:
+        """Load category confidence multiplier overrides."""
+        path = self._findings_dir / "category_overrides.jsonl"
+        if not path.exists():
+            return {}
+        overrides: dict[tuple[str, str], float] = {}
+        for line in path.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                try:
+                    entry = json.loads(line)
+                    key = (entry.get("bot_id", ""), entry.get("category", ""))
+                    overrides[key] = entry.get("confidence_multiplier", 1.0)
+                except json.JSONDecodeError:
+                    pass
+        return overrides
 
     def _load_suggestions(self) -> list[dict]:
         return self._read_jsonl(self._findings_dir / "suggestions.jsonl")

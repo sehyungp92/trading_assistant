@@ -1,7 +1,12 @@
-"""Automated suggestion outcome measurement schemas."""
+"""Automated suggestion outcome measurement schemas.
+
+Regime-controlled outcome measurement with statistical quality assessment.
+"""
 from __future__ import annotations
 
+import math
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, computed_field
 
@@ -10,10 +15,19 @@ class Verdict(str, Enum):
     POSITIVE = "positive"
     NEUTRAL = "neutral"
     NEGATIVE = "negative"
+    INCONCLUSIVE = "inconclusive"
+    INSUFFICIENT_DATA = "insufficient_data"
+
+
+class MeasurementQuality(str, Enum):
+    HIGH = "high"          # regime matched, sufficient trades, no concurrent changes
+    MEDIUM = "medium"      # minor issues (low volatility ratio, few concurrent changes)
+    LOW = "low"            # regime mismatch or high concurrent changes
+    INSUFFICIENT = "insufficient"  # not enough trades or data
 
 
 class OutcomeMeasurement(BaseModel):
-    """Before/after comparison for a implemented suggestion."""
+    """Before/after comparison for an implemented suggestion with regime controls."""
     suggestion_id: str
     implemented_date: str
     measurement_date: str
@@ -25,6 +39,29 @@ class OutcomeMeasurement(BaseModel):
     drawdown_before: float = 0.0
     drawdown_after: float = 0.0
 
+    # Regime controls
+    before_regime: str = ""
+    after_regime: str = ""
+    regime_matched: bool = True
+    before_volatility: float = 0.0
+    after_volatility: float = 0.0
+    volatility_ratio: float = 1.0
+
+    # Sample size
+    before_trade_count: int = 0
+    after_trade_count: int = 0
+
+    # Confounders
+    concurrent_changes: list[str] = []
+
+    # Quality assessment
+    measurement_quality: MeasurementQuality = MeasurementQuality.HIGH
+
+    # Effect significance
+    effect_size: float = 0.0
+    noise_estimate: float = 0.0
+    significance_score: float = 0.0  # effect_size / (noise * sqrt(1/n_before + 1/n_after))
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pnl_delta(self) -> float:
@@ -33,13 +70,75 @@ class OutcomeMeasurement(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def verdict(self) -> Verdict:
-        # Positive if PnL improved by >10% and win rate didn't drop significantly
+        # Insufficient data: fewer than 3 trades in either window
+        if self.before_trade_count < 3 or self.after_trade_count < 3:
+            return Verdict.INSUFFICIENT_DATA
+
+        # Only assign directional verdict for high/medium quality
+        if self.measurement_quality in (
+            MeasurementQuality.LOW,
+            MeasurementQuality.INSUFFICIENT,
+        ):
+            return Verdict.INCONCLUSIVE
+
         if self.pnl_before == 0:
-            return Verdict.NEUTRAL
+            return Verdict.INCONCLUSIVE
+
         pnl_change = self.pnl_delta / abs(self.pnl_before)
         wr_change = self.win_rate_after - self.win_rate_before
+
         if pnl_change > 0.1 and wr_change >= -0.05:
             return Verdict.POSITIVE
         elif pnl_change < -0.1 or wr_change < -0.1:
             return Verdict.NEGATIVE
         return Verdict.NEUTRAL
+
+
+def compute_measurement_quality(
+    regime_matched: bool,
+    before_trade_count: int,
+    after_trade_count: int,
+    volatility_ratio: float,
+    concurrent_changes: list[str],
+) -> MeasurementQuality:
+    """Determine measurement quality from regime/sample/confounder data."""
+    if before_trade_count < 3 or after_trade_count < 3:
+        return MeasurementQuality.INSUFFICIENT
+
+    if not regime_matched:
+        return MeasurementQuality.LOW
+
+    if len(concurrent_changes) >= 3:
+        return MeasurementQuality.LOW
+
+    issues = 0
+    if volatility_ratio < 0.5 or volatility_ratio > 2.0:
+        issues += 1
+    if len(concurrent_changes) >= 1:
+        issues += 1
+    if before_trade_count < 10 or after_trade_count < 10:
+        issues += 1
+
+    if issues == 0:
+        return MeasurementQuality.HIGH
+    elif issues <= 1:
+        return MeasurementQuality.MEDIUM
+    return MeasurementQuality.LOW
+
+
+def compute_significance(
+    effect_size: float,
+    noise: float,
+    n_before: int,
+    n_after: int,
+) -> float:
+    """Compute basic significance score: effect / (noise * sqrt(1/n_before + 1/n_after)).
+
+    Returns 0.0 if inputs are insufficient.
+    """
+    if noise <= 0 or n_before <= 0 or n_after <= 0:
+        return 0.0
+    denominator = noise * math.sqrt(1.0 / n_before + 1.0 / n_after)
+    if denominator <= 0:
+        return 0.0
+    return abs(effect_size) / denominator

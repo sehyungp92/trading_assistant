@@ -45,6 +45,8 @@ class ApprovalHandler:
         repo_workspace_manager: RepoWorkspaceManager | None = None,
         repo_change_guard: RepoChangeGuard | None = None,
         repo_task_runner: Any | None = None,
+        structural_experiment_tracker: Any | None = None,
+        hypothesis_library: Any | None = None,
     ) -> None:
         self._approval_tracker = approval_tracker
         self._suggestion_tracker = suggestion_tracker
@@ -56,6 +58,8 @@ class ApprovalHandler:
         self._repo_workspace_manager = repo_workspace_manager
         self._repo_change_guard = repo_change_guard or RepoChangeGuard()
         self._repo_task_runner = repo_task_runner
+        self._structural_experiment_tracker = structural_experiment_tracker
+        self._hypothesis_library = hypothesis_library
 
     async def handle_approve(self, request_id: str) -> str:
         """Approve a pending request, generate a PR, and record the outcome."""
@@ -155,7 +159,7 @@ class ApprovalHandler:
                 pr_url=result.existing_pr_url,
                 diff_summary=result.diff_summary,
             )
-            self._mark_suggestion_implemented(approved.suggestion_id)
+            self._mark_suggestion_accepted(approved)
             await self._edit_approval_card(
                 approved,
                 f"[APPROVED] Existing PR: {result.existing_pr_url}",
@@ -183,7 +187,7 @@ class ApprovalHandler:
             pr_url=result.pr_url or "",
             diff_summary=result.diff_summary,
         )
-        self._mark_suggestion_implemented(approved.suggestion_id)
+        self._mark_suggestion_accepted(approved)
 
         if self._event_stream:
             self._event_stream.broadcast("suggestion_pr_created", {
@@ -216,6 +220,17 @@ class ApprovalHandler:
                 )
             except Exception:
                 logger.warning("Failed to reject suggestion %s", rejected.suggestion_id)
+
+        # Record hypothesis rejection for structural changes
+        if (
+            rejected.change_kind == ChangeKind.STRUCTURAL_CHANGE
+            and self._hypothesis_library
+            and rejected.hypothesis_id
+        ):
+            try:
+                self._hypothesis_library.record_rejection(rejected.hypothesis_id)
+            except Exception:
+                logger.warning("Failed to record hypothesis rejection for %s", rejected.hypothesis_id)
 
         rejected_req = self._approval_tracker.get_by_id(request_id)
         if rejected_req:
@@ -620,13 +635,48 @@ class ApprovalHandler:
             return None
         return self._repo_workspace_manager.prepare_workspace(profile, request.request_id)
 
-    def _mark_suggestion_implemented(self, suggestion_id: str) -> None:
+    def _mark_suggestion_accepted(self, request: ApprovalRequest) -> None:
         if not self._suggestion_tracker:
             return
         try:
-            self._suggestion_tracker.implement(suggestion_id)
+            self._suggestion_tracker.accept(
+                request.suggestion_id,
+                approval_request_id=request.request_id,
+            )
         except Exception:
-            logger.warning("Failed to mark suggestion %s as IMPLEMENTED", suggestion_id)
+            logger.warning("Failed to mark suggestion %s as ACCEPTED", request.suggestion_id)
+
+        # Record hypothesis acceptance for structural changes
+        if (
+            request.change_kind == ChangeKind.STRUCTURAL_CHANGE
+            and self._hypothesis_library
+            and request.hypothesis_id
+        ):
+            try:
+                self._hypothesis_library.record_acceptance(request.hypothesis_id)
+            except Exception:
+                logger.warning("Failed to record hypothesis acceptance for %s", request.hypothesis_id)
+
+        # Activate structural experiment if this is a structural change
+        if (
+            request.change_kind == ChangeKind.STRUCTURAL_CHANGE
+            and self._structural_experiment_tracker
+        ):
+            try:
+                exp = self._structural_experiment_tracker.find_by_suggestion_id(
+                    request.suggestion_id,
+                )
+                if exp is not None:
+                    self._structural_experiment_tracker.activate(exp.experiment_id)
+                    logger.info(
+                        "Activated structural experiment %s for suggestion %s",
+                        exp.experiment_id, request.suggestion_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to activate structural experiment for suggestion %s",
+                    request.suggestion_id,
+                )
 
     async def _edit_approval_card(self, request: ApprovalRequest, status_line: str) -> None:
         if self._telegram_bot is None or not request.message_id:

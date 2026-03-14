@@ -251,7 +251,7 @@ class TestAllocationIntegration:
         assert "portfolio_allocation" in package.data["allocation_analysis"]
         assert "synergy_analysis" in package.data["allocation_analysis"]
         assert "proportion_optimization" in package.data["allocation_analysis"]
-        assert "PORTFOLIO & STRATEGY ALLOCATION ASSESSMENT" in package.instructions
+        assert "ALLOCATION ASSESSMENT" in package.instructions
 
     def test_all_results_json_serializable(self):
         """All analysis results can be serialized to JSON for curated output."""

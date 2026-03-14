@@ -12,7 +12,9 @@ from schemas.agent_preferences import AgentProvider, ProviderReadiness
 
 
 def _set_provider_statuses(app, statuses: dict[AgentProvider, tuple[bool, str, str]]) -> None:
-    app.state.agent_runner._provider_status_cache = {
+    cache = app.state.agent_runner._auth_checker._provider_status_cache
+    cache.clear()
+    cache.update({
         provider: ProviderReadiness(
             provider=provider,
             available=available,
@@ -20,7 +22,7 @@ def _set_provider_statuses(app, statuses: dict[AgentProvider, tuple[bool, str, s
             reason=reason,
         )
         for provider, (available, runtime, reason) in statuses.items()
-    }
+    })
 
 
 @pytest.fixture

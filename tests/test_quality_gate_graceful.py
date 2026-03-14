@@ -8,14 +8,18 @@ def _setup_bot_dir(base: Path, date: str, bot_id: str, files: list[str]) -> None
     bot_dir = base / date / bot_id
     bot_dir.mkdir(parents=True)
     for f in files:
-        (bot_dir / f).write_text("{}")
+        if f.endswith(".jsonl"):
+            (bot_dir / f).write_text("")
+        else:
+            (bot_dir / f).write_text("{}")
+    (base / date / "portfolio_risk_card.json").write_text("{}")
 
 
 ALL_FILES = [
     "summary.json", "winners.json", "losers.json", "process_failures.json",
     "notable_missed.json", "regime_analysis.json", "filter_analysis.json",
     "root_cause_summary.json", "hourly_performance.json", "slippage_stats.json",
-    "factor_attribution.json", "exit_efficiency.json",
+    "factor_attribution.json", "exit_efficiency.json", "trades.jsonl", "missed.jsonl",
 ]
 
 

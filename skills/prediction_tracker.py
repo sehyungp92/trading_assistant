@@ -237,8 +237,8 @@ class PredictionTracker:
         metric_keys = {
             "pnl": ["total_pnl", "pnl", "net_pnl"],
             "win_rate": ["win_rate", "win_pct"],
-            "drawdown": ["max_drawdown", "drawdown"],
-            "sharpe": ["sharpe", "sharpe_ratio"],
+            "drawdown": ["max_drawdown_pct", "max_drawdown", "drawdown"],
+            "sharpe": ["sharpe_rolling_30d", "sharpe", "sharpe_ratio"],
         }
         for key in metric_keys.get(metric, [metric]):
             val = summary.get(key)

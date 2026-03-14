@@ -10,9 +10,11 @@ from pathlib import Path
 
 from schemas.forecast_tracking import (
     AccuracyTrend,
+    CalibrationBucket,
     ForecastMetaAnalysis,
     ForecastRecord,
 )
+from schemas.prediction_tracking import PredictionVerdict
 
 
 class ForecastTracker:
@@ -35,8 +37,17 @@ class ForecastTracker:
                 records.append(ForecastRecord(**json.loads(line)))
         return records
 
-    def compute_meta_analysis(self) -> ForecastMetaAnalysis:
-        """Compute rolling accuracy, trend, and calibration from all records."""
+    def compute_meta_analysis(
+        self,
+        prediction_verdicts: list[PredictionVerdict] | None = None,
+    ) -> ForecastMetaAnalysis:
+        """Compute rolling accuracy, trend, and calibration from all records.
+
+        Args:
+            prediction_verdicts: Optional list of prediction verdicts for
+                empirical calibration computation. When provided, populates
+                calibration_buckets, expected_calibration_error, and brier_score.
+        """
         records = self.load_all()
         if not records:
             return ForecastMetaAnalysis()
@@ -82,6 +93,15 @@ class ForecastTracker:
         calibration = avg_accuracy - 0.5  # clamped to [-1, 1]
         calibration = max(-1.0, min(1.0, calibration))
 
+        # Empirical calibration from prediction verdicts
+        cal_buckets: list[CalibrationBucket] = []
+        ece: float | None = None
+        brier: float | None = None
+        cal_sample_size = 0
+        if prediction_verdicts:
+            cal_buckets, ece, brier = self.compute_calibration(prediction_verdicts)
+            cal_sample_size = sum(b.prediction_count for b in cal_buckets)
+
         return ForecastMetaAnalysis(
             rolling_accuracy_4w=round(acc_4w, 3),
             rolling_accuracy_12w=round(acc_12w, 3),
@@ -90,7 +110,76 @@ class ForecastTracker:
             accuracy_by_metric=accuracy_by_metric,
             calibration_adjustment=round(calibration, 3),
             weeks_analyzed=weeks_analyzed,
+            calibration_buckets=cal_buckets,
+            expected_calibration_error=ece,
+            brier_score=brier,
+            calibration_sample_size=cal_sample_size,
         )
+
+    @staticmethod
+    def compute_calibration(
+        verdicts: list[PredictionVerdict],
+        min_bucket_count: int = 5,
+    ) -> tuple[list[CalibrationBucket], float | None, float | None]:
+        """Compute calibration buckets, ECE, and Brier score from prediction verdicts.
+
+        Returns:
+            (buckets, ece, brier_score). ECE and Brier are None when total
+            samples across reliable buckets < min_bucket_count.
+        """
+        boundaries = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)]
+        bucket_data: list[list[PredictionVerdict]] = [[] for _ in boundaries]
+
+        for v in verdicts:
+            if v.status == "insufficient_data":
+                continue
+            conf = max(0.0, min(1.0, v.confidence))
+            for i, (lo, hi) in enumerate(boundaries):
+                if i == len(boundaries) - 1:
+                    if lo <= conf <= hi:
+                        bucket_data[i].append(v)
+                        break
+                else:
+                    if lo <= conf < hi:
+                        bucket_data[i].append(v)
+                        break
+
+        buckets: list[CalibrationBucket] = []
+        for i, (lo, hi) in enumerate(boundaries):
+            items = bucket_data[i]
+            count = len(items)
+            correct = sum(1 for v in items if v.correct)
+            mean_conf = sum(v.confidence for v in items) / count if count else 0.0
+            obs_acc = correct / count if count else 0.0
+            gap = mean_conf - obs_acc
+            buckets.append(CalibrationBucket(
+                bucket_lower=lo,
+                bucket_upper=hi,
+                prediction_count=count,
+                correct_count=correct,
+                mean_confidence=round(mean_conf, 4),
+                observed_accuracy=round(obs_acc, 4),
+                gap=round(gap, 4),
+            ))
+
+        # ECE = weighted average of |gap| across reliable buckets
+        total_reliable = sum(b.prediction_count for b in buckets if b.is_reliable)
+        if total_reliable < min_bucket_count:
+            return buckets, None, None
+
+        ece = sum(
+            b.prediction_count * abs(b.gap) for b in buckets if b.is_reliable
+        ) / total_reliable
+
+        # Brier score = mean of (confidence - correct)^2
+        all_items = [v for vs in bucket_data for v in vs]
+        if not all_items:
+            return buckets, round(ece, 4), None
+        brier = sum(
+            (v.confidence - (1.0 if v.correct else 0.0)) ** 2 for v in all_items
+        ) / len(all_items)
+
+        return buckets, round(ece, 4), round(brier, 4)
 
     @staticmethod
     def _weighted_accuracy(records: list[ForecastRecord]) -> float:

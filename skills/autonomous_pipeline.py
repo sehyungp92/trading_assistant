@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from schemas.autonomous_pipeline import (
@@ -13,6 +15,7 @@ from schemas.autonomous_pipeline import (
     ParameterDefinition,
     RepoRiskTier,
 )
+from schemas.parameter_search import SearchRouting
 from skills.approval_tracker import ApprovalTracker
 from skills.config_registry import ConfigRegistry
 from skills.repo_change_guard import RepoChangeGuard
@@ -22,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _ACTIONABLE_TIERS = {"parameter", "filter", "hypothesis"}
 _MIN_CONFIDENCE = 0.5
+_MAX_ACTIVE_EXPERIMENTS = 2
 
 
 class AutonomousPipeline:
@@ -37,6 +41,12 @@ class AutonomousPipeline:
         telegram_renderer: Any | None = None,
         event_stream: Any | None = None,
         repo_change_guard: RepoChangeGuard | None = None,
+        parameter_searcher: Any | None = None,
+        experiment_config_generator: Any | None = None,
+        experiment_tracker: Any | None = None,
+        calibration_tracker: Any | None = None,
+        search_log_dir: Path | None = None,
+        curated_dir: Path | None = None,
     ) -> None:
         self._registry = config_registry
         self._backtester = backtester
@@ -46,6 +56,12 @@ class AutonomousPipeline:
         self._telegram_renderer = telegram_renderer
         self._event_stream = event_stream
         self._repo_change_guard = repo_change_guard or RepoChangeGuard()
+        self._parameter_searcher = parameter_searcher
+        self._experiment_config_generator = experiment_config_generator
+        self._experiment_tracker = experiment_tracker
+        self._calibration_tracker = calibration_tracker
+        self._search_log_dir = search_log_dir
+        self._curated_dir = curated_dir
 
     async def process_new_suggestions(
         self,
@@ -122,18 +138,86 @@ class AutonomousPipeline:
             logger.info("Proposed value invalid for %s: %s", suggestion_id, message)
             return None
 
-        comparison = await self._backtester.backtest_suggestion(
-            suggestion_id=suggestion_id,
-            bot_id=suggestion.get("bot_id", ""),
-            param_name=param.param_name,
-            current_value=param.current_value,
-            proposed_value=proposed_value,
-        )
-        if not comparison.passes_safety:
-            logger.info("Backtest failed safety for %s: %s", suggestion_id, comparison.safety_notes)
-            return None
+        bot_id = suggestion.get("bot_id", "")
 
-        profile = self._registry.get_profile(suggestion.get("bot_id", ""))
+        backtest_summary = None
+        search_summary_json = ""
+        if self._parameter_searcher:
+            # NEW PATH: neighborhood search
+            trades, missed = self._load_trade_data(bot_id)
+            report = self._parameter_searcher.search(
+                suggestion_id, bot_id, param, proposed_value, trades, missed,
+            )
+            self._persist_search_report(report)
+
+            if report.routing == SearchRouting.DISCARD:
+                self._record_search_signal(bot_id, param.category, positive=False)
+                logger.info(
+                    "Search DISCARD for %s: %s", suggestion_id, report.discard_reason,
+                )
+                return None
+
+            # Calibration override: if backtest is unreliable, force EXPERIMENT
+            if (
+                self._calibration_tracker
+                and report.routing == SearchRouting.APPROVE
+            ):
+                modifier = self._calibration_tracker.get_approval_modifier(
+                    bot_id, param.category,
+                )
+                if modifier == "require_experiment":
+                    report.routing = SearchRouting.EXPERIMENT
+                    logger.info(
+                        "Overriding APPROVE→EXPERIMENT: backtest unreliable for %s/%s",
+                        bot_id, param.category,
+                    )
+                elif modifier == "fast_track":
+                    logger.info(
+                        "Fast-track: high-reliability backtest for %s/%s — proceeding with confidence",
+                        bot_id, param.category,
+                    )
+
+            # Record calibration prediction for BOTH APPROVE and EXPERIMENT paths
+            if self._calibration_tracker and report.baseline_composite > 0:
+                self._calibration_tracker.record_prediction(
+                    suggestion_id, bot_id, param.category,
+                    predicted_improvement=report.best_composite / report.baseline_composite,
+                    predicted_routing=report.routing,
+                )
+
+            if report.routing == SearchRouting.EXPERIMENT:
+                return self._route_to_experiment(
+                    suggestion_id, suggestion, param, report,
+                )
+
+            # APPROVE path — use best_value (may differ from Claude's proposed)
+            best_value = report.best_value
+            self._record_search_signal(bot_id, param.category, positive=True)
+
+            # Build lightweight backtest summary from search report
+            search_summary_json = json.dumps({
+                "baseline_composite": round(report.baseline_composite, 4),
+                "best_composite": round(report.best_composite, 4),
+                "robustness_score": round(getattr(report, "robustness_score", 0.0), 4),
+                "exploration_summary": report.exploration_summary or "",
+                "search_routing": report.routing.value,
+            })
+        else:
+            # LEGACY PATH: existing single-value backtest (unchanged)
+            comparison = await self._backtester.backtest_suggestion(
+                suggestion_id=suggestion_id,
+                bot_id=bot_id,
+                param_name=param.param_name,
+                current_value=param.current_value,
+                proposed_value=proposed_value,
+            )
+            if not comparison.passes_safety:
+                logger.info("Backtest failed safety for %s: %s", suggestion_id, comparison.safety_notes)
+                return None
+            best_value = proposed_value
+            backtest_summary = comparison
+
+        profile = self._registry.get_profile(bot_id)
         if profile and self._repo_change_guard.blocked_paths(profile, [param.file_path]):
             logger.info(
                 "Blocked parameter suggestion %s outside allowed_edit_paths: %s",
@@ -143,25 +227,26 @@ class AutonomousPipeline:
             return None
         risk_tier = self._risk_tier_for_files(profile, [param.file_path]) if profile else RepoRiskTier.REQUIRES_APPROVAL
         request_id = hashlib.sha256(
-            f"{suggestion_id}:{param.param_name}:{proposed_value}".encode(),
+            f"{suggestion_id}:{param.param_name}:{best_value}".encode(),
         ).hexdigest()[:12]
 
         return ApprovalRequest(
             request_id=request_id,
             suggestion_id=suggestion_id,
-            bot_id=suggestion.get("bot_id", ""),
+            bot_id=bot_id,
             change_kind=ChangeKind.PARAMETER_CHANGE,
             title=f"Update {param.param_name}",
             summary=suggestion.get("title", ""),
             param_changes=[{
                 "param_name": param.param_name,
                 "current": param.current_value,
-                "proposed": proposed_value,
+                "proposed": best_value,
             }],
             planned_files=[param.file_path],
             verification_commands=profile.verification_commands if profile else [],
             risk_tier=risk_tier,
-            backtest_summary=comparison,
+            backtest_summary=backtest_summary,
+            implementation_notes=search_summary_json,
         )
 
     def _build_structural_request(
@@ -211,6 +296,7 @@ class AutonomousPipeline:
             risk_tier=risk_tier,
             draft_pr=risk_tier == RepoRiskTier.AUTO and bool(file_changes),
             implementation_notes=implementation_notes,
+            hypothesis_id=suggestion.get("hypothesis_id"),
         )
 
     def _load_all_suggestions(self) -> dict[str, dict]:
@@ -295,6 +381,127 @@ class AutonomousPipeline:
             except Exception:
                 logger.warning("Skipping malformed file change payload", exc_info=True)
         return parsed
+
+    def _load_trade_data(
+        self,
+        bot_id: str,
+    ) -> tuple[list, list]:
+        """Load TradeEvent and MissedOpportunityEvent from curated data."""
+        from schemas.events import TradeEvent, MissedOpportunityEvent
+
+        trades: list[TradeEvent] = []
+        missed: list[MissedOpportunityEvent] = []
+        if not self._curated_dir or not self._curated_dir.exists():
+            return trades, missed
+        for date_dir in sorted(self._curated_dir.iterdir(), reverse=True)[:30]:
+            bot_dir = date_dir / bot_id
+            trades_file = bot_dir / "trades.jsonl"
+            if trades_file.exists():
+                for line in trades_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            trades.append(TradeEvent(**json.loads(line)))
+                        except Exception:
+                            pass
+            missed_file = bot_dir / "missed.jsonl"
+            if missed_file.exists():
+                for line in missed_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            missed.append(MissedOpportunityEvent(**json.loads(line)))
+                        except Exception:
+                            pass
+        return trades, missed
+
+    def _persist_search_report(self, report) -> None:
+        """Persist search report to JSONL."""
+        if not self._search_log_dir:
+            return
+        try:
+            self._search_log_dir.mkdir(parents=True, exist_ok=True)
+            path = self._search_log_dir / "search_reports.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(report.model_dump_json() + "\n")
+        except Exception:
+            logger.exception("Failed to persist search report")
+
+    def _record_search_signal(
+        self,
+        bot_id: str,
+        category: str,
+        positive: bool,
+    ) -> None:
+        """Append search signal to JSONL for weekly synthesis."""
+        if not self._search_log_dir:
+            return
+        try:
+            self._search_log_dir.mkdir(parents=True, exist_ok=True)
+            path = self._search_log_dir / "search_signals.jsonl"
+            from datetime import datetime, timezone
+            record = json.dumps({
+                "bot_id": bot_id,
+                "category": category,
+                "positive": positive,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            with path.open("a", encoding="utf-8") as f:
+                f.write(record + "\n")
+        except Exception:
+            logger.exception("Failed to record search signal")
+
+    def _route_to_experiment(
+        self,
+        suggestion_id: str,
+        suggestion: dict,
+        param: ParameterDefinition,
+        report,
+    ) -> ApprovalRequest | None:
+        """Route marginal result to A/B experiment."""
+        if not self._experiment_config_generator:
+            logger.debug("No experiment_config_generator; skipping experiment route for %s", suggestion_id)
+            return None
+
+        bot_id = suggestion.get("bot_id", "")
+
+        # Check experiment cap
+        if self._experiment_tracker:
+            active = self._experiment_tracker.get_active_experiments()
+            bot_active = [e for e in active if getattr(e, "bot_id", "") == bot_id]
+            if len(bot_active) >= _MAX_ACTIVE_EXPERIMENTS:
+                logger.info(
+                    "Experiment cap reached for %s (%d active); skipping %s",
+                    bot_id, len(bot_active), suggestion_id,
+                )
+                return None
+        config = self._experiment_config_generator.generate_from_suggestion(
+            suggestion_id=suggestion_id,
+            bot_id=bot_id,
+            param_name=param.param_name,
+            current_value=param.current_value,
+            proposed_value=report.best_value,
+            title=suggestion.get("title", ""),
+        )
+
+        profile = self._registry.get_profile(bot_id)
+        risk_tier = self._risk_tier_for_files(profile, [param.file_path]) if profile else RepoRiskTier.REQUIRES_APPROVAL
+        request_id = hashlib.sha256(
+            f"{suggestion_id}:experiment:{param.param_name}".encode(),
+        ).hexdigest()[:12]
+
+        return ApprovalRequest(
+            request_id=request_id,
+            suggestion_id=suggestion_id,
+            bot_id=bot_id,
+            change_kind=ChangeKind.STRUCTURAL_CHANGE,
+            title=f"A/B experiment: {param.param_name}",
+            summary=f"Marginal search result for {param.param_name}; proposing A/B experiment. {report.exploration_summary}",
+            planned_files=[param.file_path],
+            verification_commands=profile.verification_commands if profile else [],
+            risk_tier=risk_tier,
+            implementation_notes=f"Experiment config: {config.experiment_id}",
+        )
 
     async def _send_telegram_notification(self, request: ApprovalRequest) -> None:
         if self._telegram_renderer is None or self._telegram_bot is None:

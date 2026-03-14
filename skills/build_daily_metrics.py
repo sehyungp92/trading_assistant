@@ -33,10 +33,17 @@ class DailyMetricsBuilder:
         self.bot_id = bot_id
         self.bot_timezone = bot_timezone
 
-    def build_summary(self, trades: list[TradeEvent]) -> BotDailySummary:
+    def build_summary(
+        self,
+        trades: list[TradeEvent],
+        daily_snapshot: dict | None = None,
+        missed: list[MissedOpportunityEvent] | None = None,
+    ) -> BotDailySummary:
         """Aggregate trade list into daily summary stats."""
         if not trades:
-            return BotDailySummary(date=self.date, bot_id=self.bot_id)
+            summary = BotDailySummary(date=self.date, bot_id=self.bot_id)
+            self._merge_snapshot_into_summary(summary, daily_snapshot, trades=[], missed=missed or [])
+            return summary
 
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
@@ -45,7 +52,7 @@ class DailyMetricsBuilder:
         avg_loss = sum(t.pnl for t in losses) / len(losses) if losses else 0.0
         avg_pq = sum(t.process_quality_score for t in trades) / len(trades)
 
-        return BotDailySummary(
+        summary = BotDailySummary(
             date=self.date,
             bot_id=self.bot_id,
             total_trades=len(trades),
@@ -57,6 +64,66 @@ class DailyMetricsBuilder:
             avg_loss=avg_loss,
             avg_process_quality=avg_pq,
         )
+        self._merge_snapshot_into_summary(summary, daily_snapshot, trades=trades, missed=missed or [])
+        return summary
+
+    @staticmethod
+    def _count_missed_winners(missed: list[MissedOpportunityEvent]) -> int:
+        winners = 0
+        for event in missed:
+            if event.would_have_hit_tp is True:
+                winners += 1
+            elif event.would_have_hit_tp is None and (event.outcome_24h or 0.0) > 0:
+                winners += 1
+        return winners
+
+    def _merge_snapshot_into_summary(
+        self,
+        summary: BotDailySummary,
+        daily_snapshot: dict | None,
+        trades: list[TradeEvent],
+        missed: list[MissedOpportunityEvent],
+    ) -> None:
+        if not daily_snapshot:
+            if missed:
+                summary.missed_count = len(missed)
+                summary.missed_would_have_won = self._count_missed_winners(missed)
+            return
+
+        # Preserve trade-derived metrics when real trade events exist.
+        if not trades:
+            summary.total_trades = int(daily_snapshot.get("total_trades", summary.total_trades) or 0)
+            summary.win_count = int(daily_snapshot.get("win_count", summary.win_count) or 0)
+            summary.loss_count = int(daily_snapshot.get("loss_count", summary.loss_count) or 0)
+            summary.gross_pnl = float(daily_snapshot.get("gross_pnl", summary.gross_pnl) or 0.0)
+            summary.net_pnl = float(daily_snapshot.get("net_pnl", summary.net_pnl) or 0.0)
+            summary.avg_win = float(daily_snapshot.get("avg_win", summary.avg_win) or 0.0)
+            summary.avg_loss = float(daily_snapshot.get("avg_loss", summary.avg_loss) or 0.0)
+            summary.avg_process_quality = float(
+                daily_snapshot.get("avg_process_quality", summary.avg_process_quality) or 0.0
+            )
+
+        summary.max_drawdown_pct = float(
+            daily_snapshot.get("max_drawdown_pct", summary.max_drawdown_pct) or 0.0
+        )
+        summary.sharpe_rolling_30d = float(
+            daily_snapshot.get("sharpe_rolling_30d", summary.sharpe_rolling_30d) or 0.0
+        )
+        summary.sortino_rolling_30d = float(
+            daily_snapshot.get("sortino_rolling_30d", summary.sortino_rolling_30d) or 0.0
+        )
+        summary.exposure_pct = float(daily_snapshot.get("exposure_pct", summary.exposure_pct) or 0.0)
+        summary.error_count = int(daily_snapshot.get("error_count", summary.error_count) or 0)
+        summary.uptime_pct = float(daily_snapshot.get("uptime_pct", summary.uptime_pct) or 0.0)
+
+        if missed:
+            summary.missed_count = len(missed)
+            summary.missed_would_have_won = self._count_missed_winners(missed)
+        else:
+            summary.missed_count = int(daily_snapshot.get("missed_count", summary.missed_count) or 0)
+            summary.missed_would_have_won = int(
+                daily_snapshot.get("missed_would_have_won", summary.missed_would_have_won) or 0
+            )
 
     def top_winners(self, trades: list[TradeEvent], n: int = 5) -> list[WinnerLoserRecord]:
         """Top N winning trades by PnL, descending."""
@@ -646,7 +713,7 @@ class DailyMetricsBuilder:
         output_dir = base_dir / self.date / self.bot_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        summary = self.build_summary(trades)
+        summary = self.build_summary(trades, daily_snapshot=daily_snapshot, missed=missed)
 
         # Enrich summary with per-strategy data from snapshot
         if daily_snapshot:
@@ -662,6 +729,8 @@ class DailyMetricsBuilder:
         filters = self.filter_analysis(missed)
         root_causes = self.root_cause_summary(trades)
 
+        self._write_jsonl(output_dir / "trades.jsonl", trades)
+        self._write_jsonl(output_dir / "missed.jsonl", missed)
         self._write_json(output_dir / "summary.json", summary.model_dump(mode="json"))
         self._write_json(output_dir / "winners.json", [w.model_dump(mode="json") for w in winners])
         self._write_json(output_dir / "losers.json", [l.model_dump(mode="json") for l in losers])
@@ -767,6 +836,15 @@ class DailyMetricsBuilder:
 
     def _write_json(self, path: Path, data: dict | list) -> None:
         path.write_text(json.dumps(data, indent=2, default=str))
+
+    def _write_jsonl(self, path: Path, records: list[BaseModel]) -> None:
+        if not records:
+            path.write_text("", encoding="utf-8")
+            return
+        path.write_text(
+            "\n".join(record.model_dump_json() for record in records) + "\n",
+            encoding="utf-8",
+        )
 
     def _to_winner_loser(self, t: TradeEvent) -> WinnerLoserRecord:
         return WinnerLoserRecord(

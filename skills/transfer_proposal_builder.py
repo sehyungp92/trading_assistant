@@ -154,6 +154,55 @@ class TransferProposalBuilder:
 
         return track_record
 
+    def create_from_reasoning(
+        self, reasoning: dict, source_bot: str,
+    ) -> list[str]:
+        """Create transfer proposals from a transferable outcome reasoning.
+
+        Args:
+            reasoning: Outcome reasoning dict with transferable=True.
+            source_bot: The bot where the original suggestion was applied.
+
+        Returns:
+            List of target bot IDs that received proposals.
+        """
+        mechanism = reasoning.get("mechanism", "")
+        suggestion_id = reasoning.get("suggestion_id", "")
+        title = reasoning.get("title", mechanism[:80] if mechanism else "Transferable pattern")
+
+        import hashlib as _hashlib
+        pattern_id = _hashlib.sha256(
+            f"reasoning:{suggestion_id}:{source_bot}".encode()
+        ).hexdigest()[:12]
+
+        targets: list[str] = []
+        for bot_id in self._bots:
+            if bot_id == source_bot:
+                continue
+            try:
+                proposal = TransferProposal(
+                    pattern_id=pattern_id,
+                    source_bot=source_bot,
+                    target_bot=bot_id,
+                    pattern_title=title,
+                    category=reasoning.get("category", "structural"),
+                    compatibility_score=0.5,  # default — no pattern entry to score against
+                    rationale=(
+                        f"Outcome reasoning for suggestion {suggestion_id} identified "
+                        f"transferable mechanism: {mechanism[:200]}"
+                    ),
+                )
+                # Persist proposal
+                if self._findings_dir:
+                    proposals_path = self._findings_dir / "transfer_proposals.jsonl"
+                    proposals_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(proposals_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(proposal.model_dump(mode="json"), default=str) + "\n")
+                targets.append(bot_id)
+            except Exception:
+                logger.warning("Failed to create transfer proposal for %s → %s", source_bot, bot_id)
+        return targets
+
     @staticmethod
     def load_track_record_from_file(findings_dir: Path) -> dict[str, dict]:
         """Load transfer track record directly from outcomes file, no builder needed."""
@@ -243,15 +292,21 @@ class TransferProposalBuilder:
             if path.exists():
                 try:
                     data = json.loads(path.read_text(encoding="utf-8"))
-                    total = sum(
-                        v.get("trade_count", 1) if isinstance(v, dict) else 1
-                        for v in data.values()
-                    )
-                    if total > 0:
-                        return {
-                            k: (v.get("trade_count", 1) if isinstance(v, dict) else 1) / total
-                            for k, v in data.items()
+                    if isinstance(data.get("regime_trade_count"), dict):
+                        counts = {
+                            str(regime): int(count or 0)
+                            for regime, count in data["regime_trade_count"].items()
                         }
+                    else:
+                        counts = {
+                            str(regime): int(
+                                (value.get("trade_count", 1) if isinstance(value, dict) else 1) or 0
+                            )
+                            for regime, value in data.items()
+                        }
+                    total = sum(counts.values())
+                    if total > 0:
+                        return {regime: count / total for regime, count in counts.items() if count > 0}
                 except (json.JSONDecodeError, OSError):
                     pass
         return {}

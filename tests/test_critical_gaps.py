@@ -95,7 +95,7 @@ class TestCategoryField:
             "category": "exit_timing",
             "title": "Widen stops",
             "source_report_id": "run-1",
-            "status": "implemented",
+            "status": "deployed",
         }
         (findings / "suggestions.jsonl").write_text(
             json.dumps(suggestion) + "\n", encoding="utf-8",
@@ -129,7 +129,7 @@ class TestCategoryField:
             "tier": "filter",
             "title": "Tighten filter",
             "source_report_id": "run-2",
-            "status": "implemented",
+            "status": "deployed",
         }
         (findings / "suggestions.jsonl").write_text(
             json.dumps(suggestion) + "\n", encoding="utf-8",

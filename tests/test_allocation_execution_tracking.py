@@ -462,6 +462,5 @@ class TestWeeklyAssemblerDrift:
     def test_instruction_19_present(self):
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "ALLOCATION DRIFT ANALYSIS" in _WEEKLY_INSTRUCTIONS
-        assert "total_drift_pct > 10%" in _WEEKLY_INSTRUCTIONS
-        assert "persistent_drifters" in _WEEKLY_INSTRUCTIONS
+        assert "ALLOCATION ASSESSMENT" in _WEEKLY_INSTRUCTIONS
+        assert "allocation_analysis" in _WEEKLY_INSTRUCTIONS

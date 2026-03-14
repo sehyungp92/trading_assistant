@@ -1,10 +1,8 @@
 """Prompt assembler — builds the context package for the daily analysis runtime invocation.
 
-Follows the prompt structure from roadmap section 2.4:
-  SYSTEM PROMPT: policies + corrections + patterns
-  TASK PROMPT: "Analyze today's trading performance for all bots."
-  DATA: curated summaries + risk card
-  INSTRUCTIONS: structured analysis steps
+Uses deterministic triage to pre-process data and generate focused analytical
+questions. Claude reasons about 3-5 significant events rather than mechanically
+checking 29 items.
 """
 from __future__ import annotations
 
@@ -37,100 +35,94 @@ _CURATED_FILES = [
     "orderbook_stats.json",
 ]
 
-_INSTRUCTIONS = """\
-1. Start with portfolio-level picture (total PnL, drawdown, exposure, crowding alerts)
-2. For each bot:
-   a. What worked: winning pattern (regime + signal combo + process quality)
-   b. What failed: distinguish PROCESS errors from NORMAL LOSSES using root cause tags
-   c. Missed opportunities: quantify filter impact, note simulation assumptions
-   d. Anomalies: anything statistically unusual
-   e. Factor attribution: use signal factor data to identify which indicators drove PnL
-   f. Exit efficiency: review exit timing scores and MAE/MFE ratios for optimization clues
-3. Cross-bot patterns: correlation, regime alignment, crowding risk
-4. Hourly performance: note time-of-day edges or dead zones from hourly_performance data
-5. Slippage: review slippage_stats for regime-based cost patterns
-6. Overlay analysis: when overlay_state_summary.json is present (swing_trader only),
-   analyze the EMA crossover overlay's contribution.
-   - Review overlay P&L relative to main strategy P&L
-   - Correlate overlay state transitions with main strategy outcomes (informational only)
-   - The overlay does NOT gate main strategy signals — it deploys idle capital independently
-   - Flag if overlay positions are consistently losing during periods when main strategies are profitable
-7. Excursion analysis: when excursion_stats.json is present, review MFE/MAE distributions.
-   - Compare winner vs loser MFE/MAE profiles
-   - High MAE on winners suggests stop placement is too tight
-   - Low exit_efficiency (<50%) across winners suggests premature exits
-   - This is bot-provided intra-trade data and supplements the post-exit proxy in exit_efficiency.json
-8. Experiment breakdown (swing_trader): when experiment_data.json is present,
-   compare variant PnL, win_rate, and Sharpe across experiment groups.
-   Flag underperforming variants. Note sample sizes — small samples reduce confidence.
-9. Signal health (momentum_trader): when signal_health.json is present,
-   review per-component metrics. Flag components with low stability (<0.5),
-   low win_correlation (<0.1), or negative trend_during_trade on winning trades.
-   These indicate signal components losing predictive power.
-10. Fill quality (momentum_trader): when fill_quality.json is present,
-   review entry vs exit slippage distributions. Flag adverse_selection_detected.
-   Check per-symbol breakdown for outlier symbols. Quantify annualized slippage cost
-   (avg_slippage_bps × estimated annual trade count × avg position size).
-11. Filter decisions: when filter_decisions.json is present, review per-filter pass/block
-    rates and near-miss percentages. Filters with >30% near-miss rate are borderline —
-    consider whether threshold adjustment would improve outcomes. Cross-reference with
-    filter_analysis.json to validate that high-block-rate filters are net-positive.
-12. Indicator snapshots: when indicator_snapshots.json is present, review indicator value
-    distributions at signal evaluation points. Flag indicators with extreme clustering
-    (low variance) — they may not be contributing differentiation. Compare decision
-    distribution (enter/skip/exit) with win/loss outcomes for signal quality assessment.
-13. Order book microstructure: when orderbook_stats.json is present, review spread and
-    depth imbalance patterns. Flag entry-context spreads that exceed 2× the median
-    (potential adverse selection). Bid/ask imbalance >2.0 or <0.5 at entry suggests
-    positioning against order flow — note these for risk assessment.
-14. Actionable items: max 3 specific, testable suggestions backed by factor attribution or exit efficiency data
-   QUANTIFICATION REQUIRED: Every suggestion MUST include:
-   (a) Expected return impact with a range (e.g., "+0.3% to +0.8% daily PnL")
-   (b) Drawdown impact estimate (e.g., "max drawdown reduction of ~15%")
-   (c) Evidence base: trade count, time period, and statistical significance
-   Suggestions without quantification will be rejected.
-15. Open risks: any CRITICAL/HIGH events that need human attention
-16. Output: daily_report.md + report_checklist.json
-17. Check the rejected_suggestions list (if present). Do NOT re-suggest anything that was previously rejected unless you have new evidence.
-18. Contradiction check: If 'contradictions' data is present, review each flagged item.
-    Assess whether each contradiction indicates a genuine issue or an acceptable regime
-    transition. Address each contradiction explicitly — do not ignore them silently.
-19. Signal factor trends: If 'signal_factor_trends' data is present, review each factor's
-    rolling 30d metrics. Factors with 'degrading' trend or 'below_threshold: true' should
-    be explicitly called out as candidates for recalibration. Compare against today's
-    factor_attribution data.
-20. Correction patterns: If 'correction_patterns' data is present, review recurring human
-    corrections. Avoid repeating these mistakes — adapt your analysis to address known blind spots.
-21. Reference outcome_measurements (if present) when making suggestions. Only make
-    high-confidence suggestions for approaches with proven POSITIVE track records.
-22. Review active_suggestions (if present). Don't contradict IMPLEMENTED suggestions.
-    For PROPOSED suggestions, note any supporting or contradicting evidence from today.
-23. Review category_scorecard (if present). Categories with win_rate < 30% and sample_size >= 5
-    require exceptional new evidence to justify suggestions in that category.
-24. Review prediction_accuracy_by_metric (if present). For metrics where accuracy < 40%,
-    explicitly caveat predictions and lower confidence.
-25. Review failure_log (if present). Avoid analysis approaches that have previously failed.
-26. Review consolidated_patterns (if present). These are systemic patterns discovered across
-    findings — use them to ground your structural analysis.
-27. Review hypothesis_track_record (if present). Prioritize hypotheses with positive
-    effectiveness. Do not propose retired hypotheses.
-28. Review validation_patterns (if present). These are recurring blocked suggestion categories —
-    avoid proposing suggestions in categories that are consistently blocked.
-29. STRUCTURED OUTPUT (REQUIRED): At the END of your analysis, emit a structured data block.
-    This block is machine-parsed — do NOT omit it.
-    <!-- STRUCTURED_OUTPUT
-    {
-      "predictions": [
-        {"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}
-      ],
-      "suggestions": [
-        {"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}
-      ],
-      "structural_proposals": [
-        {"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high"}
-      ]
-    }
-    -->"""
+# Focused instructions that require causal reasoning, not checklist narration.
+_FOCUSED_INSTRUCTIONS = """\
+You are analyzing today's trading data. A deterministic triage system has already
+pre-processed the data and identified what deserves your attention.
+
+## ROUTINE SUMMARY (pre-computed — do NOT regenerate this)
+{routine_summary}
+
+## SIGNIFICANT EVENTS REQUIRING YOUR ANALYSIS
+{significant_events}
+
+## YOUR ANALYTICAL TASKS
+
+For each significant event above, you MUST:
+1. State a hypothesis about WHY it happened
+2. Identify confirming AND refuting evidence in the data
+3. Check the evidence — does it support or undermine your hypothesis?
+4. Rate your confidence (0.0–1.0) with explicit justification
+
+{focus_questions}
+
+## GROUND TRUTH PERFORMANCE (do not modify this evaluation)
+If ground_truth_trend data is present, reference specific metric movements when
+proposing changes. If a bot's composite is declining, prioritize diagnosis over
+new proposals.
+
+## YOUR PREDICTION TRACK RECORD
+If prediction_accuracy_by_metric data is present, recalibrate accordingly:
+- Metrics where your accuracy < 50%: reduce confidence to 0.2-0.4 or skip predictions
+- Metrics where your accuracy > 70%: you may use confidence up to 0.8
+- No data yet: use conservative confidence (0.3-0.5)
+- Explain what you got wrong last time and why
+
+## BLOCKED APPROACHES
+If last_week_synthesis data contains a "discard" list, do NOT suggest those
+approaches — they have failed repeatedly.
+
+## PARAMETER SEARCH CONTEXT
+If search_reports data is present, the autonomous inner loop has already tested
+parameter neighborhoods. Do NOT propose parameter changes that overlap with what
+the inner loop already explored — focus on structural changes or untested parameters.
+If backtest_reliability data is present, categories marked as unreliable should be
+addressed with structural changes rather than further parameter tuning.
+
+## HYPOTHESIS TRACK RECORD
+If hypothesis_track_record data is present, prioritize hypotheses with positive
+effectiveness scores when making structural proposals. Do NOT propose changes
+linked to hypotheses with effectiveness <= 0 or status="retired".
+
+## ACTIVE EXPERIMENTS
+If active_experiments data is present, do NOT propose changes that overlap with
+experiments currently in progress — let them complete their observation window.
+Reference experiment status when discussing related metrics.
+
+## CONSTRAINTS
+- Do NOT restate the routine summary — it's already computed above.
+- Do NOT mechanically review every data file — focus only on what the triage flagged.
+- Every suggestion MUST include quantified expected impact (PnL range, drawdown change)
+  with evidence base (trade count, time period, statistical significance).
+- Check rejected_suggestions: do NOT re-suggest previously rejected items without new evidence.
+- Check active_suggestions: do NOT contradict DEPLOYED suggestions.
+- Check category_scorecard: categories with win_rate < 30% (n≥5) need exceptional evidence.
+- Suggestions without quantification will be rejected by the validator.
+
+## STRUCTURED OUTPUT (REQUIRED)
+At the END of your analysis, emit a structured data block.
+This block is machine-parsed — do NOT omit it.
+<!-- STRUCTURED_OUTPUT
+{{
+  "predictions": [
+    {{"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}}
+  ],
+  "suggestions": [
+    {{"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
+  ],
+  "structural_proposals": [
+    {{"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high", "acceptance_criteria": [{{"metric": "...", "direction": "improve|not_degrade", "minimum_change": 0.0, "observation_window_days": 14, "minimum_trade_count": 20}}]}}
+  ]
+}}
+-->"""
+
+# Legacy instructions kept for backward compatibility (used when no triage is provided)
+_INSTRUCTIONS = _FOCUSED_INSTRUCTIONS.format(
+    routine_summary="(No triage data — review all bots manually)",
+    significant_events="(No triage — review all curated data files for anomalies)",
+    focus_questions="Analyze today's trading performance across all bots. Focus on anomalies, "
+    "process failures, and actionable improvements.",
+)
 
 
 class DailyPromptAssembler:
@@ -151,15 +143,21 @@ class DailyPromptAssembler:
         self.memory_dir = memory_dir
         self.corrections_lookback_days = corrections_lookback_days
         self.bot_configs = bot_configs
-        self._ctx = ContextBuilder(memory_dir)
+        self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
-    def assemble(self) -> PromptPackage:
-        """Build the complete prompt package."""
+    def assemble(self, triage_report=None) -> PromptPackage:
+        """Build the complete prompt package.
+
+        Args:
+            triage_report: Optional TriageReport from DailyTriage. When provided,
+                instructions are focused on the triage's significant events and
+                questions. When None, uses fallback instructions.
+        """
         pkg = self._ctx.base_package(bot_configs=self.bot_configs)
         pkg.task_prompt = self._build_task_prompt()
-        pkg.data.update(self._load_structured_data())
-        pkg.instructions = _INSTRUCTIONS
-        pkg.context_files.extend(self._list_data_files())
+        pkg.data.update(self._load_structured_data(triage_report))
+        pkg.instructions = self._build_instructions(triage_report)
+        pkg.context_files.extend(self._list_data_files(triage_report))
 
         # Inject contradiction data if any
         contradictions = self._ctx.load_contradictions(self.date, self.bots, self.curated_dir)
@@ -168,26 +166,60 @@ class DailyPromptAssembler:
 
         return pkg
 
+    def _build_instructions(self, triage_report=None) -> str:
+        """Build instructions from triage report or use fallback."""
+        if triage_report is None:
+            return _INSTRUCTIONS
+
+        # Format significant events
+        event_lines = []
+        for i, event in enumerate(triage_report.significant_events, 1):
+            event_lines.append(
+                f"{i}. **[{event.event_type.upper()}]** [{event.bot_id}] "
+                f"(severity: {event.severity}) — {event.description}"
+            )
+        events_text = "\n".join(event_lines) if event_lines else "(No significant events detected — routine day)"
+
+        # Format focus questions
+        question_lines = []
+        for i, q in enumerate(triage_report.focus_questions, 1):
+            question_lines.append(f"{i}. {q}")
+        questions_text = "\n".join(question_lines)
+
+        return _FOCUSED_INSTRUCTIONS.format(
+            routine_summary=triage_report.routine_summary,
+            significant_events=events_text,
+            focus_questions=questions_text,
+        )
+
     def _build_task_prompt(self) -> str:
         bot_list = ", ".join(self.bots)
         return (
             f"Analyze today's ({self.date}) trading performance for all bots: {bot_list}.\n"
-            f"Use the structured data provided. Follow the instructions exactly."
+            f"Focus on the significant events identified by triage. Reason about causes, not just symptoms."
         )
 
-    def _load_structured_data(self) -> dict:
+    def _load_structured_data(self, triage_report=None) -> dict:
         data: dict = {}
         date_dir = self.curated_dir / self.date
         findings_dir = self.memory_dir / "findings"
 
+        # Determine which files to load based on triage
+        files_to_load = _CURATED_FILES
+        if triage_report and triage_report.relevant_data_keys:
+            # Always load summary + triage-relevant files
+            relevant = set(triage_report.relevant_data_keys)
+            relevant.add("summary.json")
+            files_to_load = [f for f in _CURATED_FILES if f in relevant]
+
         for bot in self.bots:
             bot_dir = date_dir / bot
             bot_data: dict = {}
-            for filename in _CURATED_FILES:
+            for filename in files_to_load:
                 path = bot_dir / filename
                 if path.exists():
                     key = filename.replace(".json", "")
-                    bot_data[key] = json.loads(path.read_text())
+                    bot_data[key] = json.loads(path.read_text(encoding="utf-8"))
 
             # Inject signal factor rolling trends per bot
             factor_trends = self._ctx.load_signal_factor_history(bot, self.date, findings_dir)
@@ -198,17 +230,23 @@ class DailyPromptAssembler:
 
         risk_path = date_dir / "portfolio_risk_card.json"
         if risk_path.exists():
-            data["portfolio_risk_card"] = json.loads(risk_path.read_text())
+            data["portfolio_risk_card"] = json.loads(risk_path.read_text(encoding="utf-8"))
 
         return data
 
-    def _list_data_files(self) -> list[str]:
+    def _list_data_files(self, triage_report=None) -> list[str]:
         files: list[str] = []
         date_dir = self.curated_dir / self.date
 
+        files_to_list = _CURATED_FILES
+        if triage_report and triage_report.relevant_data_keys:
+            relevant = set(triage_report.relevant_data_keys)
+            relevant.add("summary.json")
+            files_to_list = [f for f in _CURATED_FILES if f in relevant]
+
         for bot in self.bots:
             bot_dir = date_dir / bot
-            for filename in _CURATED_FILES:
+            for filename in files_to_list:
                 path = bot_dir / filename
                 if path.exists():
                     files.append(str(path))

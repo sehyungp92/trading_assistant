@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,10 @@ class PredictionRecord(BaseModel):
     recorded_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    predicted_magnitude: Optional[float] = None
+    actual_magnitude: Optional[float] = None
+    regime_tag: Optional[str] = None
+    prediction_family: Optional[str] = None  # performance/reliability/transfer/structural
 
 
 class PredictionVerdict(BaseModel):

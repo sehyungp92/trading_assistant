@@ -190,11 +190,11 @@ class TestEndToEndFeedbackRouting:
         )
         await h.handle_feedback(action)
 
-        # Verify the suggestion was implemented
+        # Verify the suggestion was accepted for implementation follow-through
         all_recs = tracker.load_all()
         found = [r for r in all_recs if r["suggestion_id"] == "abc123"]
         assert len(found) == 1
-        assert found[0]["status"] == SuggestionStatus.IMPLEMENTED.value
+        assert found[0]["status"] == SuggestionStatus.ACCEPTED.value
 
 
 # ============================================================
@@ -503,11 +503,11 @@ class TestCandidateHypothesisPromotion:
 
 class TestHypothesisIdInstructions:
     def test_weekly_instruction_contains_hypothesis_id_guidance(self):
-        """Weekly instructions tell Claude to match hypothesis IDs."""
+        """Weekly instructions reference hypothesis tracking in structured output."""
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "set hypothesis_id to that hypothesis" in _WEEKLY_INSTRUCTIONS
-        assert "MUST check if any existing hypothesis matches" in _WEEKLY_INSTRUCTIONS
+        assert "hypothesis_track_record" in _WEEKLY_INSTRUCTIONS
+        assert "hypothesis" in _WEEKLY_INSTRUCTIONS
 
     def test_weekly_template_contains_required_note(self):
         """Structured output template says REQUIRED for hypothesis_id."""
@@ -528,25 +528,25 @@ class TestHypothesisIdInstructions:
 
 
 class TestDailyInstructionCoverage:
-    def test_daily_instructions_reference_failure_log(self):
-        """Daily instructions now reference failure_log."""
+    def test_daily_instructions_reference_rejected_suggestions(self):
+        """Daily instructions reference rejected_suggestions for constraint checking."""
         from analysis.prompt_assembler import _INSTRUCTIONS
-        assert "failure_log" in _INSTRUCTIONS
+        assert "rejected_suggestions" in _INSTRUCTIONS
 
-    def test_daily_instructions_reference_consolidated_patterns(self):
-        """Daily instructions now reference consolidated_patterns."""
+    def test_daily_instructions_reference_active_suggestions(self):
+        """Daily instructions reference active_suggestions."""
         from analysis.prompt_assembler import _INSTRUCTIONS
-        assert "consolidated_patterns" in _INSTRUCTIONS
+        assert "active_suggestions" in _INSTRUCTIONS
 
-    def test_daily_instructions_reference_hypothesis_track_record(self):
-        """Daily instructions now reference hypothesis_track_record."""
+    def test_daily_instructions_reference_category_scorecard(self):
+        """Daily instructions reference category_scorecard."""
         from analysis.prompt_assembler import _INSTRUCTIONS
-        assert "hypothesis_track_record" in _INSTRUCTIONS
+        assert "category_scorecard" in _INSTRUCTIONS
 
-    def test_daily_instructions_reference_validation_patterns(self):
-        """Daily instructions now reference validation_patterns."""
+    def test_daily_instructions_reference_quantification(self):
+        """Daily instructions reference quantification requirements."""
         from analysis.prompt_assembler import _INSTRUCTIONS
-        assert "validation_patterns" in _INSTRUCTIONS
+        assert "quantification" in _INSTRUCTIONS
 
 
 class TestValidationPatternAggregation:
@@ -661,7 +661,7 @@ class TestSharedTierMapping:
 
 
 class TestWeeklyPromptValidationPatterns:
-    def test_weekly_instructions_reference_validation_patterns(self):
-        """Weekly instructions reference validation_patterns."""
+    def test_weekly_instructions_reference_category_scorecard(self):
+        """Weekly instructions reference category_scorecard for suggestion validation."""
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
-        assert "validation_patterns" in _WEEKLY_INSTRUCTIONS
+        assert "category_scorecard" in _WEEKLY_INSTRUCTIONS

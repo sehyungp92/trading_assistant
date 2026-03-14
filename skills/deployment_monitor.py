@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,6 +52,7 @@ class DeploymentMonitor:
         bot_id: str,
         param_changes: list[dict],
         pr_number: int = 0,
+        suggestion_id: str | None = None,
     ) -> DeploymentRecord:
         """Create a deployment record when a PR is created."""
         existing = self.get_by_id(deployment_id)
@@ -59,6 +62,7 @@ class DeploymentMonitor:
         record = DeploymentRecord(
             deployment_id=deployment_id,
             approval_request_id=approval_request_id,
+            suggestion_id=suggestion_id,
             pr_url=pr_url,
             pr_number=pr_number,
             bot_id=bot_id,
@@ -92,7 +96,11 @@ class DeploymentMonitor:
             data = json.loads(stdout)
             if data.get("state") == "MERGED":
                 record.status = DeploymentStatus.MERGED
-                record.merge_time = datetime.now(timezone.utc)
+                merged_at = data.get("mergedAt")
+                if isinstance(merged_at, str) and merged_at:
+                    record.merge_time = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+                else:
+                    record.merge_time = datetime.now(timezone.utc)
                 self._update_record(record)
                 if self._event_stream:
                     self._event_stream.broadcast(
@@ -159,16 +167,15 @@ class DeploymentMonitor:
             return True
         return False
 
-    def mark_deployed(self, deployment_id: str) -> None:
+    def mark_deployed(self, deployment_id: str, detected_at: datetime | None = None) -> None:
         """Mark as deployed when bot heartbeat confirms new version."""
         record = self.get_by_id(deployment_id)
         if record is None:
             return
+        detected = detected_at or datetime.now(timezone.utc)
         record.status = DeploymentStatus.DEPLOYED
-        record.deploy_detected_time = datetime.now(timezone.utc)
-        record.monitoring_end_time = (
-            datetime.now(timezone.utc) + timedelta(hours=record.monitoring_window_hours)
-        )
+        record.deploy_detected_time = detected
+        record.monitoring_end_time = detected + timedelta(hours=record.monitoring_window_hours)
         self._update_record(record)
 
     def check_regression(self, deployment_id: str) -> bool:
@@ -377,28 +384,73 @@ class DeploymentMonitor:
         if not self._curated_dir.exists():
             return None
 
-        date_dirs = sorted(
-            [d for d in self._curated_dir.iterdir() if d.is_dir()],
-            reverse=True,
+        summaries = self._load_recent_summaries(bot_id, limit=7)
+        if not summaries:
+            return None
+
+        total_trades = 0
+        weighted_wins = 0.0
+        total_net_pnl = 0.0
+        drawdowns: list[float] = []
+        daily_pnls: list[float] = []
+
+        for data in summaries:
+            trades = int(data.get("total_trades", data.get("trade_count", 0)) or 0)
+            total_trades += trades
+            if "win_count" in data:
+                weighted_wins += float(data.get("win_count", 0) or 0)
+            else:
+                weighted_wins += float(data.get("win_rate", 0.0) or 0.0) * trades
+            if "net_pnl" in data:
+                net_pnl = float(data.get("net_pnl", 0.0) or 0.0)
+            else:
+                # Legacy fixtures stored avg_pnl directly; convert back to daily total.
+                net_pnl = float(data.get("avg_pnl", 0.0) or 0.0) * trades
+            total_net_pnl += net_pnl
+            daily_pnls.append(net_pnl)
+            drawdowns.append(float(data.get("max_drawdown_pct", 0.0) or 0.0))
+
+        return DeploymentMetricsSnapshot(
+            bot_id=bot_id,
+            total_trades=total_trades,
+            win_rate=(weighted_wins / total_trades) if total_trades > 0 else 0.0,
+            avg_pnl=(total_net_pnl / total_trades) if total_trades > 0 else 0.0,
+            sharpe_rolling_7d=self._compute_daily_sharpe(daily_pnls),
+            max_drawdown_pct=max(drawdowns) if drawdowns else 0.0,
         )
 
-        for date_dir in date_dirs[:7]:  # Check last 7 days
-            bot_dir = date_dir / bot_id
-            summary_path = bot_dir / "summary.json"
-            if summary_path.exists():
-                try:
-                    data = json.loads(summary_path.read_text())
-                    return DeploymentMetricsSnapshot(
-                        bot_id=bot_id,
-                        total_trades=data.get("trade_count", 0),
-                        win_rate=data.get("win_rate", 0.0),
-                        avg_pnl=data.get("avg_pnl", 0.0),
-                        sharpe_rolling_7d=data.get("sharpe_ratio", 0.0),
-                        max_drawdown_pct=data.get("max_drawdown_pct", 0.0),
-                    )
-                except (json.JSONDecodeError, Exception):
-                    continue
-        return None
+    def _load_recent_summaries(self, bot_id: str, limit: int = 7) -> list[dict]:
+        date_dirs = sorted(
+            [
+                d for d in self._curated_dir.iterdir()
+                if d.is_dir() and d.name != "weekly"
+            ],
+            reverse=True,
+        )
+        summaries: list[dict] = []
+        for date_dir in date_dirs:
+            summary_path = date_dir / bot_id / "summary.json"
+            if not summary_path.exists():
+                continue
+            try:
+                summaries.append(json.loads(summary_path.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if len(summaries) >= limit:
+                break
+        return summaries
+
+    @staticmethod
+    def _compute_daily_sharpe(pnls: list[float]) -> float:
+        if len(pnls) < 2:
+            return 0.0
+        try:
+            std = statistics.stdev(pnls)
+        except statistics.StatisticsError:
+            return 0.0
+        if std <= 0:
+            return 0.0
+        return statistics.mean(pnls) / std * math.sqrt(252)
 
     def _get_repo_dir(self, bot_id: str) -> Path | None:
         """Get repo directory for a bot. Returns None if not resolvable."""

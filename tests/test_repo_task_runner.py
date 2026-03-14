@@ -45,14 +45,14 @@ def agent_runner(tmp_path: Path) -> AgentRunner:
 
 @pytest.mark.asyncio
 async def test_repo_task_runner_falls_back_from_codex_override(agent_runner: AgentRunner):
-    agent_runner._provider_status_cache = {
+    agent_runner._auth_checker._provider_status_cache.update({
         AgentProvider.CLAUDE_MAX: _ready(AgentProvider.CLAUDE_MAX),
         AgentProvider.CODEX_PRO: ProviderReadiness(
             provider=AgentProvider.CODEX_PRO,
             available=True,
             runtime="codex_cli",
         ),
-    }
+    })
     agent_runner.invoke_with_selection = AsyncMock(return_value=AgentResult(
         response="ok",
         run_dir=agent_runner._runs_dir / "repo-task",
@@ -79,14 +79,14 @@ async def test_repo_task_runner_falls_back_when_requested_provider_unavailable(a
         overrides={
             AgentWorkflow.TRIAGE: AgentSelection(
                 provider=AgentProvider.OPENROUTER,
-                model="anthropic/claude-sonnet-4.5",
+                model="minimax/minimax-m2.5",
             ),
         },
     ))
-    agent_runner._provider_status_cache = {
+    agent_runner._auth_checker._provider_status_cache.update({
         AgentProvider.OPENROUTER: _unready(AgentProvider.OPENROUTER, "missing API key"),
         AgentProvider.CLAUDE_MAX: _ready(AgentProvider.CLAUDE_MAX),
-    }
+    })
     agent_runner.invoke_with_selection = AsyncMock(return_value=AgentResult(
         response="ok",
         run_dir=agent_runner._runs_dir / "repo-task",
@@ -105,7 +105,7 @@ async def test_repo_task_runner_falls_back_when_requested_provider_unavailable(a
 
 @pytest.mark.asyncio
 async def test_repo_task_runner_raises_when_no_write_provider_is_ready(agent_runner: AgentRunner):
-    agent_runner._provider_status_cache = {
+    agent_runner._auth_checker._provider_status_cache.update({
         AgentProvider.CLAUDE_MAX: _unready(AgentProvider.CLAUDE_MAX, "not authenticated"),
         AgentProvider.OPENROUTER: _unready(AgentProvider.OPENROUTER, "missing API key"),
         AgentProvider.ZAI_CODING_PLAN: _unready(AgentProvider.ZAI_CODING_PLAN, "missing API key"),
@@ -114,7 +114,7 @@ async def test_repo_task_runner_raises_when_no_write_provider_is_ready(agent_run
             available=True,
             runtime="codex_cli",
         ),
-    }
+    })
     runner = RepoTaskRunner(agent_runner)
 
     with pytest.raises(ValueError) as exc:

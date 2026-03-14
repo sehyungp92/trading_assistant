@@ -32,11 +32,24 @@ class AgentSelection(BaseModel):
         return self
 
 
+class FallbackEntry(BaseModel):
+    provider: AgentProvider
+    model: str | None = None
+
+
+class WorkflowTuning(BaseModel):
+    timeout_seconds: int | None = None
+    max_turns: int | None = None
+    allowed_tools: list[str] | None = None
+
+
 class AgentPreferences(BaseModel):
     default: AgentSelection = Field(
         default_factory=lambda: AgentSelection(provider=AgentProvider.CLAUDE_MAX)
     )
     overrides: dict[AgentWorkflow, AgentSelection | None] = Field(default_factory=dict)
+    fallback_chain: list[FallbackEntry] = Field(default_factory=list)
+    workflow_tuning: dict[AgentWorkflow, WorkflowTuning] = Field(default_factory=dict)
 
 
 class ProviderReadiness(BaseModel):

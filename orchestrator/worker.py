@@ -152,6 +152,10 @@ class Worker:
                 return bot_trading_date(bot_config.timezone, exchange_timestamp)
             return exchange_timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
+        logger.warning(
+            "No payload date or exchange_timestamp for bot %s — falling back to current UTC date",
+            bot_id,
+        )
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     def _normalize_payload(self, details: dict) -> object:

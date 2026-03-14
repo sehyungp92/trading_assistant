@@ -15,8 +15,11 @@ from pydantic import BaseModel, Field
 class SuggestionStatus(str, Enum):
     PROPOSED = "proposed"
     ACCEPTED = "accepted"
+    MERGED = "merged"
+    DEPLOYED = "deployed"
+    MEASURED = "measured"
     REJECTED = "rejected"
-    IMPLEMENTED = "implemented"
+    IMPLEMENTED = "implemented"  # deprecated: kept for historical JSONL compatibility; use DEPLOYED
 
 
 class SuggestionRecord(BaseModel):
@@ -33,10 +36,17 @@ class SuggestionRecord(BaseModel):
     proposed_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    accepted_at: Optional[datetime] = None
+    merged_at: Optional[datetime] = None
+    deployed_at: Optional[datetime] = None
+    measured_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     rejection_reason: str = ""
     confidence: float = 0.0
     hypothesis_id: Optional[str] = None
+    approval_request_id: Optional[str] = None
+    deployment_id: Optional[str] = None
+    pr_url: Optional[str] = None
     detection_context: Optional[dict] = None
     implementation_context: Optional[dict] = None
 

@@ -164,7 +164,7 @@ class TestAgentPreferencesPersistence:
             overrides={
                 AgentWorkflow.TRIAGE: AgentSelection(
                     provider=AgentProvider.OPENROUTER,
-                    model="anthropic/claude-sonnet-4.5",
+                    model="minimax/minimax-m2.5",
                 ),
             },
         )
@@ -181,7 +181,7 @@ class TestAgentPreferencesPersistence:
         config = AppConfig(
             agent_default_provider="codex_pro",
             daily_agent_provider="openrouter",
-            daily_agent_model="anthropic/claude-sonnet-4.5",
+            daily_agent_model="minimax/minimax-m2.5",
         )
 
         loaded = _load_agent_preferences(prefs_path, config)
@@ -258,7 +258,7 @@ class TestCreateAppWithConfig:
         prefs_path = tmp_path / "data" / "agent_preferences.json"
         prefs_path.parent.mkdir(parents=True)
         prefs_path.write_text(json.dumps({
-            "default": {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.5"},
+            "default": {"provider": "openrouter", "model": "minimax/minimax-m2.5"},
             "overrides": {
                 "triage": {"provider": "codex_pro", "model": "gpt-5.4"},
             },
@@ -272,7 +272,7 @@ class TestCreateAppWithConfig:
     def test_agent_prefs_seed_from_env_when_missing(self, tmp_path):
         config = AppConfig(
             agent_default_provider="zai_coding_plan",
-            agent_default_model="glm-4.7",
+            agent_default_model="glm-5",
             wfo_agent_provider="claude_max",
             wfo_agent_model="opus",
         )
@@ -280,7 +280,7 @@ class TestCreateAppWithConfig:
         app = create_app(db_dir=str(tmp_path), config=config)
 
         assert app.state.agent_preferences.default.provider == AgentProvider.ZAI_CODING_PLAN
-        assert app.state.agent_preferences.default.model == "glm-4.7"
+        assert app.state.agent_preferences.default.model == "glm-5"
         assert app.state.agent_preferences.overrides[AgentWorkflow.WFO].provider == AgentProvider.CLAUDE_MAX
         assert app.state.agent_preferences.overrides[AgentWorkflow.WFO].model == "opus"
 

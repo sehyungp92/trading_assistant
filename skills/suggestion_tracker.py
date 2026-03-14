@@ -36,9 +36,59 @@ class SuggestionTracker:
         return True
 
     def reject(self, suggestion_id: str, reason: str = "") -> None:
-        self._update_status(suggestion_id, SuggestionStatus.REJECTED, reason)
+        self._update_status(suggestion_id, SuggestionStatus.REJECTED, reason=reason)
+
+    def accept(
+        self,
+        suggestion_id: str,
+        approval_request_id: str | None = None,
+    ) -> None:
+        self._update_status(
+            suggestion_id,
+            SuggestionStatus.ACCEPTED,
+            approval_request_id=approval_request_id,
+        )
+
+    def mark_merged(
+        self,
+        suggestion_id: str,
+        pr_url: str | None = None,
+        deployment_id: str | None = None,
+    ) -> None:
+        self._update_status(
+            suggestion_id,
+            SuggestionStatus.MERGED,
+            pr_url=pr_url,
+            deployment_id=deployment_id,
+        )
+
+    def mark_deployed(
+        self,
+        suggestion_id: str,
+        deployment_id: str | None = None,
+    ) -> None:
+        self._update_status(
+            suggestion_id,
+            SuggestionStatus.DEPLOYED,
+            deployment_id=deployment_id,
+        )
+
+    def mark_measured(self, suggestion_id: str) -> None:
+        self._update_status(suggestion_id, SuggestionStatus.MEASURED)
 
     def implement(self, suggestion_id: str) -> None:
+        """Legacy helper retained for historical tooling.
+
+        .. deprecated::
+            Use ``accept()`` followed by ``mark_deployed()`` instead.
+        """
+        import warnings
+
+        warnings.warn(
+            "implement() is deprecated; use accept() + mark_deployed()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._update_status(suggestion_id, SuggestionStatus.IMPLEMENTED)
 
     def record_outcome(self, outcome: SuggestionOutcome) -> None:
@@ -60,17 +110,42 @@ class SuggestionTracker:
         return rejected
 
     def _update_status(
-        self, suggestion_id: str, status: SuggestionStatus, reason: str = ""
+        self,
+        suggestion_id: str,
+        status: SuggestionStatus,
+        reason: str = "",
+        approval_request_id: str | None = None,
+        deployment_id: str | None = None,
+        pr_url: str | None = None,
     ) -> None:
         from skills._atomic_write import atomic_rewrite_jsonl
 
         records = self.load_all()
+        now = datetime.now(timezone.utc).isoformat()
         for rec in records:
             if rec["suggestion_id"] == suggestion_id:
                 rec["status"] = status.value
+                if status == SuggestionStatus.ACCEPTED:
+                    rec["accepted_at"] = now
+                elif status == SuggestionStatus.MERGED:
+                    rec["merged_at"] = now
+                elif status == SuggestionStatus.DEPLOYED:
+                    rec["deployed_at"] = now
+                elif status == SuggestionStatus.MEASURED:
+                    rec["measured_at"] = now
                 if reason:
                     rec["rejection_reason"] = reason
-                rec["resolved_at"] = datetime.now(timezone.utc).isoformat()
+                if approval_request_id:
+                    rec["approval_request_id"] = approval_request_id
+                if deployment_id:
+                    rec["deployment_id"] = deployment_id
+                if pr_url:
+                    rec["pr_url"] = pr_url
+                if status in {
+                    SuggestionStatus.REJECTED,
+                    SuggestionStatus.MEASURED,
+                }:
+                    rec["resolved_at"] = now
         atomic_rewrite_jsonl(self._suggestions_path, records)
 
     @staticmethod

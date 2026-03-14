@@ -12,6 +12,8 @@ from schemas.report_checklist import ReportChecklist, CheckResult
 
 _EXPECTED_BOT_FILES = [
     "summary.json",
+    "trades.jsonl",
+    "missed.jsonl",
     "winners.json",
     "losers.json",
     "process_failures.json",

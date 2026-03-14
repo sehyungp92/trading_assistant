@@ -12,6 +12,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+
 class AccuracyTrend(str, Enum):
     IMPROVING = "improving"
     STABLE = "stable"
@@ -33,6 +34,22 @@ class ForecastRecord(BaseModel):
     )
 
 
+class CalibrationBucket(BaseModel):
+    """A single confidence calibration bucket."""
+
+    bucket_lower: float
+    bucket_upper: float
+    prediction_count: int
+    correct_count: int
+    mean_confidence: float
+    observed_accuracy: float
+    gap: float  # mean_confidence - observed_accuracy; positive = overconfident
+
+    @property
+    def is_reliable(self) -> bool:
+        return self.prediction_count >= 5
+
+
 class ForecastMetaAnalysis(BaseModel):
     """Rolling meta-analysis of forecast accuracy over time."""
 
@@ -43,3 +60,7 @@ class ForecastMetaAnalysis(BaseModel):
     accuracy_by_metric: dict[str, float] = {}  # pnl, win_rate, drawdown, sharpe → accuracy
     calibration_adjustment: float = 0.0  # -1 to +1; negative = over-confident
     weeks_analyzed: int = 0
+    calibration_buckets: list[CalibrationBucket] = Field(default_factory=list)
+    expected_calibration_error: Optional[float] = None
+    brier_score: Optional[float] = None
+    calibration_sample_size: int = 0

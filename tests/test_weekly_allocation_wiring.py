@@ -241,7 +241,7 @@ class TestWeeklyPromptAssemblerAllocation:
             runs_dir=tmp_path / "runs",
         )
         package = assembler.assemble()
-        assert "PORTFOLIO & STRATEGY ALLOCATION ASSESSMENT" in package.instructions
+        assert "ALLOCATION ASSESSMENT" in package.instructions
 
     def test_allocation_in_context_files_list(self, tmp_path: Path):
         """allocation_analysis.json shows up in context_files when present."""

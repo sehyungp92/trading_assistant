@@ -33,6 +33,8 @@ class TestQualityGate:
         (bot_dir / "slippage_stats.json").write_text("{}")
         (bot_dir / "factor_attribution.json").write_text("{}")
         (bot_dir / "exit_efficiency.json").write_text("{}")
+        (bot_dir / "trades.jsonl").write_text("")
+        (bot_dir / "missed.jsonl").write_text("")
 
         # Portfolio risk card at date level
         risk_dir = tmp_path / "2026-03-01"

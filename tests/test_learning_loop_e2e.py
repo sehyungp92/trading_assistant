@@ -7,7 +7,7 @@ Tests the complete cycle:
 3. Response parsed → ParsedAnalysis
 4. Validation applied → blocked suggestions stripped, confidence adjusted
 5. Predictions recorded
-6. User approves a suggestion → implement()
+6. User approves a suggestion → accept() + mark_deployed()
 7. AutoOutcomeMeasurer measures → outcome recorded
 8. Category scorecard recomputed → success rate updated
 9. Next weekly prompt includes scorecard → validator would cap confidence
@@ -130,10 +130,11 @@ Bot1 had a strong week. Win rate improved.
         assert len(loaded) == 2
 
         # --- Step 6: User approves suggestion s001 ---
-        tracker.implement("s001")
+        tracker.accept("s001")
+        tracker.mark_deployed("s001")
         all_suggestions = tracker.load_all()
         s001 = [s for s in all_suggestions if s["suggestion_id"] == "s001"][0]
-        assert s001["status"] == SuggestionStatus.IMPLEMENTED.value
+        assert s001["status"] == SuggestionStatus.DEPLOYED.value
 
         # --- Step 7: Record outcome for s001 ---
         outcome = SuggestionOutcome(
@@ -195,7 +196,8 @@ Bot1 had a strong week. Win rate improved.
                 tier="exit_timing",
                 source_report_id="weekly-test",
             ))
-            tracker.implement(f"bad{i}")
+            tracker.accept(f"bad{i}")
+            tracker.mark_deployed(f"bad{i}")
             tracker.record_outcome(SuggestionOutcome(
                 suggestion_id=f"bad{i}",
                 implemented_date="2026-02-01",

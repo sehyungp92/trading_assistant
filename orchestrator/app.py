@@ -21,6 +21,7 @@ from comms.telegram_handlers import TelegramCallbackResponse, TelegramCallbackRo
 from comms.telegram_renderer import TelegramRenderer
 from orchestrator.adapters.vps_receiver import VPSReceiver
 from orchestrator.agent_runner import AgentRunner
+from orchestrator.cost_tracker import CostTracker
 from orchestrator.catchup import StartupCatchup, bootstrap_run_store_from_history
 from orchestrator.latency_tracker import LatencyTracker
 from orchestrator.config import AppConfig
@@ -280,6 +281,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         db_dir = config.data_dir
 
     db_path = Path(db_dir)
+    raw_data_dir = db_path / "raw"
+    curated_dir = db_path / "data" / "curated"
     queue = EventQueue(db_path=str(db_path / "events.db"))
     registry = TaskRegistry(db_path=str(db_path / "tasks.db"))
     scheduled_run_store = ScheduledRunStore(db_path=str(db_path / "scheduled_runs.db"))
@@ -289,7 +292,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     worker = Worker(
         queue=queue, registry=registry, brain=brain,
         event_stream=event_stream, conversation_tracker=conversation_tracker,
-        raw_data_dir=db_path / "raw",
+        raw_data_dir=raw_data_dir,
         bot_configs=config.bot_configs,
     )
     session_store = SessionStore(base_dir=str(db_path / ".assistant" / "sessions"))
@@ -305,6 +308,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Integration layer components
     dispatcher = NotificationDispatcher()
     skills_registry = SkillsRegistry()
+    cost_tracker = CostTracker(db_path / "data" / "cost_log.jsonl")
     agent_runner = AgentRunner(
         runs_dir=db_path / "runs",
         session_store=session_store,
@@ -317,6 +321,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         zai_api_key=config.zai_api_key,
         openrouter_api_key=config.openrouter_api_key,
         event_stream=event_stream,
+        cost_tracker=cost_tracker,
     )
     monitoring_loop = MonitoringLoop(
         checks=[MonitoringCheck(
@@ -359,6 +364,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     pr_builder = None
     repo_workspace_manager = None
     repo_task_runner = None
+    calibration_tracker = None
     if config.autonomous_enabled:
         from orchestrator.repo_task_runner import RepoTaskRunner
         from skills.approval_handler import ApprovalHandler
@@ -394,7 +400,31 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             telegram_bot=telegram_bot,
             repo_workspace_manager=repo_workspace_manager,
             repo_task_runner=repo_task_runner,
+            # structural_experiment_tracker wired after creation below
+            # hypothesis_library wired after creation below
         )
+        # Parameter searcher for iterative neighborhood exploration
+        from skills.parameter_searcher import ParameterSearcher
+        from skills.backtest_calibration_tracker import BacktestCalibrationTracker
+        from skills.cost_model import CostModel
+        from skills.backtest_simulator import BacktestSimulator as _BacktestSim
+
+        _cost_cfg = getattr(config, "cost_model_config", None)
+        if _cost_cfg:
+            _cost_model = CostModel(_cost_cfg)
+            _simulator = _BacktestSim(_cost_model)
+            parameter_searcher = ParameterSearcher(
+                config_registry=config_registry,
+                simulator=_simulator,
+                cost_model=_cost_model,
+            )
+        else:
+            parameter_searcher = None
+
+        calibration_tracker = BacktestCalibrationTracker(
+            store_dir=db_path / "memory" / "findings",
+        )
+
         autonomous_pipeline = AutonomousPipeline(
             config_registry=config_registry,
             backtester=backtester,
@@ -403,6 +433,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             telegram_bot=telegram_bot,
             telegram_renderer=telegram_renderer,
             event_stream=event_stream,
+            parameter_searcher=parameter_searcher,
+            experiment_config_generator=None,
+            experiment_tracker=None,
+            calibration_tracker=calibration_tracker,
+            search_log_dir=db_path / "memory" / "findings",
+            curated_dir=curated_dir,
         )
         logger.info("Autonomous pipeline enabled")
 
@@ -469,7 +505,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         _dm_file_change_gen = file_change_gen if config.autonomous_enabled else None
         deployment_monitor = DeploymentMonitor(
             findings_dir=db_path / "memory" / "findings",
-            curated_dir=db_path / "data" / "curated",
+            curated_dir=curated_dir,
             pr_builder=_dm_pr_builder,
             config_registry=_dm_config_registry,
             event_stream=event_stream,
@@ -493,12 +529,29 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         )
         logger.info("A/B testing enabled")
 
+    # ReliabilityTracker — tracks bug fix interventions and recurrence
+    from skills.reliability_tracker import ReliabilityTracker
+
+    reliability_tracker = ReliabilityTracker(store_dir=db_path / "memory" / "findings")
+
+    # StructuralExperimentTracker — tracks structural experiment lifecycle
+    from skills.structural_experiment_tracker import StructuralExperimentTracker
+
+    structural_experiment_tracker = StructuralExperimentTracker(
+        store_dir=db_path / "memory" / "findings",
+    )
+
+    # Wire structural_experiment_tracker into approval_handler (created before tracker)
+    if approval_handler is not None:
+        approval_handler._structural_experiment_tracker = structural_experiment_tracker
+
     handlers = Handlers(
         agent_runner=agent_runner,
         event_stream=event_stream,
         dispatcher=dispatcher,
         notification_prefs=notification_prefs,
-        curated_dir=db_path / "data" / "curated",
+        curated_dir=curated_dir,
+        raw_data_dir=raw_data_dir,
         memory_dir=db_path / "memory",
         runs_dir=db_path / "runs",
         source_root=db_path,
@@ -519,7 +572,15 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         experiment_manager=experiment_manager,
         experiment_config_gen=experiment_config_gen,
         bot_configs=config.bot_configs,
+        reliability_tracker=reliability_tracker,
+        structural_experiment_tracker=structural_experiment_tracker,
     )
+
+    # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)
+    if config.autonomous_enabled and autonomous_pipeline is not None:
+        autonomous_pipeline._experiment_tracker = structural_experiment_tracker
+        if experiment_config_gen is not None:
+            autonomous_pipeline._experiment_config_generator = experiment_config_gen
 
     # Wire handler slots on worker
     worker.on_alert = handlers.handle_alert
@@ -665,6 +726,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         deployment_monitor.create_deployment(
                             deployment_id=dep_id,
                             approval_request_id=request_id,
+                            suggestion_id=req.suggestion_id,
                             pr_url=req.pr_url,
                             bot_id=req.bot_id,
                             param_changes=req.param_changes,
@@ -832,50 +894,75 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     from skills.auto_outcome_measurer import AutoOutcomeMeasurer
     from schemas.suggestion_tracking import SuggestionStatus
 
-    outcome_measurer = AutoOutcomeMeasurer(curated_dir=curated_dir)
+    outcome_measurer = AutoOutcomeMeasurer(
+        curated_dir=curated_dir,
+        findings_dir=db_path / "memory" / "findings",
+        calibration_tracker=calibration_tracker,
+    )
 
     # HypothesisLibrary — shared for outcome linking
     from skills.hypothesis_library import HypothesisLibrary
 
     hypothesis_library = HypothesisLibrary(db_path / "memory" / "findings")
 
+    # Wire hypothesis_library into approval_handler (created before library)
+    if approval_handler is not None:
+        approval_handler._hypothesis_library = hypothesis_library
+
     async def _measure_outcomes(scheduled_for: datetime | None = None) -> None:
-        """Measure outcomes of implemented suggestions and link to hypotheses."""
+        """Measure outcomes of deployed suggestions and link to hypotheses."""
         suggestions = suggestion_tracker.load_all()
-        implemented = [
+        deployed = [
             s for s in suggestions
-            if s.get("status") == SuggestionStatus.IMPLEMENTED.value
+            if s.get("status") == SuggestionStatus.DEPLOYED.value
         ]
         # Check which suggestions already have outcomes
         existing_outcomes = suggestion_tracker.load_outcomes()
         measured_ids = {o.get("suggestion_id") for o in existing_outcomes}
 
-        for s in implemented:
+        for s in deployed:
             sid = s.get("suggestion_id", "")
             if sid in measured_ids:
+                continue
+            anchor_date = (s.get("deployed_at") or "")[:10]
+            if not anchor_date:
                 continue
             try:
                 result = outcome_measurer.measure(
                     suggestion_id=sid,
                     bot_id=s.get("bot_id", ""),
-                    implemented_date=s.get("resolved_at", "")[:10],
+                    implemented_date=anchor_date,
                 )
                 if result:
                     from schemas.suggestion_tracking import SuggestionOutcome
                     outcome = SuggestionOutcome(
                         suggestion_id=sid,
-                        implemented_date=s.get("resolved_at", "")[:10],
+                        implemented_date=anchor_date,
                         pnl_delta_7d=result.pnl_delta,
                         win_rate_delta_7d=result.win_rate_after - result.win_rate_before,
                         drawdown_delta_7d=result.drawdown_after - result.drawdown_before,
                     )
                     suggestion_tracker.record_outcome(outcome)
 
+                    # Also persist the full enhanced measurement to outcomes.jsonl
+                    enhanced_path = db_path / "memory" / "findings" / "outcomes.jsonl"
+                    enhanced_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(enhanced_path, "a", encoding="utf-8") as f:
+                        f.write(result.model_dump_json() + "\n")
+
+                    suggestion_tracker.mark_measured(sid)
+
+                    # Only update hypothesis for high/medium quality verdicts
+                    verdict_str = result.verdict.value if hasattr(result.verdict, "value") else str(result.verdict)
+                    is_decisive = verdict_str in ("positive", "negative")
+
                     # Link hypothesis outcome if suggestion has hypothesis_id
                     hyp_id = s.get("hypothesis_id")
-                    if hyp_id:
+                    if hyp_id and is_decisive:
                         try:
-                            hypothesis_library.record_outcome(hyp_id, positive=outcome.net_positive_7d)
+                            hypothesis_library.record_outcome(
+                                hyp_id, positive=(verdict_str == "positive"),
+                            )
                         except Exception:
                             logger.warning("Failed to record hypothesis outcome for %s", hyp_id)
 
@@ -913,6 +1000,116 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.warning("Prediction evaluation failed during outcome measurement")
 
+        # Causal outcome reasoning — invoke Claude to analyze WHY outcomes happened
+        try:
+            from analysis.outcome_reasoning_prompt import OutcomeReasoningAssembler
+
+            # Load recent outcomes that haven't been reasoned about yet
+            outcomes_path = db_path / "memory" / "findings" / "outcomes.jsonl"
+            reasoning_path = db_path / "memory" / "findings" / "outcome_reasonings.jsonl"
+            if outcomes_path.exists():
+                import json as _json
+                recent_outcomes = []
+                reasoned_ids: set[str] = set()
+                if reasoning_path.exists():
+                    for line in reasoning_path.read_text(encoding="utf-8").strip().splitlines():
+                        if line.strip():
+                            try:
+                                reasoned_ids.add(_json.loads(line).get("suggestion_id", ""))
+                            except _json.JSONDecodeError:
+                                pass
+                for line in outcomes_path.read_text(encoding="utf-8").strip().splitlines():
+                    if line.strip():
+                        try:
+                            o = _json.loads(line)
+                            if o.get("suggestion_id", "") not in reasoned_ids:
+                                recent_outcomes.append(o)
+                        except _json.JSONDecodeError:
+                            pass
+
+                if recent_outcomes:
+                    assembler = OutcomeReasoningAssembler(
+                        memory_dir=db_path / "memory",
+                        curated_dir=curated_dir,
+                        bot_configs=config.bot_configs,
+                    )
+                    reasoning_pkg = assembler.assemble(recent_outcomes)
+                    reasoning_result = await agent_runner.invoke(
+                        agent_type="outcome_reasoning",
+                        prompt_package=reasoning_pkg,
+                        run_id=f"reasoning-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+                        allowed_tools=["Read"],
+                        max_turns=5,
+                    )
+                    if reasoning_result.success:
+                        from analysis.response_parser import parse_response as _parse
+
+                        parsed_reasoning = _parse(reasoning_result.response)
+                        if parsed_reasoning.raw_structured and "reasonings" in parsed_reasoning.raw_structured:
+                            reasoning_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(reasoning_path, "a", encoding="utf-8") as f:
+                                for r in parsed_reasoning.raw_structured["reasonings"]:
+                                    r["reasoned_at"] = datetime.now(timezone.utc).isoformat()
+                                    f.write(_json.dumps(r) + "\n")
+                            logger.info(
+                                "Recorded %d outcome reasonings",
+                                len(parsed_reasoning.raw_structured["reasonings"]),
+                            )
+
+                            # ACT on reasoning results (autoresearch keep/discard)
+                            findings = db_path / "memory" / "findings"
+                            spurious_path = findings / "spurious_outcomes.jsonl"
+                            recalib_path = findings / "recalibrations.jsonl"
+
+                            # Hoist builder outside loop (reused for all transferable reasonings)
+                            _tpb = None
+                            for r in parsed_reasoning.raw_structured["reasonings"]:
+                                sid = r.get("suggestion_id", "")
+                                # Transferable patterns → cross-bot transfer proposals
+                                if r.get("transferable") and sid:
+                                    try:
+                                        if _tpb is None:
+                                            from skills.pattern_library import PatternLibrary
+                                            from skills.transfer_proposal_builder import TransferProposalBuilder
+                                            _tpb = TransferProposalBuilder(
+                                                pattern_library=PatternLibrary(findings),
+                                                curated_dir=curated_dir,
+                                                bots=config.bot_ids,
+                                                findings_dir=findings,
+                                            )
+                                        _tpb.create_from_reasoning(r, source_bot=r.get("bot_id", ""))
+                                    except Exception:
+                                        logger.warning("Transfer proposal from reasoning failed for %s", sid)
+                                # Spurious effects → log for context
+                                if r.get("genuine_effect") is False and sid:
+                                    try:
+                                        spurious_path.parent.mkdir(parents=True, exist_ok=True)
+                                        with open(spurious_path, "a", encoding="utf-8") as _sf:
+                                            _sf.write(_json.dumps({
+                                                "suggestion_id": sid,
+                                                "mechanism": r.get("mechanism", ""),
+                                                "confounders": r.get("confounders", []),
+                                                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                                            }) + "\n")
+                                    except Exception:
+                                        logger.warning("Failed to record spurious outcome for %s", sid)
+                                # Revised confidence → recalibration log
+                                revised = r.get("revised_confidence")
+                                if revised is not None and sid:
+                                    try:
+                                        recalib_path.parent.mkdir(parents=True, exist_ok=True)
+                                        with open(recalib_path, "a", encoding="utf-8") as _rf:
+                                            _rf.write(_json.dumps({
+                                                "suggestion_id": sid,
+                                                "revised_confidence": revised,
+                                                "lessons_learned": r.get("lessons_learned", []),
+                                                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                                            }) + "\n")
+                                    except Exception:
+                                        logger.warning("Failed to record recalibration for %s", sid)
+        except Exception:
+            logger.warning("Outcome reasoning failed — skipping", exc_info=True)
+
     # TransferOutcomeMeasurer — runs weekly to measure cross-bot transfer outcomes
     async def _measure_transfer_outcomes(scheduled_for: datetime | None = None) -> None:
         """Measure outcomes of cross-bot pattern transfers."""
@@ -932,6 +1129,76 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 logger.info("Measured %d transfer outcomes", len(outcomes))
         except Exception:
             logger.exception("Transfer outcome measurement failed")
+
+    async def _verify_reliability(scheduled_for: datetime | None = None) -> None:
+        """Auto-verify reliability interventions past observation window."""
+        try:
+            verified = reliability_tracker.verify_completed()
+            if verified:
+                logger.info("Auto-verified %d reliability interventions", len(verified))
+                # Create hypothesis candidates from chronic bug classes
+                summary = reliability_tracker.compute_summary()
+                if summary.chronic_bug_classes:
+                    created = hypothesis_library.create_from_reliability(summary)
+                    if created:
+                        logger.info(
+                            "Created %d reliability hypothesis candidates", len(created),
+                        )
+        except Exception:
+            logger.exception("Reliability verification failed")
+
+    # Discovery analysis — runs Saturday to find novel patterns in raw data
+    async def _discovery_analysis(scheduled_for: datetime | None = None) -> None:
+        """Run discovery agent to find novel patterns not covered by detectors."""
+        try:
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            action = Action(
+                action_type="discovery_analysis",
+                bot_id="",
+                details={"date": date, "bots": config.bot_ids},
+            )
+            await handlers.handle_discovery_analysis(action)
+        except Exception:
+            logger.exception("Discovery analysis failed")
+
+    # Learning cycle — runs Sunday 11:00 UTC after outcome measurement
+    async def _run_learning_cycle(scheduled_for: datetime | None = None) -> None:
+        """Run the autonomous weekly learning cycle."""
+        try:
+            from skills.learning_cycle import LearningCycle
+            from datetime import timedelta
+
+            now = datetime.now(timezone.utc)
+            week_end = now.strftime("%Y-%m-%d")
+            week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+
+            cycle = LearningCycle(
+                curated_dir=curated_dir,
+                memory_dir=db_path / "memory",
+                runs_dir=runs_dir,
+                bots=config.bot_ids,
+                suggestion_tracker=suggestion_tracker,
+                hypothesis_library=hypothesis_library,
+                experiment_tracker=structural_experiment_tracker,
+                prediction_tracker=None,  # not needed for cycle
+                calibration_tracker=calibration_tracker,
+            )
+            entry = await cycle.run(week_start, week_end)
+
+            event_stream.broadcast("learning_cycle_completed", {
+                "week_start": week_start,
+                "week_end": week_end,
+                "net_improvement": entry.net_improvement,
+                "composite_delta": entry.composite_delta,
+                "lessons": entry.lessons_for_next_week[:3],
+            })
+
+            logger.info(
+                "Learning cycle complete: net_improvement=%s",
+                entry.net_improvement,
+            )
+        except Exception:
+            logger.exception("Learning cycle failed")
 
     # MemoryConsolidator — rebuilds index.json and consolidates old findings
     consolidator = MemoryConsolidator(
@@ -975,6 +1242,32 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         "winner": result.winner,
                         "p_value": result.p_value,
                     })
+                    # Escalate: link back to suggestion and hypothesis
+                    if result.recommendation == "adopt":
+                        if getattr(exp, "suggestion_id", None) and suggestion_tracker:
+                            try:
+                                suggestion_tracker.accept(exp.suggestion_id)
+                                logger.info(
+                                    "Auto-accepted suggestion %s (experiment %s passed)",
+                                    exp.suggestion_id, exp.experiment_id,
+                                )
+                            except Exception:
+                                logger.warning("Failed to auto-accept suggestion %s", exp.suggestion_id)
+                        if getattr(exp, "hypothesis_id", None):
+                            try:
+                                hypothesis_library.record_outcome(exp.hypothesis_id, positive=True)
+                                logger.info(
+                                    "Recorded positive outcome for hypothesis %s",
+                                    exp.hypothesis_id,
+                                )
+                            except Exception:
+                                logger.warning("Failed to record hypothesis outcome %s", exp.hypothesis_id)
+                    elif result.recommendation == "discard":
+                        if getattr(exp, "hypothesis_id", None):
+                            try:
+                                hypothesis_library.record_outcome(exp.hypothesis_id, positive=False)
+                            except Exception:
+                                pass
                     if telegram_adapter is not None:
                         try:
                             from comms.telegram_renderer import TelegramRenderer
@@ -985,6 +1278,72 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             logger.warning("Failed to send experiment result notification")
         except Exception:
             logger.exception("Experiment check failed")
+
+        # Evaluate mature structural experiments
+        try:
+            from skills.ground_truth_computer import GroundTruthComputer
+
+            # Metric name mapping: common names → GroundTruthSnapshot field names
+            _METRIC_FIELD_MAP = {
+                "sharpe": "sharpe_ratio_30d",
+                "sharpe_ratio": "sharpe_ratio_30d",
+                "win_rate": "win_rate",
+                "drawdown": "max_drawdown_pct",
+                "max_drawdown": "max_drawdown_pct",
+                "process_quality": "avg_process_quality",
+                "composite": "composite_score",
+                "composite_score": "composite_score",
+                "pnl": "pnl_total",
+            }
+
+            gt = GroundTruthComputer(curated_dir)
+            evaluable = structural_experiment_tracker.get_evaluable_experiments()
+            for exp in evaluable:
+                try:
+                    activated_date = exp.activated_at.strftime("%Y-%m-%d") if exp.activated_at else ""
+                    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    if not activated_date:
+                        continue
+                    gt_before = gt.compute_snapshot(exp.bot_id, activated_date)
+                    gt_after = gt.compute_snapshot(exp.bot_id, now_date)
+
+                    # Evaluate each acceptance criterion
+                    criteria_met: list[bool] = []
+                    actual_values: list[float] = []
+                    for criterion in exp.acceptance_criteria:
+                        field = _METRIC_FIELD_MAP.get(criterion.metric, criterion.metric)
+                        before_val = getattr(gt_before, field, None)
+                        after_val = getattr(gt_after, field, None)
+                        if before_val is None or after_val is None:
+                            criteria_met.append(False)
+                            actual_values.append(0.0)
+                            continue
+                        delta = after_val - before_val
+                        actual_values.append(round(delta, 4))
+                        if criterion.direction == "improve":
+                            criteria_met.append(delta >= criterion.minimum_change)
+                        else:  # not_degrade
+                            criteria_met.append(delta >= -criterion.minimum_change)
+
+                    structural_experiment_tracker.resolve(
+                        exp.experiment_id, criteria_met, actual_values,
+                    )
+                    passed = all(criteria_met) if criteria_met else False
+                    logger.info(
+                        "Resolved structural experiment %s: %s",
+                        exp.experiment_id, "PASSED" if passed else "FAILED",
+                    )
+
+                    # Update hypothesis lifecycle
+                    if exp.hypothesis_id:
+                        try:
+                            hypothesis_library.record_outcome(exp.hypothesis_id, positive=passed)
+                        except Exception:
+                            logger.warning("Failed to record hypothesis outcome for %s", exp.hypothesis_id)
+                except Exception:
+                    logger.exception("Failed to evaluate structural experiment %s", exp.experiment_id)
+        except Exception:
+            logger.exception("Structural experiment check failed")
 
     # AuditTrailConsumer — persists SSE events to JSONL
     audit_consumer = AuditTrailConsumer(log_dir=db_path / "logs")
@@ -1214,6 +1573,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         deployment_check_fn=_deployment_check_job if deployment_monitor else None,
         threshold_learning_fn=_threshold_learning_job if threshold_learner else None,
         experiment_check_fn=_experiment_check_job if experiment_manager else None,
+        reliability_verification_fn=_verify_reliability,
+        discovery_fn=_discovery_analysis,
+        learning_cycle_fn=_run_learning_cycle,
     )
     scheduler_jobs = job_specs_to_scheduler_jobs(scheduled_job_specs, scheduled_job_runner)
 
@@ -1547,6 +1909,71 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Agent not found or not running")
         return {"status": "cancelled", "agent_id": agent_id}
+
+    @app.get("/learning/dashboard")
+    async def learning_dashboard():
+        """Learning system dashboard — ground truth, lessons, experiments, scorecard."""
+        from skills.learning_ledger import LearningLedger
+        from skills.suggestion_scorer import SuggestionScorer
+
+        findings_dir = db_path / "memory" / "findings"
+        ledger = LearningLedger(findings_dir)
+        scorer = SuggestionScorer(findings_dir)
+
+        trend = ledger.get_trend(weeks=12)
+        lessons = ledger.get_lessons(weeks=4)
+        latest = ledger.get_latest()
+        scorecard = scorer.compute_scorecard()
+
+        active_hypotheses = []
+        try:
+            records = hypothesis_library.get_active()
+            active_hypotheses = [
+                {
+                    "hypothesis_id": getattr(h, "hypothesis_id", ""),
+                    "title": getattr(h, "title", ""),
+                    "category": getattr(h, "category", ""),
+                    "effectiveness": getattr(h, "effectiveness", 0.0),
+                }
+                for h in records
+            ]
+        except Exception:
+            pass
+
+        active_experiments = []
+        try:
+            exps = structural_experiment_tracker.get_active_experiments()
+            active_experiments = [
+                {
+                    "experiment_id": getattr(e, "experiment_id", ""),
+                    "title": getattr(e, "title", ""),
+                    "bot_id": getattr(e, "bot_id", ""),
+                    "status": getattr(e, "status", ""),
+                }
+                for e in exps
+            ]
+        except Exception:
+            pass
+
+        prediction_accuracy = {}
+        try:
+            from analysis.context_builder import ContextBuilder
+            ctx = ContextBuilder(db_path / "memory")
+            pkg = ctx.base_package()
+            prediction_accuracy = pkg.data.get("prediction_accuracy_by_metric", {})
+        except Exception:
+            pass
+
+        return {
+            "ground_truth_trend": trend,
+            "recent_lessons": lessons,
+            "active_hypotheses": active_hypotheses,
+            "active_experiments": active_experiments,
+            "category_scorecard": scorecard.model_dump(mode="json"),
+            "prediction_accuracy": prediction_accuracy,
+            "net_improvement": latest.net_improvement if latest else None,
+            "latest_entry": latest.model_dump(mode="json") if latest else None,
+        }
 
     return app
 

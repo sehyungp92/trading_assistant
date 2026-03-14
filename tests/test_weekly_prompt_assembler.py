@@ -29,13 +29,16 @@ def setup_dirs(tmp_path: Path):
         json.dumps({"pnl_delta": 100.0})
     )
 
-    # 7 daily reports (just create stubs)
+    # 7 daily reports in the real runs/daily-<date>* layout
     week_start_dt = datetime.strptime("2026-02-23", "%Y-%m-%d")
     week_dates = [(week_start_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
-    for date in week_dates:
-        run_dir = runs / date / "daily-report"
+    for index, date in enumerate(week_dates):
+        run_dir = runs / f"daily-{date}-run{index}"
         run_dir.mkdir(parents=True)
-        (run_dir / "daily_report.md").write_text(f"# Daily Report {date}\nAll good.")
+        if index == len(week_dates) - 1:
+            (run_dir / "response.md").write_text(f"# Daily Report {date}\nFallback path.")
+        else:
+            (run_dir / "daily_report.md").write_text(f"# Daily Report {date}\nAll good.")
 
     # Portfolio risk cards (7 days)
     for date in week_dates:
@@ -124,6 +127,32 @@ class TestWeeklyPromptAssembler:
         package = assembler.assemble()
         assert "daily_reports" in package.data
         assert len(package.data["daily_reports"]) == 7
+        assert any(
+            "Fallback path." in report["content"]
+            for report in package.data["daily_reports"]
+        )
+
+    def test_prefers_daily_report_before_response(self, setup_dirs):
+        curated, memory, runs = setup_dirs
+        preferred_run = runs / "daily-2026-02-24-preferred"
+        preferred_run.mkdir(parents=True)
+        (preferred_run / "daily_report.md").write_text("preferred report")
+        (preferred_run / "response.md").write_text("legacy fallback")
+
+        assembler = WeeklyPromptAssembler(
+            week_start="2026-02-23",
+            week_end="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated,
+            memory_dir=memory,
+            runs_dir=runs,
+        )
+        package = assembler.assemble()
+        joined = "\n".join(
+            report["content"] for report in package.data["daily_reports"]
+        )
+        assert "preferred report" in joined
+        assert "legacy fallback" not in joined
 
     def test_data_includes_risk_cards(self, setup_dirs):
         curated, memory, runs = setup_dirs

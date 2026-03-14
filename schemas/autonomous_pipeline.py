@@ -172,6 +172,7 @@ class ApprovalRequest(BaseModel):
     draft_pr: bool = False
     repo_task: Optional[RepoTaskContext] = None
     implementation_notes: str = ""
+    hypothesis_id: Optional[str] = None
     issue_url: Optional[str] = None
     diff_summary: list[str] = Field(default_factory=list)
     approval_count: int = 0

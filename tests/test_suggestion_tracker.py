@@ -44,7 +44,7 @@ class TestSuggestionTracker:
         assert match[0]["status"] == "rejected"
         assert match[0]["rejection_reason"] == "Not convinced by evidence"
 
-    def test_mark_implemented(self, tmp_path):
+    def test_mark_deployed(self, tmp_path):
         tracker = SuggestionTracker(store_dir=tmp_path)
         rec = SuggestionRecord(
             suggestion_id="s001",
@@ -54,11 +54,12 @@ class TestSuggestionTracker:
             source_report_id="weekly-2026-02-24",
         )
         tracker.record(rec)
-        tracker.implement("s001")
+        tracker.accept("s001")
+        tracker.mark_deployed("s001")
 
         suggestions = tracker.load_all()
         match = [s for s in suggestions if s["suggestion_id"] == "s001"]
-        assert match[0]["status"] == "implemented"
+        assert match[0]["status"] == SuggestionStatus.DEPLOYED.value
 
     def test_record_outcome(self, tmp_path):
         tracker = SuggestionTracker(store_dir=tmp_path)

@@ -201,7 +201,7 @@ class TestApprovalHandler:
         await handler.handle_approve("req1")
         all_suggestions = sug_tracker.load_all()
         s1 = [s for s in all_suggestions if s.get("suggestion_id") == "s1"]
-        assert s1[0].get("status") == "implemented"
+        assert s1[0].get("status") == "accepted"
 
     @pytest.mark.asyncio
     async def test_approve_not_found(self, components):

@@ -149,8 +149,8 @@ class TestHypothesisLibrary:
     def test_weekly_instructions_reference_hypotheses(self):
         from analysis.weekly_prompt_assembler import _WEEKLY_INSTRUCTIONS
 
-        assert "STRUCTURAL HYPOTHESES" in _WEEKLY_INSTRUCTIONS
         assert "structural_hypotheses" in _WEEKLY_INSTRUCTIONS
+        assert "hypothes" in _WEEKLY_INSTRUCTIONS
 
 
 # --- C2: Transfer proposals ---

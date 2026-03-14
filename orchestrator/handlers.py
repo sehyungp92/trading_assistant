@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import hashlib
+import math
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,6 +48,7 @@ class Handlers:
         runs_dir: Path,
         source_root: Path,
         bots: list[str],
+        raw_data_dir: Path | None = None,
         heartbeat_dir: Path | None = None,
         failure_log_path: Path | None = None,
         worker: Worker | None = None,
@@ -63,12 +66,17 @@ class Handlers:
         experiment_manager: object | None = None,
         experiment_config_gen: object | None = None,
         bot_configs: dict | None = None,
+        reliability_tracker: object | None = None,
+        structural_experiment_tracker: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
         self._dispatcher = dispatcher
         self._notification_prefs = notification_prefs
         self._curated_dir = Path(curated_dir)
+        self._raw_data_dir = (
+            Path(raw_data_dir) if raw_data_dir is not None else self._curated_dir.parent / "raw"
+        )
         self._memory_dir = Path(memory_dir)
         self._runs_dir = Path(runs_dir)
         self._source_root = Path(source_root)
@@ -90,6 +98,8 @@ class Handlers:
         self._experiment_manager = experiment_manager
         self._experiment_config_gen = experiment_config_gen
         self._bot_configs = bot_configs
+        self._reliability_tracker = reliability_tracker
+        self._structural_experiment_tracker = structural_experiment_tracker
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -107,6 +117,8 @@ class Handlers:
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "started", "handler": "daily_analysis",
             })
+
+            self._rebuild_daily_curated_from_raw(date, bots)
 
             # Data availability pre-check via MemoryIndex
             index = MemoryConsolidator.load_index(self._runs_dir.parent)
@@ -171,6 +183,7 @@ class Handlers:
                     finished_at=datetime.now(timezone.utc).isoformat(),
                     duration_ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
                 )
+                self._write_run_report(run_id, "daily_report.md", body, mirror_response=True)
                 await self._notify(
                     notification_type="daily_report",
                     priority=NotificationPriority.LOW,
@@ -188,12 +201,27 @@ class Handlers:
                 "run_id": run_id, "stage": "quality_gate", "handler": "daily_analysis",
             })
 
-            # Build enriched curated files from raw enriched events
-            self._build_enriched_curated(date)
-
-            # Assemble prompt
+            # Run deterministic triage to identify significant events
+            from analysis.daily_triage import DailyTriage
             from analysis.prompt_assembler import DailyPromptAssembler
 
+            ctx = ContextBuilder(self._memory_dir, curated_dir=self._curated_dir)
+            active_suggestions = ctx.load_active_suggestions()
+            triage = DailyTriage(
+                curated_dir=self._curated_dir,
+                date=date,
+                bots=bots,
+                active_suggestions=active_suggestions,
+            )
+            triage_report = triage.run()
+
+            self._event_stream.broadcast("handler_progress", {
+                "run_id": run_id, "stage": "triage", "handler": "daily_analysis",
+                "significant_events": len(triage_report.significant_events),
+                "focus_questions": len(triage_report.focus_questions),
+            })
+
+            # Assemble prompt with triage-driven focus
             assembler = DailyPromptAssembler(
                 date=date,
                 bots=bots,
@@ -201,7 +229,7 @@ class Handlers:
                 memory_dir=self._memory_dir,
                 bot_configs=self._bot_configs,
             )
-            package = assembler.assemble()
+            package = assembler.assemble(triage_report=triage_report)
 
             # Include event counts in prompt metadata
             if event_counts:
@@ -281,6 +309,7 @@ class Handlers:
             )
 
             if result.success:
+                self._write_run_report(run_id, "daily_report.md", final_report)
                 await self._notify(
                     notification_type="daily_report",
                     priority=NotificationPriority.NORMAL,
@@ -389,6 +418,14 @@ class Handlers:
                 except Exception:
                     logger.warning("Failed to load factor rolling data", exc_info=True)
 
+            weekly_evidence = self._load_weekly_strategy_evidence(
+                week_start=week_start,
+                week_end=week_end,
+                bot_summaries=portfolio_summary.bot_summaries,
+                signal_health_data=signal_health_data,
+                factor_rolling_data=factor_rolling_data,
+            )
+
             # Run strategy engine
             from analysis.strategy_engine import StrategyEngine
 
@@ -398,8 +435,7 @@ class Handlers:
             )
             refinement_report = engine.build_report(
                 portfolio_summary.bot_summaries,
-                signal_health=signal_health_data if signal_health_data else None,
-                factor_rolling=factor_rolling_data if factor_rolling_data else None,
+                **weekly_evidence,
             )
 
             self._event_stream.broadcast("handler_progress", {
@@ -415,6 +451,20 @@ class Handlers:
             allocation_results = self._run_allocation_analyses(
                 portfolio_summary, week_start, week_end,
             )
+
+            if simulation_results:
+                weekly_evidence = self._load_weekly_strategy_evidence(
+                    week_start=week_start,
+                    week_end=week_end,
+                    bot_summaries=portfolio_summary.bot_summaries,
+                    signal_health_data=signal_health_data,
+                    factor_rolling_data=factor_rolling_data,
+                    simulation_results=simulation_results,
+                )
+                refinement_report = engine.build_report(
+                    portfolio_summary.bot_summaries,
+                    **weekly_evidence,
+                )
 
             # Write refinement report
             weekly_dir = self._curated_dir / "weekly" / week_start
@@ -477,9 +527,27 @@ class Handlers:
                 "run_id": run_id, "stage": "simulations", "handler": "weekly_analysis",
             })
 
-            # Assemble prompt
+            # Run weekly triage for focused analytical questions
+            from analysis.weekly_triage import WeeklyTriage
             from analysis.weekly_prompt_assembler import WeeklyPromptAssembler
 
+            ctx_weekly = ContextBuilder(self._memory_dir, curated_dir=self._curated_dir)
+            weekly_triage = WeeklyTriage(
+                curated_dir=self._curated_dir,
+                end_date=week_end,
+                bots=self._bots,
+                active_suggestions=ctx_weekly.load_active_suggestions(),
+                outcome_measurements=ctx_weekly.load_outcome_measurements(),
+                prediction_accuracy=ctx_weekly.load_prediction_accuracy(),
+            )
+            weekly_triage_report = weekly_triage.run()
+
+            self._event_stream.broadcast("handler_progress", {
+                "run_id": run_id, "stage": "triage", "handler": "weekly_analysis",
+                "anomalies": len(weekly_triage_report.anomalies),
+            })
+
+            # Assemble prompt with triage-driven focus
             assembler = WeeklyPromptAssembler(
                 week_start=week_start,
                 week_end=week_end,
@@ -489,7 +557,7 @@ class Handlers:
                 runs_dir=self._runs_dir,
                 bot_configs=self._bot_configs,
             )
-            package = assembler.assemble()
+            package = assembler.assemble(triage_report=weekly_triage_report)
 
             # Inject simulation results into prompt data
             if simulation_results:
@@ -504,6 +572,7 @@ class Handlers:
                 package.metadata["suggestion_ids"] = suggestion_ids
 
             # Weekly retrospective — compare last week's predictions to actual outcomes
+            retro_builder = None
             try:
                 from skills.retrospective_builder import RetrospectiveBuilder
 
@@ -518,6 +587,37 @@ class Handlers:
             except Exception:
                 logger.warning("Retrospective builder failed — skipping")
 
+            # Build retrospective synthesis (keep/discard verdicts for dynamic prompt evolution)
+            try:
+                if retro_builder is None:
+                    from skills.retrospective_builder import RetrospectiveBuilder as _RB
+                    retro_builder = _RB(
+                        runs_dir=self._runs_dir,
+                        curated_dir=self._curated_dir,
+                        memory_dir=self._memory_dir,
+                    )
+                synthesis = retro_builder.build_synthesis(week_start, week_end)
+                has_content = (
+                    synthesis.what_worked
+                    or synthesis.what_failed
+                    or synthesis.discard
+                    or synthesis.lessons
+                )
+                if has_content:
+                    package.data["last_week_synthesis"] = synthesis.model_dump(mode="json")
+
+                # Persist discard items as category overrides (recalibration)
+                if synthesis.discard:
+                    try:
+                        from skills.suggestion_scorer import SuggestionScorer
+                        scorer = SuggestionScorer(self._memory_dir / "findings")
+                        scorer.apply_recalibration(synthesis.discard)
+                        logger.info("Recalibrated %d categories from synthesis", len(synthesis.discard))
+                    except Exception:
+                        logger.warning("Category recalibration failed")
+            except Exception:
+                logger.warning("Retrospective synthesis failed — skipping")
+
             # Record forecast data and compute meta-analysis
             try:
                 from skills.forecast_tracker import ForecastTracker
@@ -527,20 +627,28 @@ class Handlers:
                 retro_data = package.data.get("weekly_retrospective")
                 if retro_data:
                     by_bot = {}
-                    by_type: dict[str, list[int]] = {}
+                    by_type: dict[str, list[float]] = {}
                     for pred in retro_data.get("predictions", []):
                         bid = pred.get("bot_id", "")
+                        accuracy = pred.get("accuracy", "")
+                        score = {
+                            "correct": 1.0,
+                            "partially_correct": 0.5,
+                            "incorrect": 0.0,
+                        }.get(accuracy)
+                        if score is None:
+                            continue
                         if bid:
-                            by_bot.setdefault(bid, []).append(1 if pred.get("correct") else 0)
-                        metric = pred.get("metric", "")
+                            by_bot.setdefault(bid, []).append(score)
+                        metric = pred.get("metric", "") or pred.get("prediction_type", "")
                         if metric:
-                            by_type.setdefault(metric, []).append(1 if pred.get("correct") else 0)
+                            by_type.setdefault(metric, []).append(score)
                     forecast_record = ForecastRecord(
                         week_start=week_start,
                         week_end=week_end,
                         predictions_reviewed=retro_data.get("predictions_reviewed", 0),
-                        correct_predictions=retro_data.get("correct_predictions", 0),
-                        accuracy=retro_data.get("accuracy", 0.0),
+                        correct_predictions=retro_data.get("correct", 0),
+                        accuracy=retro_data.get("accuracy_pct", 0.0) / 100.0,
                         by_bot={b: sum(v) / len(v) for b, v in by_bot.items() if v},
                         by_type={m: sum(v) / len(v) for m, v in by_type.items() if v},
                     )
@@ -715,6 +823,7 @@ class Handlers:
             )
 
             if result.success:
+                self._write_run_report(run_id, "weekly_report.md", final_report)
                 await self._notify(
                     notification_type="weekly_report",
                     priority=NotificationPriority.NORMAL,
@@ -918,6 +1027,25 @@ class Handlers:
                 "outcome": triage_result.outcome.value,
             })
 
+            # Record recurrence against open reliability interventions
+            if self._reliability_tracker is not None:
+                try:
+                    from schemas.reliability_learning import BugClass
+                    bug_class = self._map_error_to_bug_class(
+                        triage_result.error_event.category.value
+                        if triage_result.error_event.category else "unknown"
+                    )
+                    matched = self._reliability_tracker.record_recurrence(
+                        bot_id, bug_class, event.error_type,
+                    )
+                    if matched:
+                        logger.info(
+                            "Recurrence matched intervention %s for %s/%s",
+                            matched, bot_id, bug_class.value,
+                        )
+                except Exception:
+                    logger.warning("Failed to check reliability recurrence for %s", bot_id)
+
             agent_response = ""
             repair_proposal = None
             if triage_result.outcome in (TriageOutcome.KNOWN_FIX, TriageOutcome.NEEDS_INVESTIGATION):
@@ -955,6 +1083,36 @@ class Handlers:
                 if result.success:
                     agent_response = result.response
                     repair_proposal = parse_triage_response(result.response)
+
+                    # Record reliability intervention for successful triage fix
+                    if self._reliability_tracker is not None and repair_proposal:
+                        try:
+                            from schemas.reliability_learning import (
+                                BugClass as _BugClass,
+                                ReliabilityIntervention,
+                            )
+                            _bug_class = self._map_error_to_bug_class(
+                                triage_result.error_event.category.value
+                                if triage_result.error_event.category else "unknown"
+                            )
+                            from skills.reliability_tracker import ReliabilityTracker
+                            intervention = ReliabilityIntervention(
+                                intervention_id=ReliabilityTracker.generate_id(
+                                    bot_id, _bug_class.value,
+                                    datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                                ),
+                                bot_id=bot_id,
+                                bug_class=_bug_class,
+                                error_category=event.error_type,
+                                triage_run_id=run_id,
+                                fix_description=(
+                                    getattr(repair_proposal, "fix_plan", "")
+                                    or getattr(repair_proposal, "issue_title", "")
+                                )[:200],
+                            )
+                            self._reliability_tracker.record_intervention(intervention)
+                        except Exception:
+                            logger.warning("Failed to record reliability intervention for %s", run_id)
 
             if triage_result.outcome == TriageOutcome.KNOWN_FIX:
                 handled = await self._handle_known_fix_triage(
@@ -1023,6 +1181,153 @@ class Handlers:
             body=details.get("body", ""),
         )
 
+    async def handle_discovery_analysis(self, action: Action) -> None:
+        """Run the discovery analysis: raw data exploration for novel patterns."""
+        details = action.details or {}
+        date = details.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        bots = details.get("bots", self._bots)
+        run_id = f"discovery-{date}"
+        start_time = datetime.now(timezone.utc)
+        self._record_run(run_id, "discovery_analysis", "running", started_at=start_time.isoformat())
+
+        try:
+            self._event_stream.broadcast("handler_progress", {
+                "run_id": run_id, "stage": "started", "handler": "discovery_analysis",
+            })
+
+            from analysis.discovery_prompt_assembler import DiscoveryPromptAssembler
+
+            assembler = DiscoveryPromptAssembler(
+                date=date,
+                bots=bots,
+                curated_dir=self._curated_dir,
+                memory_dir=self._memory_dir,
+                bot_configs=self._bot_configs,
+            )
+            package = assembler.assemble()
+
+            self._event_stream.broadcast("handler_progress", {
+                "run_id": run_id, "stage": "prompt_assembly", "handler": "discovery_analysis",
+            })
+
+            # Discovery agent gets higher max_turns and file access tools
+            result = await self._agent_runner.invoke(
+                agent_type="discovery_analysis",
+                prompt_package=package,
+                run_id=run_id,
+                allowed_tools=["Read", "Grep", "Glob"],
+                max_turns=15,
+            )
+
+            if result.success:
+                from analysis.response_parser import parse_response
+
+                parsed = parse_response(result.response)
+
+                # Parse discoveries from structured output
+                discoveries = []
+                if parsed.raw_structured and "discoveries" in parsed.raw_structured:
+                    discoveries = parsed.raw_structured["discoveries"]
+
+                # Persist discoveries to findings
+                if discoveries:
+                    discoveries_path = self._memory_dir / "findings" / "discoveries.jsonl"
+                    discoveries_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(discoveries_path, "a", encoding="utf-8") as f:
+                        for d in discoveries:
+                            d["run_id"] = run_id
+                            d["date"] = date
+                            d["discovered_at"] = datetime.now(timezone.utc).isoformat()
+                            f.write(json.dumps(d) + "\n")
+
+                    # Add novel hypotheses to hypothesis library
+                    try:
+                        from skills.hypothesis_library import HypothesisLibrary
+
+                        hypothesis_lib = HypothesisLibrary(self._memory_dir / "findings")
+                        for d in discoveries:
+                            if d.get("testable_hypothesis") and d.get("confidence", 0) >= 0.5:
+                                hypothesis_lib.add_candidate(
+                                    title=d.get("pattern_description", "")[:100],
+                                    description=d.get("testable_hypothesis", ""),
+                                    category=d.get("proposed_root_cause", "novel"),
+                                )
+                    except Exception:
+                        logger.warning("Failed to add discovery hypotheses")
+
+                    self._event_stream.broadcast("discoveries_recorded", {
+                        "run_id": run_id, "count": len(discoveries),
+                    })
+
+                # Parse strategy ideas from structured output
+                strategy_ideas = []
+                if parsed.raw_structured and "strategy_ideas" in parsed.raw_structured:
+                    strategy_ideas = parsed.raw_structured["strategy_ideas"]
+
+                if strategy_ideas:
+                    import hashlib as _hashlib
+                    ideas_path = self._memory_dir / "findings" / "strategy_ideas.jsonl"
+                    ideas_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(ideas_path, "a", encoding="utf-8") as f:
+                        for idea in strategy_ideas:
+                            # Deterministic ID from description
+                            desc = idea.get("description", "")
+                            idea["idea_id"] = _hashlib.sha256(desc.encode()).hexdigest()[:12]
+                            idea["proposed_at"] = datetime.now(timezone.utc).isoformat()
+                            idea["run_id"] = run_id
+                            idea["status"] = "proposed"
+                            f.write(json.dumps(idea) + "\n")
+
+                    # High-confidence ideas → experiment proposals
+                    for idea in strategy_ideas:
+                        if idea.get("confidence", 0) >= 0.7 and self._experiment_manager is not None:
+                            try:
+                                self._experiment_manager.propose(
+                                    title=idea.get("title", "Strategy idea"),
+                                    description=idea.get("description", ""),
+                                    hypothesis_id=None,
+                                    suggestion_id=None,
+                                    acceptance_criteria=[{
+                                        "metric": "pnl",
+                                        "direction": "improve",
+                                        "minimum_change": 0.0,
+                                        "observation_window_days": 14,
+                                        "minimum_trade_count": 20,
+                                    }],
+                                )
+                            except Exception:
+                                logger.warning("Failed to create experiment for strategy idea %s", idea.get("idea_id"))
+
+                    self._event_stream.broadcast("strategy_ideas_proposed", {
+                        "run_id": run_id, "count": len(strategy_ideas),
+                    })
+
+                # Process structural proposals from discovery
+                if parsed.structural_proposals:
+                    self._update_hypothesis_lifecycle(parsed, {})
+                    self._record_structural_experiments(parsed.structural_proposals, run_id)
+
+                self._write_run_report(run_id, "discovery_report.md", result.response)
+
+            elapsed = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+            status = "completed" if result.success else "failed"
+            self._record_run(
+                run_id, "discovery_analysis", status,
+                started_at=start_time.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=elapsed,
+            )
+
+        except Exception as exc:
+            elapsed = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+            self._record_run(
+                run_id, "discovery_analysis", "failed",
+                started_at=start_time.isoformat(),
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=elapsed, error=str(exc),
+            )
+            logger.exception("Discovery analysis handler failed for %s", run_id)
+
     async def handle_feedback(self, action: Action) -> None:
         """Process user feedback from Telegram/Discord callbacks."""
         details = action.details or {}
@@ -1063,7 +1368,7 @@ class Handlers:
                     self._approval_tracker
                     and self._approval_tracker.find_pending_for_suggestion(correction.target_id)
                 ):
-                    self._suggestion_tracker.implement(correction.target_id)
+                    self._suggestion_tracker.accept(correction.target_id)
                     accepted = True
                 if accepted:
                     self._event_stream.broadcast("suggestion_accepted", {
@@ -1480,10 +1785,12 @@ class Handlers:
             scorer = SuggestionScorer(self._memory_dir / "findings")
             scorecard = scorer.compute_scorecard()
 
+            hypothesis_tr = ctx.load_hypothesis_track_record()
             validator = ResponseValidator(
                 rejected_suggestions=rejected,
                 forecast_meta=forecast_meta,
                 category_scorecard=scorecard,
+                hypothesis_track_record=hypothesis_tr,
             )
             validation = validator.validate(parsed)
 
@@ -1645,6 +1952,11 @@ class Handlers:
             bot_id = suggestion.bot_id or ""
             approved_counts_by_bot[bot_id] = approved_counts_by_bot.get(bot_id, 0) + 1
 
+        # Validate suggestions with backtesting before recording
+        from skills.suggestion_validator import SuggestionValidator
+
+        validator = SuggestionValidator(curated_dir=self._curated_dir)
+
         id_map: dict[str, str] = {}
         for idx, suggestion in enumerate(validation_result.approved_suggestions):
             title = suggestion.title or ""
@@ -1661,13 +1973,43 @@ class Handlers:
             tier = CATEGORY_TO_TIER.get(category, "parameter")
 
             confidence = float(getattr(suggestion, "confidence", 0.0) or 0.0)
+
+            # Run suggestion validation (backtest replay)
+            validation_evidence = None
+            val_result = None
+            try:
+                val_result = validator.validate(
+                    suggestion_id=suggestion_id,
+                    bot_id=bot_id,
+                    category=category,
+                    target_param=getattr(suggestion, "target_param", None),
+                    proposed_value=getattr(suggestion, "proposed_value", None),
+                    title=title,
+                )
+                validation_evidence = val_result.evidence.model_dump(mode="json")
+                if val_result.degradation_detected:
+                    logger.warning(
+                        "Suggestion %s shows degradation in backtest: improvement=%.1f%%",
+                        suggestion_id, val_result.evidence.improvement_pct,
+                    )
+            except Exception:
+                logger.warning("Suggestion validation failed for %s — recording anyway", suggestion_id)
+
             structural_context = structural_context_map.get(suggestion_id)
             if structural_context is None:
                 fallback_contexts = fallback_context_by_bot.get(bot_id, [])
                 # Preserve precise explicit links, but still allow the legacy
                 # one-suggestion/one-proposal hypothesis mapping for same-bot runs.
-                if approved_counts_by_bot.get(bot_id, 0) == 1 and len(fallback_contexts) == 1:
+                if fallback_contexts and approved_counts_by_bot.get(bot_id, 0) == 1 and len(fallback_contexts) == 1:
                     structural_context = fallback_contexts[0]
+
+            # Merge validation evidence into detection_context
+            detection_ctx = {}
+            if validation_evidence:
+                detection_ctx["validation_evidence"] = validation_evidence
+            if val_result and val_result.requires_review:
+                detection_ctx["requires_review"] = True
+
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -1683,6 +2025,7 @@ class Handlers:
                     else None
                 ),
                 implementation_context=structural_context,
+                detection_context=detection_ctx if detection_ctx else None,
             )
 
             recorded = self._suggestion_tracker.record(record)
@@ -1695,7 +2038,52 @@ class Handlers:
                 "run_id": run_id, "count": len(id_map),
             })
 
+        # Record structural experiments from approved proposals with acceptance_criteria
+        if parsed and parsed.structural_proposals:
+            self._record_structural_experiments(parsed.structural_proposals, run_id)
+
         return id_map
+
+    def _record_structural_experiments(self, proposals, run_id: str) -> None:
+        """Convert structural proposals with acceptance_criteria into experiment records."""
+        if not self._structural_experiment_tracker:
+            return
+
+        import hashlib
+
+        from schemas.structural_experiment import AcceptanceCriteria, ExperimentRecord
+
+        for proposal in proposals:
+            if not proposal.acceptance_criteria:
+                continue
+            # Validate criteria have at least a metric field
+            valid_criteria: list[AcceptanceCriteria] = []
+            for raw_c in proposal.acceptance_criteria:
+                if isinstance(raw_c, dict) and raw_c.get("metric"):
+                    try:
+                        valid_criteria.append(AcceptanceCriteria(**raw_c))
+                    except Exception:
+                        pass
+            if not valid_criteria:
+                continue
+
+            exp_id = "exp_" + hashlib.sha256(
+                f"{run_id}:{proposal.bot_id}:{proposal.title}".encode()
+            ).hexdigest()[:12]
+
+            experiment = ExperimentRecord(
+                experiment_id=exp_id,
+                bot_id=proposal.bot_id,
+                title=proposal.title,
+                description=proposal.description,
+                hypothesis_id=proposal.hypothesis_id,
+                suggestion_id=proposal.linked_suggestion_id,
+                proposal_run_id=run_id,
+                acceptance_criteria=valid_criteria,
+            )
+            recorded = self._structural_experiment_tracker.record_experiment(experiment)
+            if recorded:
+                logger.info("Recorded structural experiment %s: %s", exp_id, proposal.title)
 
     async def _run_autonomous_pipeline(self, suggestion_ids: dict[str, str], run_id: str) -> None:
         """Run the autonomous pipeline on newly recorded suggestions (if enabled)."""
@@ -1762,6 +2150,36 @@ class Handlers:
             BugSeverity.MEDIUM: NotificationPriority.NORMAL,
             BugSeverity.LOW: NotificationPriority.LOW,
         }.get(severity, NotificationPriority.NORMAL)
+
+    @staticmethod
+    def _map_error_to_bug_class(error_category: str) -> "BugClass":
+        """Map error category string to BugClass enum."""
+        from schemas.reliability_learning import BugClass
+
+        mapping = {
+            "connection": BugClass.CONNECTION,
+            "network": BugClass.CONNECTION,
+            "timeout": BugClass.CONNECTION,
+            "data": BugClass.DATA_INTEGRITY,
+            "data_integrity": BugClass.DATA_INTEGRITY,
+            "parse": BugClass.DATA_INTEGRITY,
+            "timing": BugClass.TIMING,
+            "schedule": BugClass.TIMING,
+            "config": BugClass.CONFIG,
+            "configuration": BugClass.CONFIG,
+            "logic": BugClass.LOGIC,
+            "assertion": BugClass.LOGIC,
+            "dependency": BugClass.DEPENDENCY,
+            "import": BugClass.DEPENDENCY,
+            "resource": BugClass.RESOURCE,
+            "memory": BugClass.RESOURCE,
+            "disk": BugClass.RESOURCE,
+        }
+        cat_lower = error_category.lower()
+        for key, cls in mapping.items():
+            if key in cat_lower:
+                return cls
+        return BugClass.UNKNOWN
 
     def _run_weekly_simulations(
         self,
@@ -2080,27 +2498,593 @@ class Handlers:
                     logger.warning("Could not load daily summary for %s on %s", bot_id, date_str)
         return dailies
 
-    def _build_enriched_curated(self, date: str) -> None:
-        """Read enriched raw events and build curated enriched files for each bot."""
-        raw_dir = self._curated_dir.parent / "raw"
-        if not raw_dir.exists():
+    def _load_weekly_strategy_evidence(
+        self,
+        week_start: str,
+        week_end: str,
+        bot_summaries: dict[str, object],
+        signal_health_data: dict[str, dict] | None = None,
+        factor_rolling_data: dict[str, list[dict]] | None = None,
+        simulation_results: dict | None = None,
+    ) -> dict:
+        """Aggregate curated weekly evidence into strategy-engine inputs."""
+        bot_ids = list(bot_summaries.keys())
+        trades_by_bot: dict[str, list] = {}
+        missed_by_bot: dict[str, list] = {}
+        for bot_id in bot_ids:
+            trades, missed = self._load_trades_for_week(bot_id, week_start, week_end)
+            trades_by_bot[bot_id] = trades
+            missed_by_bot[bot_id] = missed
+
+        evidence = {
+            "filter_summaries": self._aggregate_weekly_filter_summaries(
+                week_start, week_end, bot_ids, missed_by_bot,
+            ),
+            "regime_trends": self._aggregate_weekly_regime_trends(week_end, bot_ids),
+            "rolling_sharpe": self._aggregate_rolling_sharpe(week_end, bot_ids),
+            "signal_correlations": self._aggregate_signal_correlations(week_end, bot_ids),
+            "hourly_buckets": self._aggregate_hourly_buckets(week_start, week_end, bot_ids),
+            "correlation_summaries": self._build_bot_correlation_summaries(bot_summaries),
+            "drawdown_data": self._aggregate_drawdown_data(week_end, trades_by_bot),
+            "signal_health": signal_health_data or None,
+            "factor_rolling": factor_rolling_data or None,
+            "filter_interactions": self._load_filter_interactions_from_simulations(
+                simulation_results or {},
+            ),
+            "orderbook_stats": self._aggregate_orderbook_stats(week_start, week_end, bot_ids),
+        }
+        return {key: value for key, value in evidence.items() if value}
+
+    def _aggregate_weekly_filter_summaries(
+        self,
+        week_start: str,
+        week_end: str,
+        bot_ids: list[str],
+        missed_by_bot: dict[str, list],
+    ) -> dict[str, list]:
+        """Aggregate daily filter analysis and missed events into weekly summaries."""
+        from schemas.weekly_metrics import FilterWeeklySummary
+
+        aggregated: dict[str, dict[str, dict[str, float]]] = {}
+        for date_str in self._iter_date_range(week_start, week_end):
+            for bot_id in bot_ids:
+                data = self._load_json_file(
+                    self._curated_dir / date_str / bot_id / "filter_analysis.json"
+                )
+                if not isinstance(data, dict):
+                    continue
+                counts = data.get("filter_block_counts", {})
+                saved = data.get("filter_saved_pnl", {})
+                missed_pnl = data.get("filter_missed_pnl", {})
+                if not isinstance(counts, dict):
+                    counts = {}
+                if not isinstance(saved, dict):
+                    saved = {}
+                if not isinstance(missed_pnl, dict):
+                    missed_pnl = {}
+
+                for filter_name in set(counts) | set(saved) | set(missed_pnl):
+                    record = aggregated.setdefault(bot_id, {}).setdefault(
+                        filter_name,
+                        {
+                            "total_blocks": 0.0,
+                            "blocks_that_would_have_won": 0.0,
+                            "blocks_that_would_have_lost": 0.0,
+                            "net_impact_pnl": 0.0,
+                        },
+                    )
+                    record["total_blocks"] += float(counts.get(filter_name, 0) or 0)
+                    record["net_impact_pnl"] += (
+                        float(saved.get(filter_name, 0.0) or 0.0)
+                        - float(missed_pnl.get(filter_name, 0.0) or 0.0)
+                    )
+
+        for bot_id, missed_events in missed_by_bot.items():
+            for event in missed_events:
+                filter_name = getattr(event, "blocked_by", "") or ""
+                if not filter_name:
+                    continue
+                record = aggregated.setdefault(bot_id, {}).setdefault(
+                    filter_name,
+                    {
+                        "total_blocks": 0.0,
+                        "blocks_that_would_have_won": 0.0,
+                        "blocks_that_would_have_lost": 0.0,
+                        "net_impact_pnl": 0.0,
+                    },
+                )
+                if getattr(event, "outcome_24h", 0.0) > 0:
+                    record["blocks_that_would_have_won"] += 1.0
+                else:
+                    record["blocks_that_would_have_lost"] += 1.0
+
+        results: dict[str, list] = {}
+        for bot_id, filters in aggregated.items():
+            summaries: list[FilterWeeklySummary] = []
+            for filter_name, record in sorted(filters.items()):
+                total_blocks = int(record["total_blocks"])
+                classified = (
+                    int(record["blocks_that_would_have_won"])
+                    + int(record["blocks_that_would_have_lost"])
+                )
+                confidence = min(1.0, classified / total_blocks) if total_blocks > 0 else 0.0
+                summaries.append(
+                    FilterWeeklySummary(
+                        bot_id=bot_id,
+                        filter_name=filter_name,
+                        total_blocks=total_blocks,
+                        blocks_that_would_have_won=int(record["blocks_that_would_have_won"]),
+                        blocks_that_would_have_lost=int(record["blocks_that_would_have_lost"]),
+                        net_impact_pnl=round(record["net_impact_pnl"], 4),
+                        confidence=round(confidence, 4),
+                    )
+                )
+            if summaries:
+                results[bot_id] = summaries
+        return results
+
+    def _aggregate_weekly_regime_trends(
+        self, week_end: str, bot_ids: list[str], lookback_weeks: int = 4,
+    ) -> dict[str, list]:
+        """Build regime trends from the last few weeks of daily regime analysis."""
+        from schemas.weekly_metrics import RegimePerformanceTrend
+
+        end_dt = datetime.strptime(week_end, "%Y-%m-%d")
+        history: dict[str, dict[str, dict[str, list[float] | list[int]]]] = {}
+
+        for week_offset in range(lookback_weeks - 1, -1, -1):
+            window_end = end_dt - timedelta(days=week_offset * 7)
+            window_start = window_end - timedelta(days=6)
+            weekly_data: dict[str, dict[str, dict[str, float]]] = {}
+
+            for date_str in self._iter_date_range(
+                window_start.strftime("%Y-%m-%d"),
+                window_end.strftime("%Y-%m-%d"),
+            ):
+                for bot_id in bot_ids:
+                    data = self._load_json_file(
+                        self._curated_dir / date_str / bot_id / "regime_analysis.json"
+                    )
+                    if not isinstance(data, dict):
+                        continue
+                    regime_pnl = data.get("regime_pnl", {})
+                    regime_trade_count = data.get("regime_trade_count", {})
+                    regime_win_rate = data.get("regime_win_rate", {})
+                    if not isinstance(regime_pnl, dict):
+                        regime_pnl = {}
+                    if not isinstance(regime_trade_count, dict):
+                        regime_trade_count = {}
+                    if not isinstance(regime_win_rate, dict):
+                        regime_win_rate = {}
+
+                    for regime_name in (
+                        set(regime_pnl) | set(regime_trade_count) | set(regime_win_rate)
+                    ):
+                        record = weekly_data.setdefault(bot_id, {}).setdefault(
+                            regime_name,
+                            {"pnl": 0.0, "trade_count": 0.0, "weighted_wins": 0.0},
+                        )
+                        trade_count = float(regime_trade_count.get(regime_name, 0) or 0)
+                        record["pnl"] += float(regime_pnl.get(regime_name, 0.0) or 0.0)
+                        record["trade_count"] += trade_count
+                        record["weighted_wins"] += (
+                            float(regime_win_rate.get(regime_name, 0.0) or 0.0) * trade_count
+                        )
+
+            for bot_id in bot_ids:
+                known_regimes = set(history.get(bot_id, {})) | set(weekly_data.get(bot_id, {}))
+                for regime_name in known_regimes:
+                    payload = weekly_data.get(bot_id, {}).get(
+                        regime_name,
+                        {"pnl": 0.0, "trade_count": 0.0, "weighted_wins": 0.0},
+                    )
+                    trend = history.setdefault(bot_id, {}).setdefault(
+                        regime_name,
+                        {
+                            "weekly_pnl": [],
+                            "weekly_trade_count": [],
+                            "weekly_win_rate": [],
+                        },
+                    )
+                    trade_count = int(payload["trade_count"])
+                    win_rate = (
+                        float(payload["weighted_wins"]) / float(payload["trade_count"])
+                        if payload["trade_count"] > 0 else 0.0
+                    )
+                    trend["weekly_pnl"].append(round(float(payload["pnl"]), 4))
+                    trend["weekly_trade_count"].append(trade_count)
+                    trend["weekly_win_rate"].append(round(win_rate, 4))
+
+        results: dict[str, list] = {}
+        for bot_id, regimes in history.items():
+            entries: list[RegimePerformanceTrend] = []
+            for regime_name, payload in sorted(regimes.items()):
+                trade_counts = payload["weekly_trade_count"]
+                if not any(trade_counts):
+                    continue
+                entries.append(
+                    RegimePerformanceTrend(
+                        bot_id=bot_id,
+                        regime=regime_name,
+                        weekly_pnl=list(payload["weekly_pnl"]),
+                        weekly_win_rate=list(payload["weekly_win_rate"]),
+                        weekly_trade_count=list(trade_counts),
+                    )
+                )
+            if entries:
+                results[bot_id] = entries
+        return results
+
+    def _aggregate_rolling_sharpe(
+        self, week_end: str, bot_ids: list[str],
+    ) -> dict[str, dict[str, float]]:
+        """Compute 30d/60d/90d rolling Sharpe from daily summaries."""
+        results: dict[str, dict[str, float]] = {}
+        for bot_id in bot_ids:
+            pnls = self._load_recent_daily_metric_series(bot_id, week_end, "net_pnl", 90)
+            if not pnls:
+                continue
+            results[bot_id] = {
+                "30d": round(self._compute_sharpe(pnls[-30:]), 4),
+                "60d": round(self._compute_sharpe(pnls[-60:]), 4),
+                "90d": round(self._compute_sharpe(pnls[-90:]), 4),
+            }
+        return results
+
+    def _aggregate_signal_correlations(
+        self, week_end: str, bot_ids: list[str],
+    ) -> dict[str, dict[str, float]]:
+        """Compute short/long signal-to-outcome correlation baselines."""
+        results: dict[str, dict[str, float]] = {}
+        for bot_id in bot_ids:
+            corr_30d = self._load_recent_signal_correlation(bot_id, week_end, 30)
+            corr_90d = self._load_recent_signal_correlation(bot_id, week_end, 90)
+            if corr_30d is None and corr_90d is None:
+                continue
+            results[bot_id] = {
+                "30d": round(corr_30d or 0.0, 4),
+                "90d": round(corr_90d if corr_90d is not None else (corr_30d or 0.0), 4),
+            }
+        return results
+
+    def _aggregate_hourly_buckets(
+        self, week_start: str, week_end: str, bot_ids: list[str],
+    ) -> dict[str, list]:
+        """Aggregate hourly buckets across the current week."""
+        from schemas.hourly_performance import HourlyBucket
+
+        aggregated: dict[str, dict[int, dict[str, float]]] = {}
+        for date_str in self._iter_date_range(week_start, week_end):
+            for bot_id in bot_ids:
+                data = self._load_json_file(
+                    self._curated_dir / date_str / bot_id / "hourly_performance.json"
+                )
+                if not isinstance(data, dict):
+                    continue
+                buckets = data.get("buckets", [])
+                if not isinstance(buckets, list):
+                    continue
+                for bucket in buckets:
+                    if not isinstance(bucket, dict):
+                        continue
+                    hour = int(bucket.get("hour", 0) or 0)
+                    trade_count = int(bucket.get("trade_count", 0) or 0)
+                    record = aggregated.setdefault(bot_id, {}).setdefault(
+                        hour,
+                        {
+                            "trade_count": 0.0,
+                            "pnl": 0.0,
+                            "win_count": 0.0,
+                            "process_quality_sum": 0.0,
+                        },
+                    )
+                    record["trade_count"] += trade_count
+                    record["pnl"] += float(bucket.get("pnl", 0.0) or 0.0)
+                    record["win_count"] += (
+                        float(bucket.get("win_rate", 0.0) or 0.0) * trade_count
+                    )
+                    record["process_quality_sum"] += (
+                        float(bucket.get("avg_process_quality", 0.0) or 0.0) * trade_count
+                    )
+
+        results: dict[str, list] = {}
+        for bot_id, hours in aggregated.items():
+            buckets: list[HourlyBucket] = []
+            for hour, record in sorted(hours.items()):
+                trade_count = int(record["trade_count"])
+                if trade_count <= 0:
+                    continue
+                buckets.append(
+                    HourlyBucket(
+                        hour=hour,
+                        trade_count=trade_count,
+                        pnl=round(record["pnl"], 4),
+                        win_rate=round(record["win_count"] / trade_count, 4),
+                        avg_process_quality=round(
+                            record["process_quality_sum"] / trade_count, 4,
+                        ),
+                    )
+                )
+            if buckets:
+                results[bot_id] = buckets
+        return results
+
+    def _build_bot_correlation_summaries(self, bot_summaries: dict[str, object]) -> list:
+        """Compute bot-level weekly correlation summaries from daily PnL series."""
+        from schemas.weekly_metrics import CorrelationSummary
+
+        bot_ids = sorted(bot_summaries)
+        all_dates: set[str] = set()
+        daily_pnl_by_bot: dict[str, dict[str, float]] = {}
+        for bot_id, summary in bot_summaries.items():
+            daily = getattr(summary, "daily_pnl", {}) or {}
+            if not isinstance(daily, dict):
+                daily = {}
+            daily_pnl_by_bot[bot_id] = {str(k): float(v) for k, v in daily.items()}
+            all_dates.update(daily.keys())
+
+        if not all_dates:
+            return []
+
+        ordered_dates = sorted(all_dates)
+        summaries: list[CorrelationSummary] = []
+        for idx, bot_a in enumerate(bot_ids):
+            for bot_b in bot_ids[idx + 1:]:
+                series_a = [daily_pnl_by_bot.get(bot_a, {}).get(date, 0.0) for date in ordered_dates]
+                series_b = [daily_pnl_by_bot.get(bot_b, {}).get(date, 0.0) for date in ordered_dates]
+                active_pairs = [
+                    (left, right)
+                    for left, right in zip(series_a, series_b)
+                    if left != 0.0 and right != 0.0
+                ]
+                same_direction = 0.0
+                if active_pairs:
+                    same_direction = (
+                        sum(1 for left, right in active_pairs if left * right > 0)
+                        / len(active_pairs)
+                    )
+                corr = self._pearson(series_a, series_b)
+                summaries.append(
+                    CorrelationSummary(
+                        bot_a=bot_a,
+                        bot_b=bot_b,
+                        rolling_30d_correlation=round(corr, 4),
+                        weekly_pnl_correlation=round(corr, 4),
+                        same_direction_pct=round(same_direction, 4),
+                    )
+                )
+        return summaries
+
+    def _aggregate_drawdown_data(
+        self, week_end: str, trades_by_bot: dict[str, list],
+    ) -> dict[str, dict]:
+        """Compute drawdown concentration inputs for the strategy engine."""
+        from skills.drawdown_analyzer import DrawdownAnalyzer
+
+        results: dict[str, dict] = {}
+        for bot_id, trades in trades_by_bot.items():
+            if not trades:
+                continue
+            report = DrawdownAnalyzer(bot_id=bot_id, date=week_end).compute(trades)
+            loss_pcts = [abs(float(t.pnl_pct)) for t in trades if getattr(t, "pnl", 0.0) < 0]
+            results[bot_id] = {
+                "largest_single_loss_pct": round(report.largest_single_loss_pct, 4),
+                "max_drawdown_pct": round(report.max_drawdown_pct, 4),
+                "avg_loss_pct": round(
+                    (sum(loss_pcts) / len(loss_pcts)) if loss_pcts else 0.0,
+                    4,
+                ),
+            }
+        return results
+
+    def _load_filter_interactions_from_simulations(self, simulation_results: dict) -> dict[str, list]:
+        """Pull filter interaction evidence from simulator outputs when present."""
+        interactions: dict[str, list] = {}
+        for key, value in simulation_results.items():
+            if not key.startswith("filter_interaction_") or not isinstance(value, dict):
+                continue
+            bot_id = str(value.get("bot_id", "") or key.removeprefix("filter_interaction_"))
+            pairs = value.get("pairs", [])
+            if bot_id and isinstance(pairs, list) and pairs:
+                interactions[bot_id] = pairs
+        return interactions
+
+    def _aggregate_orderbook_stats(
+        self, week_start: str, week_end: str, bot_ids: list[str],
+    ) -> dict[str, dict]:
+        """Aggregate orderbook context stats across the current week."""
+        aggregated: dict[str, dict[str, dict[str, float]]] = {}
+        for date_str in self._iter_date_range(week_start, week_end):
+            for bot_id in bot_ids:
+                data = self._load_json_file(
+                    self._curated_dir / date_str / bot_id / "orderbook_stats.json"
+                )
+                if not isinstance(data, dict):
+                    continue
+                by_context = data.get("by_context", {})
+                if not isinstance(by_context, dict):
+                    continue
+                for context_name, context_data in by_context.items():
+                    if not isinstance(context_data, dict):
+                        continue
+                    count = int(context_data.get("count", 0) or 0)
+                    if count <= 0:
+                        continue
+                    record = aggregated.setdefault(bot_id, {}).setdefault(
+                        context_name,
+                        {
+                            "count": 0.0,
+                            "spread_sum": 0.0,
+                            "imbalance_sum": 0.0,
+                        },
+                    )
+                    record["count"] += count
+                    record["spread_sum"] += (
+                        float(context_data.get("spread_stats", {}).get("mean", 0.0) or 0.0)
+                        * count
+                    )
+                    record["imbalance_sum"] += (
+                        float(context_data.get("imbalance_stats", {}).get("mean", 0.0) or 0.0)
+                        * count
+                    )
+
+        results: dict[str, dict] = {}
+        for bot_id, contexts in aggregated.items():
+            by_context: dict[str, dict] = {}
+            for context_name, record in contexts.items():
+                count = int(record["count"])
+                if count <= 0:
+                    continue
+                by_context[context_name] = {
+                    "count": count,
+                    "spread_stats": {"mean": round(record["spread_sum"] / count, 4)},
+                    "imbalance_stats": {"mean": round(record["imbalance_sum"] / count, 4)},
+                }
+            if by_context:
+                results[bot_id] = {"by_context": by_context}
+        return results
+
+    def _load_recent_daily_metric_series(
+        self, bot_id: str, end_date: str, metric_key: str, max_points: int,
+    ) -> list[float]:
+        """Load recent metric values from daily summaries for rolling windows."""
+        values: list[float] = []
+        for date_str in self._list_available_dates(end=end_date):
+            summary = self._load_json_file(self._curated_dir / date_str / bot_id / "summary.json")
+            if not isinstance(summary, dict):
+                continue
+            value = summary.get(metric_key)
+            if not isinstance(value, (int, float)):
+                continue
+            values.append(float(value))
+        return values[-max_points:]
+
+    def _load_recent_signal_correlation(
+        self, bot_id: str, end_date: str, lookback_days: int,
+    ) -> float | None:
+        """Load weighted average signal correlation over a rolling lookback."""
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=lookback_days - 1)
+        weighted_total = 0.0
+        total_weight = 0.0
+
+        for date_str in self._iter_date_range(
+            start_dt.strftime("%Y-%m-%d"), end_date,
+        ):
+            data = self._load_json_file(
+                self._curated_dir / date_str / bot_id / "signal_health.json"
+            )
+            if not isinstance(data, dict):
+                continue
+            components = data.get("components", [])
+            if not isinstance(components, list):
+                continue
+            for component in components:
+                if not isinstance(component, dict):
+                    continue
+                correlation = float(component.get("win_correlation", 0.0) or 0.0)
+                weight = max(int(component.get("trade_count", 0) or 0), 1)
+                weighted_total += correlation * weight
+                total_weight += weight
+
+        if total_weight <= 0:
+            return None
+        return weighted_total / total_weight
+
+    @staticmethod
+    def _compute_sharpe(values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        try:
+            mean = statistics.mean(values)
+            std = statistics.stdev(values)
+        except statistics.StatisticsError:
+            return 0.0
+        if std == 0:
+            return 0.0
+        return (mean / std) * math.sqrt(252)
+
+    @staticmethod
+    def _pearson(left: list[float], right: list[float]) -> float:
+        if len(left) != len(right) or len(left) < 2:
+            return 0.0
+        try:
+            mean_left = statistics.mean(left)
+            mean_right = statistics.mean(right)
+        except statistics.StatisticsError:
+            return 0.0
+        numerator = sum((a - mean_left) * (b - mean_right) for a, b in zip(left, right))
+        denom_left = math.sqrt(sum((a - mean_left) ** 2 for a in left))
+        denom_right = math.sqrt(sum((b - mean_right) ** 2 for b in right))
+        if denom_left == 0 or denom_right == 0:
+            return 0.0
+        return numerator / (denom_left * denom_right)
+
+    def _list_available_dates(self, start: str = "", end: str = "") -> list[str]:
+        """List curated date directories in lexical date order."""
+        if not self._curated_dir.exists():
+            return []
+        dates: list[str] = []
+        for entry in sorted(self._curated_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if len(name) != 10 or name[4] != "-" or name[7] != "-":
+                continue
+            if start and name < start:
+                continue
+            if end and name > end:
+                continue
+            dates.append(name)
+        return dates
+
+    def _iter_date_range(self, start: str, end: str) -> list[str]:
+        """Return inclusive YYYY-MM-DD date strings for a range."""
+        current = datetime.strptime(start, "%Y-%m-%d")
+        end_dt = datetime.strptime(end, "%Y-%m-%d")
+        dates: list[str] = []
+        while current <= end_dt:
+            dates.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        return dates
+
+    @staticmethod
+    def _load_json_file(path: Path) -> dict | list | None:
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _rebuild_daily_curated_from_raw(self, date: str, bots: list[str] | None = None) -> None:
+        """Build canonical daily curated files from assistant-owned raw JSONL."""
+        if not self._raw_data_dir.exists():
             return
 
+        from schemas.events import MissedOpportunityEvent, TradeEvent
         from skills.build_daily_metrics import DailyMetricsBuilder
 
-        for bot_id in self._bots:
-            bot_raw = raw_dir / date / bot_id
+        findings_dir = self._memory_dir / "findings"
+        target_bots = bots or self._bots
+        for bot_id in target_bots:
+            bot_raw = self._raw_data_dir / date / bot_id
             if not bot_raw.exists():
                 continue
 
-            enriched_types = {
+            trade_records = self._load_raw_json_records(bot_raw, "trade")
+            missed_records = self._load_raw_json_records(bot_raw, "missed_opportunity")
+            trades = self._validate_raw_models(TradeEvent, trade_records, "trade", bot_id, date)
+            missed = self._validate_raw_models(
+                MissedOpportunityEvent, missed_records, "missed_opportunity", bot_id, date,
+            )
+
+            kwargs: dict = {}
+            for event_type, param_name in {
                 "filter_decision": "filter_decision_events",
                 "indicator_snapshot": "indicator_snapshot_events",
                 "orderbook_context": "orderbook_context_events",
-            }
-
-            kwargs: dict = {}
-            for event_type, param_name in enriched_types.items():
+            }.items():
                 events = self._load_raw_json_records(bot_raw, event_type)
                 if events:
                     kwargs[param_name] = events
@@ -2113,21 +3097,31 @@ class Handlers:
             if coordinator_events:
                 kwargs["coordination_events"] = coordinator_events
 
-            if kwargs:
-                try:
-                    builder = DailyMetricsBuilder(date=date, bot_id=bot_id)
-                    builder.write_curated(
-                        trades=[], missed=[], base_dir=self._curated_dir, **kwargs,
-                    )
-                    logger.info(
-                        "Built enriched curated files for %s/%s: %s",
-                        date, bot_id, list(kwargs.keys()),
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to build enriched curated for %s/%s", date, bot_id,
-                        exc_info=True,
-                    )
+            if not trades and not missed and not kwargs:
+                continue
+
+            try:
+                bot_timezone = "UTC"
+                if self._bot_configs and bot_id in self._bot_configs:
+                    bot_timezone = getattr(self._bot_configs[bot_id], "timezone", "UTC")
+                builder = DailyMetricsBuilder(date=date, bot_id=bot_id, bot_timezone=bot_timezone)
+                builder.write_curated(
+                    trades=trades,
+                    missed=missed,
+                    base_dir=self._curated_dir,
+                    findings_dir=findings_dir,
+                    **kwargs,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to rebuild curated data for %s/%s from raw events",
+                    date, bot_id,
+                    exc_info=True,
+                )
+
+    def _build_enriched_curated(self, date: str, bots: list[str] | None = None) -> None:
+        """Compatibility wrapper for the old enriched-curated rebuild entrypoint."""
+        self._rebuild_daily_curated_from_raw(date, bots)
 
     def _load_raw_json_records(self, bot_raw: Path, event_type: str) -> list[dict]:
         """Load JSON/JSONL raw event records, skipping malformed lines."""
@@ -2159,8 +3153,50 @@ class Handlers:
                     records.append(data)
         return records
 
+    def _validate_raw_models(
+        self,
+        model_cls: type[BaseModel],
+        records: list[dict],
+        event_type: str,
+        bot_id: str,
+        date: str,
+    ) -> list[BaseModel]:
+        validated: list[BaseModel] = []
+        for record in records:
+            try:
+                validated.append(model_cls.model_validate(record))
+            except Exception:
+                logger.warning(
+                    "Skipping malformed raw %s event for %s on %s",
+                    event_type, bot_id, date,
+                )
+        return validated
+
+    def _write_run_report(
+        self,
+        run_id: str,
+        report_name: str,
+        content: str,
+        mirror_response: bool = False,
+    ) -> None:
+        run_dir = self._runs_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / report_name).write_text(content, encoding="utf-8")
+        response_path = run_dir / "response.md"
+        if mirror_response or not response_path.exists():
+            response_path.write_text(content, encoding="utf-8")
+
     def _get_latest_heartbeat_time(self, bot_id: str) -> datetime | None:
         """Get the latest heartbeat timestamp for a bot from heartbeat files."""
+        hb_file = self._heartbeat_dir / f"{bot_id}.heartbeat"
+        if hb_file.exists():
+            try:
+                raw = hb_file.read_text(encoding="utf-8").strip()
+                if raw:
+                    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except (ValueError, OSError):
+                pass
+
         hb_file = self._heartbeat_dir / f"{bot_id}.json"
         if not hb_file.exists():
             return None
@@ -2168,7 +3204,7 @@ class Handlers:
             data = json.loads(hb_file.read_text(encoding="utf-8"))
             ts = data.get("last_seen") or data.get("timestamp")
             if ts:
-                return datetime.fromisoformat(ts)
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (json.JSONDecodeError, ValueError, OSError):
             pass
         return None
@@ -2247,7 +3283,19 @@ class Handlers:
         for deployment in self._deployment_monitor.get_monitoring():
             try:
                 if deployment.status == DeploymentStatus.PENDING_MERGE:
-                    await self._deployment_monitor.check_merge_status(deployment.deployment_id)
+                    merged = await self._deployment_monitor.check_merge_status(
+                        deployment.deployment_id,
+                    )
+                    if (
+                        merged
+                        and self._suggestion_tracker is not None
+                        and deployment.suggestion_id
+                    ):
+                        self._suggestion_tracker.mark_merged(
+                            deployment.suggestion_id,
+                            pr_url=deployment.pr_url,
+                            deployment_id=deployment.deployment_id,
+                        )
                     # Also check for stale pending
                     self._deployment_monitor.check_stale_pending(deployment.deployment_id)
                 elif deployment.status == DeploymentStatus.MERGED:
@@ -2263,7 +3311,18 @@ class Handlers:
                     if self._deployment_monitor.is_heartbeat_confirmed(
                         deployment.deployment_id, latest_hb,
                     ):
-                        self._deployment_monitor.mark_deployed(deployment.deployment_id)
+                        self._deployment_monitor.mark_deployed(
+                            deployment.deployment_id,
+                            detected_at=latest_hb,
+                        )
+                        if (
+                            self._suggestion_tracker is not None
+                            and deployment.suggestion_id
+                        ):
+                            self._suggestion_tracker.mark_deployed(
+                                deployment.suggestion_id,
+                                deployment_id=deployment.deployment_id,
+                            )
                         logger.info(
                             "Deployment %s confirmed by heartbeat, monitoring started",
                             deployment.deployment_id,

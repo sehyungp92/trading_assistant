@@ -51,6 +51,7 @@ class StructuralProposal(BaseModel):
     estimated_complexity: Literal["low", "medium", "high"] = "medium"
     file_changes: list[FileChange] = Field(default_factory=list)
     verification_commands: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[dict] = Field(default_factory=list)
 
 
 # Shared mapping from suggestion category → suggestion tier.
@@ -74,3 +75,4 @@ class ParsedAnalysis(BaseModel):
     structural_proposals: list[StructuralProposal] = Field(default_factory=list)
     raw_report: str = ""
     parse_success: bool = True
+    raw_structured: Optional[dict] = None  # Full parsed JSON from STRUCTURED_OUTPUT block

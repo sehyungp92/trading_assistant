@@ -138,10 +138,10 @@ class OrchestratorBrain:
         }
 
     def _handle_trade(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "trade")
 
     def _handle_missed_opportunity(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "missed_opportunity")
 
     def _handle_error(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         payload = json.loads(event.get("payload", "{}"))

@@ -74,7 +74,7 @@ async def test_invocation_with_allowed_agent_type_succeeds(tmp_path, session_sto
         ),
         codex_command="codex",
     )
-    runner._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
+    runner._auth_checker._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
         provider=AgentProvider.CODEX_PRO,
         available=True,
         runtime="codex_cli",
@@ -82,7 +82,7 @@ async def test_invocation_with_allowed_agent_type_succeeds(tmp_path, session_sto
     mock_proc = _streaming_codex_process()
     # daily_analysis has generate_report in allowed_actions, so no denial
     with (
-        patch.object(runner, "_require_resolved_command", return_value="/usr/bin/codex"),
+        patch.object(runner._auth_checker, "require_resolved_command", return_value="/usr/bin/codex"),
         patch("orchestrator.agent_runner.asyncio.create_subprocess_exec", return_value=mock_proc),
     ):
         result = await runner.invoke(
@@ -117,7 +117,7 @@ async def test_invocation_with_forbidden_action_logs_warning(tmp_path, session_s
         ),
         codex_command="codex",
     )
-    runner._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
+    runner._auth_checker._provider_status_cache[AgentProvider.CODEX_PRO] = ProviderReadiness(
         provider=AgentProvider.CODEX_PRO,
         available=True,
         runtime="codex_cli",
@@ -127,7 +127,7 @@ async def test_invocation_with_forbidden_action_logs_warning(tmp_path, session_s
     import logging
     with caplog.at_level(logging.WARNING):
         with (
-            patch.object(runner, "_require_resolved_command", return_value="/usr/bin/codex"),
+            patch.object(runner._auth_checker, "require_resolved_command", return_value="/usr/bin/codex"),
             patch("orchestrator.agent_runner.asyncio.create_subprocess_exec", return_value=mock_proc),
         ):
             result = await runner.invoke(
