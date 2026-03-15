@@ -73,6 +73,7 @@ class TradeEvent(BaseModel):
 
     trade_id: str
     bot_id: str
+    strategy_id: str = ""  # identifies strategy within multi-strategy bots
     pair: str
     event_metadata: Optional[EventMetadata] = None
     market_snapshot: Optional[MarketSnapshot] = None
@@ -122,11 +123,30 @@ class TradeEvent(BaseModel):
     entry_fill_details: dict | None = None
     exit_fill_details: dict | None = None
 
+    # stock_trader execution quality fields
+    fees_paid: float = 0.0
+    entry_slippage_bps: float = 0.0
+    exit_slippage_bps: float = 0.0
+    entry_latency_ms: float = 0.0
+
+    # stock_trader session/drawdown context
+    session_type: str = ""  # e.g. "regular", "pre_market", "extended"
+    drawdown_pct: float = 0.0
+
+    # stock_trader signal tracing (links trade back to originating signal)
+    signal_id: str = ""
+
+    # stock_trader filter detail (passed_filters = filters the signal cleared;
+    # distinct from active_filters which lists all filters that were active)
+    passed_filters: list[str] | None = None
+    filter_decisions: list[dict] | None = None
+
 
 class MissedOpportunityEvent(BaseModel):
     event_metadata: Optional[EventMetadata] = None
     market_snapshot: Optional[MarketSnapshot] = None
     bot_id: str
+    strategy_id: str = ""  # identifies strategy within multi-strategy bots
     pair: str
     signal: str
     signal_strength: float = 0.0
@@ -140,6 +160,12 @@ class MissedOpportunityEvent(BaseModel):
     confidence: float = 0.0
     assumption_tags: list[str] = []
     margin_pct: float | None = None  # how close to filter threshold (requires bot B4)
+
+    # stock_trader extras
+    signal_id: str = ""
+    block_reason: str = ""  # freetext explanation (vs blocked_by = filter name)
+    backfill_status: str = ""  # e.g. "completed", "pending", "failed"
+    simulation_confidence: float = 0.0  # counterfactual sim confidence (vs confidence = signal confidence)
 
 
 class DailySnapshot(BaseModel):

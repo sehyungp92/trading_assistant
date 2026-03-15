@@ -1,0 +1,134 @@
+bot_id: stock_trader
+repo_url: git@github.com:user/stock_trader.git
+repo_dir: /repos/stock_trader
+default_branch: main
+allowed_edit_paths:
+  - strategies/iaric/config/*
+  - strategies/us_orb/config/*
+  - config/*
+  - tests/*
+  - docs/*
+  - README.md
+structural_context_paths:
+  - strategies/iaric/*
+  - strategies/us_orb/*
+  - config/*
+  - tests/*
+verification_commands:
+  - pytest tests -q
+strategies:
+  - iaric
+  - us_orb
+parameters:
+  # --- IARIC strategy ---
+  - param_name: signal_quality_threshold
+    strategy_id: iaric
+    param_type: YAML_FIELD
+    file_path: strategies/iaric/config/params.yaml
+    yaml_key: iaric.signal_quality_threshold
+    current_value: 0.6
+    valid_range: [0.0, 1.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: atr_multiplier_tp
+    strategy_id: iaric
+    param_type: YAML_FIELD
+    file_path: strategies/iaric/config/params.yaml
+    yaml_key: iaric.atr_multiplier_tp
+    current_value: 2.0
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: exit_rule
+    is_safety_critical: false
+  - param_name: atr_multiplier_sl
+    strategy_id: iaric
+    param_type: YAML_FIELD
+    file_path: strategies/iaric/config/params.yaml
+    yaml_key: iaric.atr_multiplier_sl
+    current_value: 1.0
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_rule
+    is_safety_critical: false
+  - param_name: max_positions
+    strategy_id: iaric
+    param_type: YAML_FIELD
+    file_path: strategies/iaric/config/params.yaml
+    yaml_key: iaric.max_positions
+    current_value: 5
+    valid_range: [1, 20]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+  - param_name: base_risk_pct
+    strategy_id: iaric
+    param_type: YAML_FIELD
+    file_path: strategies/iaric/config/params.yaml
+    yaml_key: iaric.base_risk_pct
+    current_value: 0.02
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  # --- US_ORB strategy ---
+  - param_name: orb_window_minutes
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.orb_window_minutes
+    current_value: 15
+    valid_range: [5, 30]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: breakout_atr_mult
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.breakout_atr_mult
+    current_value: 0.5
+    valid_range: [0.1, 2.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: atr_multiplier_tp
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.atr_multiplier_tp
+    current_value: 1.5
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: exit_rule
+    is_safety_critical: false
+  - param_name: atr_multiplier_sl
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.atr_multiplier_sl
+    current_value: 1.0
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_rule
+    is_safety_critical: false
+  - param_name: max_positions
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.max_positions
+    current_value: 3
+    valid_range: [1, 10]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+  - param_name: base_risk_pct
+    strategy_id: us_orb
+    param_type: YAML_FIELD
+    file_path: strategies/us_orb/config/params.yaml
+    yaml_key: us_orb.base_risk_pct
+    current_value: 0.015
+    valid_range: [0.005, 0.04]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true

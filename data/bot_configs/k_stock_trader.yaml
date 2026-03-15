@@ -16,6 +16,9 @@ verification_commands:
   - pytest tests -q
 strategies:
   - kmp
+  - kpr
+  - pcim
+  - nulrimok
 parameters:
   - param_name: quality_min_threshold
     strategy_id: kmp

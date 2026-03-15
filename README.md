@@ -78,6 +78,48 @@ All of the above injected into the next analysis prompt
 
 The system won't re-suggest rejected ideas. Categories with low success rates get their suggestions stripped before delivery. Confidence levels are capped based on historical prediction accuracy. Hypotheses that accumulate rejections and negative outcomes are auto-retired.
 
+## Design Philosophy: OpenClaw Governance + Autoresearch Optimisation
+
+This system combines two reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
+
+### From OpenClaw: human boundaries and memory integrity
+
+The core insight from OpenClaw is that an autonomous system needs clear, enforceable boundaries between what it can change and what only a human can change.
+
+**Three-tier permission gates** (`memory/policies/v1/permission_gates.md`) classify every action the system can take. Routine data processing runs unattended. Strategy and parameter changes require explicit Telegram approval. Critical paths — the ground truth evaluation function, deployment scripts, kill switches, and the policy documents themselves — require double approval. The system enforces these at the file-path level during PR review.
+
+**Separated memory tiers** keep human intent stable. `memory/policies/` contains the identity document (`soul.md`), trading rules, and permission definitions — versioned, human-edited only, never modified autonomously. `memory/findings/` is where the system writes its observations: outcome measurements, correction logs, prompt patterns, and failure modes. These are additive, time-stamped, and subject to 90-day decay. The system learns by accumulating findings; it cannot rewrite its own values.
+
+**Stateless agent invocations** ensure reproducibility. Each analysis task assembles a run folder with context files, invokes the configured CLI runtime, and reads outputs back. No state carries between invocations — all context must be explicitly assembled, which makes every decision auditable and every run reproducible.
+
+**Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
+
+### From Autoresearch: an immutable objective function and a separable inner loop
+
+The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimisation loop that runs without the LLM in the critical path.
+
+**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalised metrics with fixed weights derived from `soul.md` priorities: Calmar ratio (30%), profit factor (25%), inverse drawdown (25%), and process quality (20%). This function is immutable — it lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured. Every downstream decision in the learning system — cycle verdicts, retrospective synthesis, experiment acceptance, calibration tracking — flows from this one number.
+
+**The parameter search inner loop** (`skills/parameter_searcher.py`) runs neighbourhood exploration without any LLM involvement. When the LLM proposes a parameter change, the inner loop takes over: it builds a candidate grid around the proposed value, backtests each candidate, tests robustness across regimes and cost multipliers, and ranks results by a composite score aligned with the ground truth formula. The best value often differs from what the LLM suggested — the LLM identifies *what* to change, the inner loop finds the *optimal value*. Results route to APPROVE, EXPERIMENT, or DISCARD based on improvement thresholds and robustness scores.
+
+**The weekly learning cycle** (`skills/learning_cycle.py`) ties both architectures together. Each week it computes ground truth snapshots at the start and end of the period, records the delta in the learning ledger, and routes pending suggestions by type — parameter changes to the inner loop, structural changes to the experiment tracker. The composite score trajectory is injected into every subsequent LLM prompt, so the agent always sees whether its suggestions are actually improving performance against the immutable metric.
+
+### How they reinforce each other
+
+The two architectures are not just additive — they create a system where each compensates for the other's weakness.
+
+OpenClaw's permission gates prevent the failure mode Autoresearch is vulnerable to: an optimisation loop that games its own metric. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot drift its objective to something easier to optimise.
+
+Autoresearch's inner loop prevents the failure mode OpenClaw is vulnerable to: an LLM that confidently proposes changes without empirical validation. Every parameter suggestion gets backtested, robustness-tested, and cost-sensitivity-tested before a human even sees it. The approval card a human receives includes the full exploration summary — not just the LLM's reasoning, but the inner loop's empirical evidence.
+
+The feedback loop closes through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, and prediction accuracy into every prompt. The LLM is told what the inner loop already explored (so it does not re-propose tested values), what past suggestions actually achieved (so it calibrates confidence), and which suggestion categories have poor track records (so those get automatically stripped). The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
+
+### Matching the change type to the right tool
+
+The learning system routes each type of improvement to whichever tool handles it best. Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimisation problems with a clear objective function. These belong to the autonomous inner loop, which can explore a candidate grid, backtest every value, and rank results by composite score without any LLM involvement. The inner loop is faster, cheaper, and more rigorous than asking a language model to guess the right number.
+
+Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading performance data in context, forming hypotheses about *why* something is failing, and proposing changes that may not have an obvious metric to optimise against. These belong to the LLM, which receives the full context package (ground truth trends, outcome history, regime analysis, root cause distributions) and reasons about what to change and why. Structural proposals always surface in reports for human review — they are never auto-implemented, because the right structural change depends on judgment that neither a grid search nor a language model should make alone.
+
 ## Architecture
 
 ```
@@ -244,48 +286,6 @@ pytest tests/
 pytest tests/ -k "integration"
 pytest tests/test_handlers.py -v
 ```
-
-## Design Philosophy: OpenClaw Governance + Autoresearch Optimisation
-
-This system combines two reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
-
-### From OpenClaw: human boundaries and memory integrity
-
-The core insight from OpenClaw is that an autonomous system needs clear, enforceable boundaries between what it can change and what only a human can change.
-
-**Three-tier permission gates** (`memory/policies/v1/permission_gates.md`) classify every action the system can take. Routine data processing runs unattended. Strategy and parameter changes require explicit Telegram approval. Critical paths — the ground truth evaluation function, deployment scripts, kill switches, and the policy documents themselves — require double approval. The system enforces these at the file-path level during PR review.
-
-**Separated memory tiers** keep human intent stable. `memory/policies/` contains the identity document (`soul.md`), trading rules, and permission definitions — versioned, human-edited only, never modified autonomously. `memory/findings/` is where the system writes its observations: outcome measurements, correction logs, prompt patterns, and failure modes. These are additive, time-stamped, and subject to 90-day decay. The system learns by accumulating findings; it cannot rewrite its own values.
-
-**Stateless agent invocations** ensure reproducibility. Each analysis task assembles a run folder with context files, invokes the configured CLI runtime, and reads outputs back. No state carries between invocations — all context must be explicitly assembled, which makes every decision auditable and every run reproducible.
-
-**Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
-
-### From Autoresearch: an immutable objective function and a separable inner loop
-
-The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimisation loop that runs without the LLM in the critical path.
-
-**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalised metrics with fixed weights derived from `soul.md` priorities: Calmar ratio (30%), profit factor (25%), inverse drawdown (25%), and process quality (20%). This function is immutable — it lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured. Every downstream decision in the learning system — cycle verdicts, retrospective synthesis, experiment acceptance, calibration tracking — flows from this one number.
-
-**The parameter search inner loop** (`skills/parameter_searcher.py`) runs neighbourhood exploration without any LLM involvement. When the LLM proposes a parameter change, the inner loop takes over: it builds a candidate grid around the proposed value, backtests each candidate, tests robustness across regimes and cost multipliers, and ranks results by a composite score aligned with the ground truth formula. The best value often differs from what the LLM suggested — the LLM identifies *what* to change, the inner loop finds the *optimal value*. Results route to APPROVE, EXPERIMENT, or DISCARD based on improvement thresholds and robustness scores.
-
-**The weekly learning cycle** (`skills/learning_cycle.py`) ties both architectures together. Each week it computes ground truth snapshots at the start and end of the period, records the delta in the learning ledger, and routes pending suggestions by type — parameter changes to the inner loop, structural changes to the experiment tracker. The composite score trajectory is injected into every subsequent LLM prompt, so the agent always sees whether its suggestions are actually improving performance against the immutable metric.
-
-### How they reinforce each other
-
-The two architectures are not just additive — they create a system where each compensates for the other's weakness.
-
-OpenClaw's permission gates prevent the failure mode Autoresearch is vulnerable to: an optimisation loop that games its own metric. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot drift its objective to something easier to optimise.
-
-Autoresearch's inner loop prevents the failure mode OpenClaw is vulnerable to: an LLM that confidently proposes changes without empirical validation. Every parameter suggestion gets backtested, robustness-tested, and cost-sensitivity-tested before a human even sees it. The approval card a human receives includes the full exploration summary — not just the LLM's reasoning, but the inner loop's empirical evidence.
-
-The feedback loop closes through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, and prediction accuracy into every prompt. The LLM is told what the inner loop already explored (so it does not re-propose tested values), what past suggestions actually achieved (so it calibrates confidence), and which suggestion categories have poor track records (so those get automatically stripped). The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
-
-### Matching the change type to the right tool
-
-The learning system routes each type of improvement to whichever tool handles it best. Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimisation problems with a clear objective function. These belong to the autonomous inner loop, which can explore a candidate grid, backtest every value, and rank results by composite score without any LLM involvement. The inner loop is faster, cheaper, and more rigorous than asking a language model to guess the right number.
-
-Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading performance data in context, forming hypotheses about *why* something is failing, and proposing changes that may not have an obvious metric to optimise against. These belong to the LLM, which receives the full context package (ground truth trends, outcome history, regime analysis, root cause distributions) and reasons about what to change and why. Structural proposals always surface in reports for human review — they are never auto-implemented, because the right structural change depends on judgment that neither a grid search nor a language model should make alone.
 
 ## Tech Stack
 
