@@ -101,9 +101,11 @@ class MonitoringCheck:
             bot_id = hb_file.stem
             try:
                 last_seen = datetime.fromisoformat(hb_file.read_text().strip())
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
                 age = (now - last_seen).total_seconds()
                 results.append((bot_id, last_seen, age, None))
-            except (ValueError, OSError) as e:
+            except (ValueError, OSError, TypeError) as e:
                 results.append((bot_id, None, 0.0, str(e)))
         return results
 

@@ -6,11 +6,11 @@ for statistical significance testing.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import statistics
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,7 +32,7 @@ class ExperimentManager:
         self._results_path = findings_dir / "experiment_results.jsonl"
         self._variant_data_dir = findings_dir / "experiment_data"
         self._min_trades = min_trades
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
 
     def create_experiment(self, config: ExperimentConfig) -> ExperimentConfig:
         """Persist a new experiment. Deduplicates by experiment_id."""
@@ -457,25 +457,28 @@ class ExperimentManager:
 
     def _save_all(self, experiments: list[ExperimentConfig]) -> None:
         """Overwrite all experiments to JSONL."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            json.dumps(e.model_dump(mode="json"), default=str)
-            for e in experiments
-        ]
-        self._path.write_text("\n".join(lines) + "\n" if lines else "")
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            lines = [
+                json.dumps(e.model_dump(mode="json"), default=str)
+                for e in experiments
+            ]
+            self._path.write_text("\n".join(lines) + "\n" if lines else "")
 
     def _append_experiment(self, config: ExperimentConfig) -> None:
         """Append a single experiment to JSONL."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a") as f:
-            f.write(
-                json.dumps(config.model_dump(mode="json"), default=str) + "\n"
-            )
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a") as f:
+                f.write(
+                    json.dumps(config.model_dump(mode="json"), default=str) + "\n"
+                )
 
     def _append_result(self, result: ExperimentResult) -> None:
         """Append a result to results JSONL."""
-        self._results_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._results_path.open("a") as f:
-            f.write(
-                json.dumps(result.model_dump(mode="json"), default=str) + "\n"
-            )
+        with self._lock:
+            self._results_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._results_path.open("a") as f:
+                f.write(
+                    json.dumps(result.model_dump(mode="json"), default=str) + "\n"
+                )

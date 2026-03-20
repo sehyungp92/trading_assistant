@@ -82,15 +82,17 @@ The system won't re-suggest rejected ideas. Categories with low success rates ge
 
 This system combines two reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
 
-### From OpenClaw: human boundaries and memory integrity
+### From OpenClaw: disposable agents, permanent knowledge
 
-The core insight from OpenClaw is that an autonomous system needs clear, enforceable boundaries between what it can change and what only a human can change.
+The core architectural choice from OpenClaw is that the agent is disposable and the knowledge is permanent. The CLI runtime is a stateless executor — it reads context, runs a skill, writes results, and exits. Everything that compounds value over time — outcome measurements, suggestion histories, forecast calibration, correction logs, prompt patterns — lives in local files and SQLite on your machine: owned, queryable, backed up, inspectable. The agent is the lens; the data is the asset.
+
+This gives you three things concretely. The agent brain is swappable: when a better model arrives or a new provider launches, you swap the executor and everything continues — the skills, the memory, the learning history, the bot configurations. The system already supports four runtime providers (Claude Max, Codex Pro, ZAI, OpenRouter) with automatic fallback chains. Every interaction is auditable: because the agent reads explicit context (memory files, skill prompts, event payloads) and writes explicit outputs (run folder artifacts, JSONL records, parsed analyses), you can trace exactly what the agent saw when it made a particular recommendation. And the scheduler gives you proactive intelligence without infrastructure: APScheduler fires cron jobs for daily analysis, weekly summaries, heartbeat monitoring, and proactive scanning — just scheduled subprocesses on your local machine, not a server or cloud function.
+
+This disposability depends on clear, enforceable boundaries between what the system can change and what only a human can change.
 
 **Three-tier permission gates** (`memory/policies/v1/permission_gates.md`) classify every action the system can take. Routine data processing runs unattended. Strategy and parameter changes require explicit Telegram approval. Critical paths — the ground truth evaluation function, deployment scripts, kill switches, and the policy documents themselves — require double approval. The system enforces these at the file-path level during PR review.
 
 **Separated memory tiers** keep human intent stable. `memory/policies/` contains the identity document (`soul.md`), trading rules, and permission definitions — versioned, human-edited only, never modified autonomously. `memory/findings/` is where the system writes its observations: outcome measurements, correction logs, prompt patterns, and failure modes. These are additive, time-stamped, and subject to 90-day decay. The system learns by accumulating findings; it cannot rewrite its own values.
-
-**Stateless agent invocations** ensure reproducibility. Each analysis task assembles a run folder with context files, invokes the configured CLI runtime, and reads outputs back. No state carries between invocations — all context must be explicitly assembled, which makes every decision auditable and every run reproducible.
 
 **Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
 

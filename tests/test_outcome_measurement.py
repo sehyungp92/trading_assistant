@@ -539,15 +539,17 @@ class TestSuggestionScorerQualityFiltering:
         findings = tmp_path / "findings"
         findings.mkdir()
 
-        # Suggestion
+        # Three suggestions, each with one outcome at a different quality level
         _write_suggestion(findings, "sug-1", "bot_a", "deployed")
+        _write_suggestion(findings, "sug-2", "bot_a", "deployed")
+        _write_suggestion(findings, "sug-3", "bot_a", "deployed")
 
         # High quality outcome (positive) — should be counted
         _write_outcome(findings, "sug-1", measurement_quality="high", verdict="positive")
         # Low quality outcome (positive) — should be excluded
-        _write_outcome(findings, "sug-1", measurement_quality="low", verdict="positive")
+        _write_outcome(findings, "sug-2", measurement_quality="low", verdict="positive")
         # Insufficient quality outcome — should be excluded
-        _write_outcome(findings, "sug-1", measurement_quality="insufficient", verdict="positive")
+        _write_outcome(findings, "sug-3", measurement_quality="insufficient", verdict="positive")
 
         scorer = SuggestionScorer(findings)
         scorecard = scorer.compute_scorecard()
@@ -560,8 +562,9 @@ class TestSuggestionScorerQualityFiltering:
         findings.mkdir()
 
         _write_suggestion(findings, "sug-1", "bot_a", "deployed")
+        _write_suggestion(findings, "sug-2", "bot_a", "deployed")
         _write_outcome(findings, "sug-1", measurement_quality="medium", verdict="positive")
-        _write_outcome(findings, "sug-1", measurement_quality="medium", verdict="negative")
+        _write_outcome(findings, "sug-2", measurement_quality="medium", verdict="negative")
 
         scorer = SuggestionScorer(findings)
         scorecard = scorer.compute_scorecard()
@@ -577,8 +580,9 @@ class TestSuggestionScorerVerdictField:
         findings.mkdir()
 
         _write_suggestion(findings, "sug-1", "bot_a", "deployed")
+        _write_suggestion(findings, "sug-2", "bot_a", "deployed")
         _write_outcome(findings, "sug-1", measurement_quality="high", verdict="positive")
-        _write_outcome(findings, "sug-1", measurement_quality="high", verdict="negative")
+        _write_outcome(findings, "sug-2", measurement_quality="high", verdict="negative")
 
         scorer = SuggestionScorer(findings)
         scorecard = scorer.compute_scorecard()
@@ -590,9 +594,10 @@ class TestSuggestionScorerVerdictField:
         findings.mkdir()
 
         _write_suggestion(findings, "sug-1", "bot_a", "deployed")
+        _write_suggestion(findings, "sug-2", "bot_a", "deployed")
         # No verdict field, falls back to pnl_delta_7d
         _write_outcome(findings, "sug-1", measurement_quality="high", pnl_delta_7d=100.0)
-        _write_outcome(findings, "sug-1", measurement_quality="high", pnl_delta_7d=-50.0)
+        _write_outcome(findings, "sug-2", measurement_quality="high", pnl_delta_7d=-50.0)
 
         scorer = SuggestionScorer(findings)
         scorecard = scorer.compute_scorecard()

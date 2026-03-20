@@ -75,6 +75,46 @@ class TestEventQueue:
         pending = await queue.peek(limit=3)
         assert len(pending) == 3
 
+    async def test_claim_returns_and_marks_processing(self, queue: EventQueue):
+        """claim() should return events and mark them as 'processing'."""
+        await queue.enqueue(_make_event(event_id="c1"))
+        await queue.enqueue(_make_event(event_id="c2"))
+        claimed = await queue.claim(limit=10)
+        assert len(claimed) == 2
+        assert all(c["status"] == "processing" for c in claimed)
+        # No more pending
+        assert await queue.count_pending() == 0
+
+    async def test_claim_is_exclusive(self, queue: EventQueue):
+        """Two sequential claims should get disjoint sets."""
+        for i in range(4):
+            await queue.enqueue(_make_event(event_id=f"ex{i}"))
+        first = await queue.claim(limit=2)
+        second = await queue.claim(limit=2)
+        first_ids = {e["event_id"] for e in first}
+        second_ids = {e["event_id"] for e in second}
+        assert len(first_ids) == 2
+        assert len(second_ids) == 2
+        assert first_ids.isdisjoint(second_ids)
+
+    async def test_claim_respects_limit(self, queue: EventQueue):
+        """claim() should respect the limit parameter."""
+        for i in range(5):
+            await queue.enqueue(_make_event(event_id=f"lim{i}"))
+        claimed = await queue.claim(limit=2)
+        assert len(claimed) == 2
+        # 3 still pending
+        assert await queue.count_pending() == 3
+
+    async def test_claimed_events_invisible_to_peek(self, queue: EventQueue):
+        """After claim(), those events should not appear in peek()."""
+        await queue.enqueue(_make_event(event_id="vis1"))
+        await queue.enqueue(_make_event(event_id="vis2"))
+        await queue.claim(limit=1)
+        pending = await queue.peek(limit=10)
+        assert len(pending) == 1
+        assert pending[0]["event_id"] == "vis2"
+
     async def test_watermark_tracking(self, queue: EventQueue):
         """Watermark tracks the latest acked event for a bot."""
         await queue.enqueue(_make_event(event_id="w1", bot_id="bot1"))

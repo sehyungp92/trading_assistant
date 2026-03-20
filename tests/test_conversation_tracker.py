@@ -64,3 +64,13 @@ class TestConversationTracker:
         assert removed == 1
         assert tracker.get_chain(c1.chain_id) is None
         assert tracker.get_chain(c2.chain_id) is not None
+
+    def test_begin_chain_triggers_cleanup(self):
+        """begin_chain() should lazily clean up expired chains."""
+        tracker = ConversationTracker(timeout_minutes=30)
+        c1 = tracker.begin_chain()
+        c1.started_at = datetime.now(timezone.utc) - timedelta(minutes=31)
+        # begin_chain should trigger cleanup of c1
+        c2 = tracker.begin_chain()
+        assert tracker.get_chain(c1.chain_id) is None
+        assert tracker.get_chain(c2.chain_id) is not None

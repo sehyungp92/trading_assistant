@@ -38,7 +38,7 @@ def test_worker_accepts_conversation_tracker():
 @pytest.mark.asyncio
 async def test_new_events_begin_a_chain():
     queue = AsyncMock()
-    queue.peek = AsyncMock(return_value=[
+    queue.claim = AsyncMock(return_value=[
         {"event_id": "ev1", "event_type": "trade", "bot_id": "b1", "payload": "{}"},
     ])
     queue.ack = AsyncMock()
@@ -60,7 +60,7 @@ async def test_new_events_begin_a_chain():
 @pytest.mark.asyncio
 async def test_chain_id_populated_on_action():
     queue = AsyncMock()
-    queue.peek = AsyncMock(return_value=[
+    queue.claim = AsyncMock(return_value=[
         {"event_id": "ev1", "event_type": "trade", "bot_id": "b1", "payload": "{}"},
     ])
     queue.ack = AsyncMock()
@@ -120,7 +120,7 @@ async def test_loop_detected_skips_processing():
     chain_id = chain.chain_id
 
     queue = AsyncMock()
-    queue.peek = AsyncMock(return_value=[
+    queue.claim = AsyncMock(return_value=[
         {"event_id": "ev1", "event_type": "trade", "bot_id": "b1",
          "payload": "{}", "chain_id": chain_id},
     ])

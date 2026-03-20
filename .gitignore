@@ -14,6 +14,7 @@ venv/
 .agents/
 .assistant/
 .claude/
+.claudeignore
 .ruff_cache/
 docs/
 runs/

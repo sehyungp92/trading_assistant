@@ -78,8 +78,31 @@ class EventQueue:
         await self.db.commit()
         return BatchResult(inserted=inserted, duplicates=len(events) - inserted)
 
+    async def claim(self, limit: int = 10) -> list[dict]:
+        """Atomically claim pending events for processing.
+
+        Moves events from 'pending' to 'processing' and sets processed_at.
+        Claimed events won't be returned by subsequent claim() or peek() calls.
+        Use this instead of peek() when processing events to prevent duplicates.
+        """
+        cursor = await self.db.execute(
+            """UPDATE events
+               SET status = 'processing', processed_at = datetime('now')
+               WHERE event_id IN (
+                   SELECT event_id FROM events
+                   WHERE status = 'pending'
+                   ORDER BY created_at ASC
+                   LIMIT ?
+               )
+               RETURNING *""",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await self.db.commit()
+        return [dict(row) for row in rows]
+
     async def peek(self, limit: int = 10) -> list[dict]:
-        """Get pending events without changing their status."""
+        """Get pending events without changing their status (display-only)."""
         cursor = await self.db.execute(
             "SELECT * FROM events WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
             (limit,),

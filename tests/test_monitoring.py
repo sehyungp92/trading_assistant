@@ -68,6 +68,19 @@ class TestMonitoringLoop:
         alerts = check.check_heartbeats()
         assert len(alerts) == 0
 
+    def test_handles_naive_heartbeat_timestamp(self, heartbeat_dir: Path):
+        """Naive datetime (no tzinfo) should not crash the heartbeat check."""
+        (heartbeat_dir / "bot_naive.heartbeat").write_text("2026-03-01T12:00:00")
+        check = MonitoringCheck(
+            heartbeat_dir=str(heartbeat_dir),
+            heartbeat_max_age_seconds=7200,
+        )
+        alerts = check.check_heartbeats()
+        # Should produce a stale alert, not crash
+        assert len(alerts) == 1
+        assert alerts[0].severity == AlertSeverity.CRITICAL
+        assert "bot_naive" in alerts[0].message
+
     def test_detects_missing_run_outputs(self, tmp_path: Path):
         run_dir = tmp_path / "runs" / "2026-03-01" / "daily-report"
         run_dir.mkdir(parents=True)

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from comms.base_channel import BaseChannel
+from comms.renderer import MessageRenderer, PlainTextRenderer
 from schemas.notifications import (
     NotificationChannel,
     NotificationPayload,
@@ -41,6 +42,8 @@ class NotificationDispatcher:
 
     def __init__(self) -> None:
         self._adapters: dict[NotificationChannel, ChannelAdapter] = {}
+        self._renderers: dict[NotificationChannel, MessageRenderer] = {}
+        self._fallback_renderer: PlainTextRenderer = PlainTextRenderer()
 
     @property
     def adapters(self) -> dict[NotificationChannel, ChannelAdapter]:
@@ -48,6 +51,10 @@ class NotificationDispatcher:
 
     def register_adapter(self, channel: NotificationChannel, adapter: ChannelAdapter) -> None:
         self._adapters[channel] = adapter
+
+    def register_renderer(self, channel: NotificationChannel, renderer: MessageRenderer) -> None:
+        """Register a renderer for a specific channel."""
+        self._renderers[channel] = renderer
 
     def get_channel_health(self) -> list[ChannelHealth]:
         """Report health status for all registered channels."""
@@ -85,7 +92,14 @@ class NotificationDispatcher:
                 continue
             try:
                 if isinstance(adapter, BaseChannel):
-                    await adapter.send_with_retry(payload, cfg)
+                    renderer = self._renderers.get(cfg.channel, self._fallback_renderer)
+                    rendered = renderer.render(payload)
+                    if cfg.channel == NotificationChannel.EMAIL:
+                        await adapter.send_with_retry(
+                            cfg.chat_id, payload.title, rendered,
+                        )
+                    else:
+                        await adapter.send_with_retry(rendered)
                 else:
                     await adapter.send(payload, cfg)
                 results.append(DeliveryResult(channel=cfg.channel, success=True))

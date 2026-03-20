@@ -2136,7 +2136,13 @@ class Handlers:
         )
         hour_utc = datetime.now(timezone.utc).hour
         try:
-            await self._dispatcher.dispatch(payload, self._notification_prefs, hour_utc)
+            results = await self._dispatcher.dispatch(payload, self._notification_prefs, hour_utc)
+            for r in results:
+                if not r.success:
+                    logger.warning(
+                        "Notification delivery failed on %s: %s",
+                        r.channel.value, r.error,
+                    )
         except Exception:
             logger.exception("Notification dispatch failed for %s", notification_type)
 

@@ -30,7 +30,7 @@ class TestWorkerNotificationDispatch:
     @pytest.fixture
     def mock_queue(self):
         q = AsyncMock()
-        q.peek = AsyncMock(return_value=[])
+        q.claim = AsyncMock(return_value=[])
         q.ack = AsyncMock()
         return q
 
@@ -50,7 +50,7 @@ class TestWorkerNotificationDispatch:
     async def test_notification_action_calls_on_notification(self, worker, mock_queue):
         handler = AsyncMock()
         worker.on_notification = handler
-        mock_queue.peek = AsyncMock(return_value=[{
+        mock_queue.claim = AsyncMock(return_value=[{
             "event_type": "notification_trigger",
             "event_id": "notif-001",
             "bot_id": "system",
@@ -61,7 +61,7 @@ class TestWorkerNotificationDispatch:
 
     @pytest.mark.asyncio
     async def test_notification_without_handler_logs(self, worker, mock_queue):
-        mock_queue.peek = AsyncMock(return_value=[{
+        mock_queue.claim = AsyncMock(return_value=[{
             "event_type": "notification_trigger",
             "event_id": "notif-001",
             "bot_id": "system",

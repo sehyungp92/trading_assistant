@@ -150,7 +150,7 @@ class TestBrainToWorkerNotificationFlow:
         assert len(actions) == 1
         assert actions[0].type == ActionType.SEND_NOTIFICATION
         mock_queue = AsyncMock()
-        mock_queue.peek = AsyncMock(return_value=[event])
+        mock_queue.claim = AsyncMock(return_value=[event])
         mock_queue.ack = AsyncMock()
         mock_registry = AsyncMock()
         worker = Worker(queue=mock_queue, registry=mock_registry, brain=brain)

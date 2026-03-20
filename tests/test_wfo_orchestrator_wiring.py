@@ -32,7 +32,7 @@ class TestWorkerWFODispatch:
         from orchestrator.task_registry import TaskRegistry
 
         queue = AsyncMock(spec=EventQueue)
-        queue.peek.return_value = [
+        queue.claim.return_value = [
             {
                 "event_id": "wfo-bot2-2026-03-01",
                 "event_type": "wfo_trigger",

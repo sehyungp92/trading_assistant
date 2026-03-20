@@ -55,8 +55,10 @@ class SuggestionScorer:
                 id_to_info[sid] = (bot_id, category)
 
         # Group outcomes by (bot_id, category), filtering by measurement quality
+        # then deduplicating by suggestion_id within each group (last-write-wins)
+        # to prevent double-counting from legacy dual-write patterns.
         _HIGH_QUALITY = {"high", "medium"}
-        groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        raw_groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
         for outcome in outcomes:
             # Only count outcomes with high or medium measurement quality
             quality = outcome.get("measurement_quality", "high")  # legacy defaults to high
@@ -65,7 +67,10 @@ class SuggestionScorer:
             sid = outcome.get("suggestion_id", "")
             info = id_to_info.get(sid)
             if info:
-                groups[info].append(outcome)
+                raw_groups[info][sid] = outcome  # last-write-wins per suggestion_id
+        groups: dict[tuple[str, str], list[dict]] = {
+            k: list(v.values()) for k, v in raw_groups.items()
+        }
 
         scores: list[CategoryScore] = []
         for (bot_id, category), group_outcomes in groups.items():

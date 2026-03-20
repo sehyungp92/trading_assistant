@@ -27,8 +27,6 @@ class VPSReceiver:
         local_queue: EventQueue,
         watermark_key: str = "relay",
         timeout: float = 30.0,
-        min_poll_seconds: int = 10,
-        max_poll_seconds: int = 300,
         *,
         api_key: str = "",
         latency_tracker=None,
@@ -42,9 +40,6 @@ class VPSReceiver:
         self._client_factory = _client_factory
         self._latency_tracker = latency_tracker
         self._consecutive_failures: int = 0
-        self._min_poll = min_poll_seconds
-        self._max_poll = max_poll_seconds
-        self.current_poll_interval: int = max_poll_seconds
 
     def _make_client(self) -> httpx.AsyncClient:
         if self._client_factory:
@@ -53,14 +48,6 @@ class VPSReceiver:
         if self._api_key:
             headers["X-Api-Key"] = self._api_key
         return httpx.AsyncClient(base_url=self._relay_url, timeout=self._timeout, headers=headers)
-
-    def adapt_interval(self, events_received: int) -> None:
-        """Adjust poll interval based on recent activity."""
-        if events_received > 0:
-            self.current_poll_interval = self._min_poll
-        else:
-            # Exponential backoff: double interval until max
-            self.current_poll_interval = min(self.current_poll_interval * 2, self._max_poll)
 
     async def pull_and_store(self, limit: int = 100) -> int:
         """Pull new events from relay, store locally, ack on relay. Returns count pulled."""
@@ -109,7 +96,6 @@ class VPSReceiver:
         try:
             pulled = await self.pull_and_store()
             self._consecutive_failures = 0
-            self.adapt_interval(events_received=pulled)
             return pulled
         except Exception as exc:
             self._consecutive_failures += 1

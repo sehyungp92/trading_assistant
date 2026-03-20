@@ -78,6 +78,12 @@ class TestListSessions:
         assert len(sessions) == 1
         assert sessions[0]["agent_type"] == "daily_analysis"
 
+    def test_list_sessions_fresh_install(self, tmp_path):
+        """list_sessions should return empty list when base_dir doesn't exist."""
+        store = SessionStore(base_dir=tmp_path / "nonexistent" / "sessions")
+        sessions = store.list_sessions()
+        assert sessions == []
+
     def test_includes_optional_runtime_metadata(self, store):
         store.record_invocation(
             "s1",

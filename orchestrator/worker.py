@@ -62,7 +62,7 @@ class Worker:
 
     async def process_batch(self, limit: int = 10) -> int:
         """Process up to `limit` pending events. Returns count processed."""
-        events = await self._queue.peek(limit=limit)
+        events = await self._queue.claim(limit=limit)
         if not events:
             return 0
 

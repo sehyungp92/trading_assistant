@@ -152,6 +152,9 @@ class SessionStore:
         """List available sessions. Returns summary dicts."""
         results = []
 
+        if not self._base_dir.exists():
+            return results
+
         if agent_type and date:
             search_dirs = [self._base_dir / agent_type / date]
         elif agent_type:

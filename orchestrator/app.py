@@ -52,6 +52,7 @@ from schemas.agent_preferences import (
     AgentWorkflow,
 )
 from schemas.notifications import (
+    ChannelConfig,
     NotificationChannel,
     NotificationPayload,
     NotificationPreferences,
@@ -198,28 +199,33 @@ def _register_channel_adapters(
 
     if config.telegram_bot_token:
         from comms.telegram_bot import TelegramBotAdapter, TelegramBotConfig
+        from comms.telegram_renderer import TelegramRenderer
 
         telegram = TelegramBotAdapter(config=TelegramBotConfig(
             token=config.telegram_bot_token,
             chat_id=config.telegram_chat_id,
         ))
         dispatcher.register_adapter(NotificationChannel.TELEGRAM, telegram)
+        dispatcher.register_renderer(NotificationChannel.TELEGRAM, TelegramRenderer())
         adapters.append(telegram)
         logger.info("Telegram adapter registered (chat_id=%s)", config.telegram_chat_id)
 
     if config.discord_bot_token:
         from comms.discord_bot import DiscordBotAdapter, DiscordBotConfig
+        from comms.renderer import PlainTextRenderer
 
         discord_adapter = DiscordBotAdapter(config=DiscordBotConfig(
             token=config.discord_bot_token,
             channel_id=int(config.discord_channel_id) if config.discord_channel_id else 0,
         ))
         dispatcher.register_adapter(NotificationChannel.DISCORD, discord_adapter)
+        dispatcher.register_renderer(NotificationChannel.DISCORD, PlainTextRenderer())
         adapters.append(discord_adapter)
         logger.info("Discord adapter registered (channel_id=%s)", config.discord_channel_id)
 
     if config.smtp_host and config.smtp_user:
         from comms.email_adapter import EmailAdapter, EmailConfig
+        from comms.renderer import PlainTextRenderer
 
         email = EmailAdapter(config=EmailConfig(
             smtp_host=config.smtp_host,
@@ -229,6 +235,7 @@ def _register_channel_adapters(
             from_address=config.email_from,
         ))
         dispatcher.register_adapter(NotificationChannel.EMAIL, email)
+        dispatcher.register_renderer(NotificationChannel.EMAIL, PlainTextRenderer())
         adapters.append(email)
         logger.info("Email adapter registered (smtp=%s)", config.smtp_host)
 
@@ -338,6 +345,20 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     # Register channel adapters from config
     channel_adapters = _register_channel_adapters(config, dispatcher)
+
+    # Auto-seed notification preferences from registered adapters if empty
+    if not notification_prefs.channels and dispatcher.adapters:
+        seeded_channels = []
+        for channel in dispatcher.adapters:
+            chat_id = ""
+            if channel == NotificationChannel.TELEGRAM:
+                chat_id = config.telegram_chat_id or ""
+            elif channel == NotificationChannel.EMAIL:
+                chat_id = config.email_to or ""
+            seeded_channels.append(ChannelConfig(channel=channel, enabled=True, chat_id=chat_id))
+        notification_prefs = NotificationPreferences(channels=seeded_channels)
+        _save_notification_prefs(notification_prefs, prefs_path)
+        logger.info("Auto-seeded notification preferences from %d registered adapters", len(seeded_channels))
 
     # Extract Telegram adapter reference (needed for autonomous pipeline)
     telegram_adapter = None
@@ -934,17 +955,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     implemented_date=anchor_date,
                 )
                 if result:
-                    from schemas.suggestion_tracking import SuggestionOutcome
-                    outcome = SuggestionOutcome(
-                        suggestion_id=sid,
-                        implemented_date=anchor_date,
-                        pnl_delta_7d=result.pnl_delta,
-                        win_rate_delta_7d=result.win_rate_after - result.win_rate_before,
-                        drawdown_delta_7d=result.drawdown_after - result.drawdown_before,
-                    )
-                    suggestion_tracker.record_outcome(outcome)
-
-                    # Also persist the full enhanced measurement to outcomes.jsonl
+                    # Persist the full enhanced measurement to outcomes.jsonl
                     enhanced_path = db_path / "memory" / "findings" / "outcomes.jsonl"
                     enhanced_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(enhanced_path, "a", encoding="utf-8") as f:

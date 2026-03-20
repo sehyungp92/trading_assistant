@@ -6,11 +6,11 @@ monitor window (24h) -> regression check -> success or rollback PR.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
 import statistics
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,7 +42,7 @@ class DeploymentMonitor:
         self._config_registry = config_registry
         self._event_stream = event_stream
         self._file_change_generator = file_change_generator
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
 
     def create_deployment(
         self,
@@ -474,23 +474,30 @@ class DeploymentMonitor:
 
     def _append_record(self, record: DeploymentRecord) -> None:
         """Append a single record to JSONL."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a") as f:
-            f.write(json.dumps(record.model_dump(), default=str) + "\n")
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a") as f:
+                f.write(json.dumps(record.model_dump(), default=str) + "\n")
 
     def _update_record(self, record: DeploymentRecord) -> None:
         """Update an existing record in JSONL (full rewrite)."""
-        records = self._load_all()
-        updated = []
-        for r in records:
-            if r.deployment_id == record.deployment_id:
-                updated.append(record)
-            else:
-                updated.append(r)
-        self._save_all(updated)
+        with self._lock:
+            records = self._load_all()
+            updated = []
+            for r in records:
+                if r.deployment_id == record.deployment_id:
+                    updated.append(record)
+                else:
+                    updated.append(r)
+            self._save_all_unlocked(updated)
 
     def _save_all(self, records: list[DeploymentRecord]) -> None:
-        """Overwrite all records to JSONL."""
+        """Overwrite all records to JSONL (acquires lock)."""
+        with self._lock:
+            self._save_all_unlocked(records)
+
+    def _save_all_unlocked(self, records: list[DeploymentRecord]) -> None:
+        """Overwrite all records to JSONL (caller must hold lock)."""
         from skills._atomic_write import atomic_rewrite_jsonl
 
         atomic_rewrite_jsonl(self._path, records)

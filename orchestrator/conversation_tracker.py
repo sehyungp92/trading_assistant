@@ -28,6 +28,7 @@ class ConversationTracker:
 
     def begin_chain(self, event_id: str = "") -> ConversationChain:
         """Start a new conversation chain."""
+        self.cleanup_expired()
         chain_id = f"chain-{uuid.uuid4().hex[:8]}"
         chain = ConversationChain(chain_id=chain_id)
         if event_id:

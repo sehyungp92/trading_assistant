@@ -6,9 +6,9 @@ Same persistence pattern as SuggestionTracker.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -22,77 +22,81 @@ class ApprovalTracker:
 
     def __init__(self, storage_path: Path) -> None:
         self._path = Path(storage_path)
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()
 
     def create_request(self, request: ApprovalRequest) -> ApprovalRequest:
         """Persist a new approval request. Deduplicates by request_id."""
-        existing = self._load_all()
-        existing_ids = {r.request_id for r in existing}
-        if request.request_id in existing_ids:
+        with self._lock:
+            existing = self._load_all()
+            existing_ids = {r.request_id for r in existing}
+            if request.request_id in existing_ids:
+                return request
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(request.model_dump(mode="json"), default=str) + "\n")
             return request
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(request.model_dump(mode="json"), default=str) + "\n")
-        return request
 
     def approve(self, request_id: str, resolved_by: str = "telegram") -> ApprovalRequest:
         """Transition a PENDING request to APPROVED."""
-        requests = self._load_all()
-        target = None
-        for r in requests:
-            if r.request_id == request_id:
-                target = r
-                break
-        if target is None:
-            raise ValueError(f"Request {request_id} not found")
-        if target.status != ApprovalStatus.PENDING:
-            raise ValueError(f"Request {request_id} is {target.status.value}, not PENDING")
-        if (
-            target.risk_tier == RepoRiskTier.REQUIRES_DOUBLE_APPROVAL
-            and target.approval_count == 0
-        ):
-            target.approval_count = 1
+        with self._lock:
+            requests = self._load_all()
+            target = None
+            for r in requests:
+                if r.request_id == request_id:
+                    target = r
+                    break
+            if target is None:
+                raise ValueError(f"Request {request_id} not found")
+            if target.status != ApprovalStatus.PENDING:
+                raise ValueError(f"Request {request_id} is {target.status.value}, not PENDING")
+            if (
+                target.risk_tier == RepoRiskTier.REQUIRES_DOUBLE_APPROVAL
+                and target.approval_count == 0
+            ):
+                target.approval_count = 1
+                self._save_all(requests)
+                return target
+            target.approval_count += 1
+            target.status = ApprovalStatus.APPROVED
+            target.resolved_at = datetime.now(timezone.utc)
+            target.resolved_by = resolved_by
             self._save_all(requests)
             return target
-        target.approval_count += 1
-        target.status = ApprovalStatus.APPROVED
-        target.resolved_at = datetime.now(timezone.utc)
-        target.resolved_by = resolved_by
-        self._save_all(requests)
-        return target
 
     def reject(self, request_id: str, reason: str = "", resolved_by: str = "telegram") -> ApprovalRequest:
         """Transition a PENDING request to REJECTED."""
-        requests = self._load_all()
-        target = None
-        for r in requests:
-            if r.request_id == request_id:
-                target = r
-                break
-        if target is None:
-            raise ValueError(f"Request {request_id} not found")
-        if target.status != ApprovalStatus.PENDING:
-            raise ValueError(f"Request {request_id} is {target.status.value}, not PENDING")
-        target.status = ApprovalStatus.REJECTED
-        target.resolved_at = datetime.now(timezone.utc)
-        target.resolved_by = resolved_by
-        target.rejection_reason = reason or "rejected via Telegram"
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            target = None
+            for r in requests:
+                if r.request_id == request_id:
+                    target = r
+                    break
+            if target is None:
+                raise ValueError(f"Request {request_id} not found")
+            if target.status != ApprovalStatus.PENDING:
+                raise ValueError(f"Request {request_id} is {target.status.value}, not PENDING")
+            target.status = ApprovalStatus.REJECTED
+            target.resolved_at = datetime.now(timezone.utc)
+            target.resolved_by = resolved_by
+            target.rejection_reason = reason or "rejected via Telegram"
+            self._save_all(requests)
         return target
 
     def expire_old(self, max_age_days: int = 7) -> list[str]:
         """Expire PENDING requests older than max_age_days. Returns expired IDs."""
-        requests = self._load_all()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-        expired_ids: list[str] = []
-        for r in requests:
-            if r.status == ApprovalStatus.PENDING and r.created_at < cutoff:
-                r.status = ApprovalStatus.EXPIRED
-                r.resolved_at = datetime.now(timezone.utc)
-                expired_ids.append(r.request_id)
-        if expired_ids:
-            self._save_all(requests)
-        return expired_ids
+        with self._lock:
+            requests = self._load_all()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            expired_ids: list[str] = []
+            for r in requests:
+                if r.status == ApprovalStatus.PENDING and r.created_at < cutoff:
+                    r.status = ApprovalStatus.EXPIRED
+                    r.resolved_at = datetime.now(timezone.utc)
+                    expired_ids.append(r.request_id)
+            if expired_ids:
+                self._save_all(requests)
+            return expired_ids
 
     def get_pending(self) -> list[ApprovalRequest]:
         return [r for r in self._load_all() if r.status == ApprovalStatus.PENDING]
@@ -126,12 +130,13 @@ class ApprovalTracker:
         return None
 
     def set_pr_url(self, request_id: str, pr_url: str) -> None:
-        requests = self._load_all()
-        for r in requests:
-            if r.request_id == request_id:
-                r.pr_url = pr_url
-                break
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            for r in requests:
+                if r.request_id == request_id:
+                    r.pr_url = pr_url
+                    break
+            self._save_all(requests)
 
     def set_pr_result(
         self,
@@ -139,42 +144,46 @@ class ApprovalTracker:
         pr_url: str,
         diff_summary: list[str] | None = None,
     ) -> None:
-        requests = self._load_all()
-        for request in requests:
-            if request.request_id == request_id:
-                request.pr_url = pr_url
-                if diff_summary is not None:
-                    request.diff_summary = diff_summary
-                break
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            for request in requests:
+                if request.request_id == request_id:
+                    request.pr_url = pr_url
+                    if diff_summary is not None:
+                        request.diff_summary = diff_summary
+                    break
+            self._save_all(requests)
 
     def set_issue_url(self, request_id: str, issue_url: str) -> None:
-        requests = self._load_all()
-        for request in requests:
-            if request.request_id == request_id:
-                request.issue_url = issue_url
-                break
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            for request in requests:
+                if request.request_id == request_id:
+                    request.issue_url = issue_url
+                    break
+            self._save_all(requests)
 
     def set_message_id(self, request_id: str, message_id: int) -> None:
         """Store the Telegram message_id for later editing."""
-        requests = self._load_all()
-        for r in requests:
-            if r.request_id == request_id:
-                r.message_id = message_id
-                break
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            for r in requests:
+                if r.request_id == request_id:
+                    r.message_id = message_id
+                    break
+            self._save_all(requests)
 
     def revert_to_pending(self, request_id: str) -> None:
         """Revert an APPROVED request back to PENDING (rollback on PR failure)."""
-        requests = self._load_all()
-        for r in requests:
-            if r.request_id == request_id:
-                r.status = ApprovalStatus.PENDING
-                r.resolved_at = None
-                r.resolved_by = None
-                break
-        self._save_all(requests)
+        with self._lock:
+            requests = self._load_all()
+            for r in requests:
+                if r.request_id == request_id:
+                    r.status = ApprovalStatus.PENDING
+                    r.resolved_at = None
+                    r.resolved_by = None
+                    break
+            self._save_all(requests)
 
     def _load_all(self) -> list[ApprovalRequest]:
         if not self._path.exists():

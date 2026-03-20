@@ -8,6 +8,7 @@ Storage: Two JSONL files in store_dir:
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,17 +24,19 @@ class SuggestionTracker:
         self._store_dir = store_dir
         self._suggestions_path = store_dir / "suggestions.jsonl"
         self._outcomes_path = store_dir / "outcomes.jsonl"
+        self._lock = threading.Lock()
 
     def record(self, suggestion: SuggestionRecord) -> bool:
         """Record a suggestion. Returns False if suggestion_id already exists (dedup)."""
-        existing = self.load_all()
-        existing_ids = {s.get("suggestion_id") for s in existing}
-        if suggestion.suggestion_id in existing_ids:
-            return False
-        self._store_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._suggestions_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(suggestion.model_dump(mode="json"), default=str) + "\n")
-        return True
+        with self._lock:
+            existing = self.load_all()
+            existing_ids = {s.get("suggestion_id") for s in existing}
+            if suggestion.suggestion_id in existing_ids:
+                return False
+            self._store_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._suggestions_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(suggestion.model_dump(mode="json"), default=str) + "\n")
+            return True
 
     def reject(self, suggestion_id: str, reason: str = "") -> None:
         self._update_status(suggestion_id, SuggestionStatus.REJECTED, reason=reason)
@@ -92,9 +95,10 @@ class SuggestionTracker:
         self._update_status(suggestion_id, SuggestionStatus.IMPLEMENTED)
 
     def record_outcome(self, outcome: SuggestionOutcome) -> None:
-        self._store_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._outcomes_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(outcome.model_dump(mode="json"), default=str) + "\n")
+        with self._lock:
+            self._store_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._outcomes_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(outcome.model_dump(mode="json"), default=str) + "\n")
 
     def load_all(self) -> list[dict]:
         return self._read_jsonl(self._suggestions_path)
@@ -120,33 +124,34 @@ class SuggestionTracker:
     ) -> None:
         from skills._atomic_write import atomic_rewrite_jsonl
 
-        records = self.load_all()
-        now = datetime.now(timezone.utc).isoformat()
-        for rec in records:
-            if rec["suggestion_id"] == suggestion_id:
-                rec["status"] = status.value
-                if status == SuggestionStatus.ACCEPTED:
-                    rec["accepted_at"] = now
-                elif status == SuggestionStatus.MERGED:
-                    rec["merged_at"] = now
-                elif status == SuggestionStatus.DEPLOYED:
-                    rec["deployed_at"] = now
-                elif status == SuggestionStatus.MEASURED:
-                    rec["measured_at"] = now
-                if reason:
-                    rec["rejection_reason"] = reason
-                if approval_request_id:
-                    rec["approval_request_id"] = approval_request_id
-                if deployment_id:
-                    rec["deployment_id"] = deployment_id
-                if pr_url:
-                    rec["pr_url"] = pr_url
-                if status in {
-                    SuggestionStatus.REJECTED,
-                    SuggestionStatus.MEASURED,
-                }:
-                    rec["resolved_at"] = now
-        atomic_rewrite_jsonl(self._suggestions_path, records)
+        with self._lock:
+            records = self.load_all()
+            now = datetime.now(timezone.utc).isoformat()
+            for rec in records:
+                if rec["suggestion_id"] == suggestion_id:
+                    rec["status"] = status.value
+                    if status == SuggestionStatus.ACCEPTED:
+                        rec["accepted_at"] = now
+                    elif status == SuggestionStatus.MERGED:
+                        rec["merged_at"] = now
+                    elif status == SuggestionStatus.DEPLOYED:
+                        rec["deployed_at"] = now
+                    elif status == SuggestionStatus.MEASURED:
+                        rec["measured_at"] = now
+                    if reason:
+                        rec["rejection_reason"] = reason
+                    if approval_request_id:
+                        rec["approval_request_id"] = approval_request_id
+                    if deployment_id:
+                        rec["deployment_id"] = deployment_id
+                    if pr_url:
+                        rec["pr_url"] = pr_url
+                    if status in {
+                        SuggestionStatus.REJECTED,
+                        SuggestionStatus.MEASURED,
+                    }:
+                        rec["resolved_at"] = now
+            atomic_rewrite_jsonl(self._suggestions_path, records)
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict]:

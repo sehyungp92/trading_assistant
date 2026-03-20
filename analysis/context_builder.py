@@ -146,15 +146,24 @@ class ContextBuilder:
         return rejected
 
     def load_outcome_measurements(self) -> list[dict]:
-        """Load outcome measurements from findings/outcomes.jsonl."""
+        """Load outcome measurements from findings/outcomes.jsonl.
+
+        Deduplicates by suggestion_id (last-write-wins) to prevent
+        double-counting from legacy dual-write patterns.
+        """
         path = self._memory_dir / "findings" / "outcomes.jsonl"
         if not path.exists():
             return []
-        outcomes: list[dict] = []
+        seen: dict[str, dict] = {}
         for line in path.read_text(encoding="utf-8").strip().split("\n"):
             if line.strip():
-                outcomes.append(json.loads(line))
-        return outcomes
+                entry = json.loads(line)
+                sid = entry.get("suggestion_id", "")
+                if sid:
+                    seen[sid] = entry
+                else:
+                    seen[id(entry)] = entry  # type: ignore[assignment]
+        return list(seen.values())
 
     def load_allocation_history(self) -> list[dict]:
         """Load allocation history from findings/allocation_history.jsonl.
