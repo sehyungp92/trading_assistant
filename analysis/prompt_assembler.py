@@ -33,6 +33,16 @@ _CURATED_FILES = [
     "filter_decisions.json",
     "indicator_snapshots.json",
     "orderbook_stats.json",
+    "parameter_changes.json",
+]
+
+# Portfolio-level curated files (loaded from curated/{date}/portfolio/)
+_PORTFOLIO_CURATED_FILES = [
+    "rule_blocks_summary.json",
+    "family_snapshots.json",
+    "concurrent_position_analysis.json",
+    "sector_exposure.json",
+    "portfolio_rolling_metrics.json",
 ]
 
 # Focused instructions that require causal reasoning, not checklist narration.
@@ -79,6 +89,12 @@ the inner loop already explored — focus on structural changes or untested para
 If backtest_reliability data is present, categories marked as unreliable should be
 addressed with structural changes rather than further parameter tuning.
 
+## BLOCKED SUGGESTION PATTERNS
+If validation_patterns data is present, it shows which suggestion categories have
+been repeatedly blocked by the validator over the last 30 days. For categories
+with 3+ blocks, you MUST either: (a) avoid that category, or (b) explicitly
+explain why your proposal differs from what was previously blocked.
+
 ## HYPOTHESIS TRACK RECORD
 If hypothesis_track_record data is present, prioritize hypotheses with positive
 effectiveness scores when making structural proposals. Do NOT propose changes
@@ -89,19 +105,37 @@ If active_experiments data is present, do NOT propose changes that overlap with
 experiments currently in progress — let them complete their observation window.
 Reference experiment status when discussing related metrics.
 
-## CONSTRAINTS
+## STRATEGY CONTEXT
+If strategy_profiles data is present:
+- Each strategy has an archetype (trend_follow, breakout, pullback, etc.) with expected
+  performance ranges in archetype_expectations
+- Distinguish EXPECTED underperformance (strategy in adverse regime) from PROBLEMATIC
+  underperformance (strategy in preferred regime but still losing)
+- Reference coordination_rules when analyzing multi-strategy bots — did coordination
+  signals fire correctly? Did cooldown pairs prevent whipsaws?
+- Check portfolio_risk_config bounds before suggesting parameter changes — never suggest
+  exceeding heat_cap_R or daily_stop_R limits
+
+## CONSTRAINTS (enforced by validator — violations are automatically stripped)
 - Do NOT restate the routine summary — it's already computed above.
 - Do NOT mechanically review every data file — focus only on what the triage flagged.
 - Every suggestion MUST include quantified expected impact (PnL range, drawdown change)
   with evidence base (trade count, time period, statistical significance).
 - Check rejected_suggestions: do NOT re-suggest previously rejected items without new evidence.
-- Check active_suggestions: do NOT contradict DEPLOYED suggestions.
-- Check category_scorecard: categories with win_rate < 30% (n≥5) need exceptional evidence.
-- Suggestions without quantification will be rejected by the validator.
+- Check active_suggestions: do NOT contradict DEPLOYED suggestions — propose revert with evidence.
+- BLOCKED by validator: categories with win_rate < 30% (n>=5) in category_scorecard.
+  Only propose with exceptional new evidence and explicit justification.
+- BLOCKED by validator: structural suggestions with confidence < 0.4.
+- BLOCKED by validator: suggestions without quantified expected impact (quantification required).
+- Prediction calibration: accuracy < 50% → cap confidence at 0.3; > 70% → up to 0.8.
+- outcome_measurements contains only HIGH/MEDIUM quality data. spurious_outcomes
+  (if present) had confounding factors — treat as hypotheses, not evidence.
 
 ## STRUCTURED OUTPUT (REQUIRED)
 At the END of your analysis, emit a structured data block.
-This block is machine-parsed — do NOT omit it.
+CRITICAL: This block is machine-parsed by the learning system. If you omit it,
+your suggestions and predictions are LOST and cannot improve future performance.
+Always emit it, even if arrays are empty.
 <!-- STRUCTURED_OUTPUT
 {{
   "predictions": [
@@ -136,6 +170,7 @@ class DailyPromptAssembler:
         memory_dir: Path,
         corrections_lookback_days: int = 30,
         bot_configs: dict | None = None,
+        strategy_registry=None,
     ) -> None:
         self.date = date
         self.bots = bots
@@ -143,6 +178,7 @@ class DailyPromptAssembler:
         self.memory_dir = memory_dir
         self.corrections_lookback_days = corrections_lookback_days
         self.bot_configs = bot_configs
+        self.strategy_registry = strategy_registry
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
     def assemble(self, triage_report=None) -> PromptPackage:
@@ -153,7 +189,7 @@ class DailyPromptAssembler:
                 instructions are focused on the triage's significant events and
                 questions. When None, uses fallback instructions.
         """
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
+        pkg = self._ctx.base_package(bot_configs=self.bot_configs, strategy_registry=self.strategy_registry)
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_structured_data(triage_report))
         pkg.instructions = self._build_instructions(triage_report)
@@ -232,6 +268,15 @@ class DailyPromptAssembler:
         if risk_path.exists():
             data["portfolio_risk_card"] = json.loads(risk_path.read_text(encoding="utf-8"))
 
+        # Load portfolio-level curated files
+        portfolio_dir = date_dir / "portfolio"
+        if portfolio_dir.is_dir():
+            for filename in _PORTFOLIO_CURATED_FILES:
+                path = portfolio_dir / filename
+                if path.exists():
+                    key = "portfolio_" + filename.replace(".json", "")
+                    data[key] = json.loads(path.read_text(encoding="utf-8"))
+
         return data
 
     def _list_data_files(self, triage_report=None) -> list[str]:
@@ -254,5 +299,13 @@ class DailyPromptAssembler:
         risk_path = date_dir / "portfolio_risk_card.json"
         if risk_path.exists():
             files.append(str(risk_path))
+
+        # Portfolio-level curated files
+        portfolio_dir = date_dir / "portfolio"
+        if portfolio_dir.is_dir():
+            for filename in _PORTFOLIO_CURATED_FILES:
+                path = portfolio_dir / filename
+                if path.exists():
+                    files.append(str(path))
 
         return files

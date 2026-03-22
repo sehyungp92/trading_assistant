@@ -4,19 +4,16 @@ from datetime import datetime
 from schemas.events import TradeEvent
 from schemas.hourly_performance import HourlyPerformance
 from skills.hourly_analyzer import HourlyAnalyzer
+from tests.factories import make_trade
 
 
 def _make_trade(hour: int, pnl: float, quality: int = 80) -> TradeEvent:
-    return TradeEvent(
+    return make_trade(
         trade_id=f"t_{hour}_{pnl}",
-        bot_id="bot1",
         pair="BTCUSDT",
-        side="LONG",
+        entry_price=50000,
         entry_time=datetime(2026, 3, 1, hour, 30, 0),
         exit_time=datetime(2026, 3, 1, hour + 1, 0, 0),
-        entry_price=50000,
-        exit_price=50000 + pnl,
-        position_size=1.0,
         pnl=pnl,
         pnl_pct=pnl / 500,
         process_quality_score=quality,

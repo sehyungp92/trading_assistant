@@ -12,8 +12,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from analysis.response_parser import parse_response
-from orchestrator.event_stream import EventStream
-from orchestrator.handlers import Handlers
 from schemas.agent_response import (
     AgentPrediction,
     AgentSuggestion,
@@ -28,29 +26,14 @@ from skills.forecast_tracker import ForecastTracker
 from skills.pattern_library import PatternLibrary
 from skills.suggestion_scorer import SuggestionScorer
 from skills.suggestion_tracker import SuggestionTracker
+from tests.factories import make_handlers as _factory_make_handlers
 
 
 def _make_handlers(tmp_path, tracker=None, es=None):
-    memory_dir = tmp_path / "memory"
-    findings_dir = memory_dir / "findings"
-    findings_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "policies" / "v1").mkdir(parents=True, exist_ok=True)
-    if tracker is None:
-        tracker = SuggestionTracker(store_dir=findings_dir)
-    if es is None:
-        es = EventStream()
-    return Handlers(
-        agent_runner=MagicMock(),
-        event_stream=es,
-        dispatcher=AsyncMock(),
-        notification_prefs=MagicMock(),
-        curated_dir=tmp_path / "data" / "curated",
-        memory_dir=memory_dir,
-        runs_dir=tmp_path / "runs",
-        source_root=tmp_path,
-        bots=["bot1", "bot2"],
-        suggestion_tracker=tracker,
-    ), tracker, es
+    handlers, _, event_stream = _factory_make_handlers(
+        tmp_path, suggestion_tracker=tracker, event_stream=es,
+    )
+    return handlers, handlers._suggestion_tracker, event_stream
 
 
 # ──────────────────────────────────────────────────────

@@ -2,11 +2,10 @@
 """Tests for multi-filter interaction analysis (ecosystem improvement 2.3)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pytest
 
-from schemas.events import TradeEvent, MissedOpportunityEvent, EventMetadata
+from schemas.events import TradeEvent, MissedOpportunityEvent
+from tests.factories import make_trade, make_missed as _factory_missed
 
 
 def _make_trade(
@@ -16,17 +15,12 @@ def _make_trade(
     active_filters: list[str] | None = None,
     market_regime: str = "trending",
 ) -> TradeEvent:
-    now = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
-    return TradeEvent(
+    return make_trade(
         trade_id=trade_id,
         bot_id=bot_id,
         pair="NQ",
-        side="LONG",
-        entry_time=now,
-        exit_time=now,
         entry_price=100.0,
         exit_price=100.0 + pnl / 10,
-        position_size=1.0,
         pnl=pnl,
         pnl_pct=pnl / 100,
         active_filters=active_filters or [],
@@ -39,10 +33,9 @@ def _make_missed(
     blocked_by: str = "",
     outcome_24h: float = 50.0,
 ) -> MissedOpportunityEvent:
-    return MissedOpportunityEvent(
+    return _factory_missed(
         bot_id=bot_id,
         pair="NQ",
-        signal="momentum",
         blocked_by=blocked_by,
         outcome_24h=outcome_24h,
     )

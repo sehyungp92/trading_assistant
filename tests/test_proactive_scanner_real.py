@@ -1,25 +1,16 @@
 # tests/test_proactive_scanner_real.py
 """Tests for real proactive scanning logic."""
-from datetime import datetime
-
-from schemas.events import TradeEvent
 from schemas.notifications import NotificationPriority
 from skills.proactive_scanner import ProactiveScanner
+from tests.factories import make_trade
 
 
-def _make_trade(pnl: float, date_str: str = "2026-03-01") -> TradeEvent:
-    return TradeEvent(
-        trade_id=f"t_{pnl}",
-        bot_id="bot1",
-        pair="BTCUSDT",
-        side="LONG",
-        entry_time=datetime.fromisoformat(f"{date_str}T10:00:00"),
-        exit_time=datetime.fromisoformat(f"{date_str}T11:00:00"),
+def _make_trade(pnl: float, date_str: str = "2026-03-01"):
+    return make_trade(
+        trade_id=f"t_{pnl}", pnl=pnl, pair="BTCUSDT",
         entry_price=50000,
-        exit_price=50000 + pnl,
-        position_size=1.0,
-        pnl=pnl,
-        pnl_pct=pnl / 500,
+        entry_time=f"{date_str}T10:00:00",
+        exit_time=f"{date_str}T11:00:00",
     )
 
 

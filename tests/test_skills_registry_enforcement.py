@@ -11,7 +11,6 @@ from orchestrator.session_store import SessionStore
 from orchestrator.skills_registry import SkillsRegistry
 from schemas.agent_capabilities import AgentType
 from schemas.agent_preferences import AgentPreferences, AgentProvider, AgentSelection, ProviderReadiness
-from schemas.prompt_package import PromptPackage
 
 
 def _streaming_codex_process():
@@ -35,15 +34,6 @@ def app_with_tmp(tmp_path):
 @pytest.fixture
 def session_store(tmp_path):
     return SessionStore(base_dir=str(tmp_path / "sessions"))
-
-
-@pytest.fixture
-def sample_package():
-    return PromptPackage(
-        system_prompt="test",
-        task_prompt="analyze",
-        instructions="do analysis",
-    )
 
 
 def test_registry_instantiated_in_create_app(app_with_tmp):

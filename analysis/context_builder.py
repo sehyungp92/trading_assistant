@@ -145,15 +145,32 @@ class ContextBuilder:
                     rejected.append(rec)
         return rejected
 
-    def load_outcome_measurements(self) -> list[dict]:
+    _QUALITY_RANK = {"high": 3, "medium": 2, "low": 1, "insufficient": 0}
+
+    def load_outcome_measurements(
+        self, min_quality: str = "medium",
+    ) -> tuple[list[dict], list[dict]]:
         """Load outcome measurements from findings/outcomes.jsonl.
 
         Deduplicates by suggestion_id (last-write-wins) to prevent
         double-counting from legacy dual-write patterns.
+
+        Filters by measurement_quality: only HIGH/MEDIUM (by default) are
+        returned as reliable outcomes. LOW/INSUFFICIENT entries are returned
+        separately as low-quality outcomes for spurious_outcomes injection.
+
+        Args:
+            min_quality: Minimum quality tier to include ("high", "medium",
+                "low", "insufficient"). Defaults to "medium".
+
+        Returns:
+            Tuple of (reliable_outcomes, low_quality_outcomes).
+            Entries without a measurement_quality field are included in
+            reliable_outcomes for backward compatibility.
         """
         path = self._memory_dir / "findings" / "outcomes.jsonl"
         if not path.exists():
-            return []
+            return [], []
         seen: dict[str, dict] = {}
         for line in path.read_text(encoding="utf-8").strip().split("\n"):
             if line.strip():
@@ -163,7 +180,20 @@ class ContextBuilder:
                     seen[sid] = entry
                 else:
                     seen[id(entry)] = entry  # type: ignore[assignment]
-        return list(seen.values())
+
+        min_rank = self._QUALITY_RANK.get(min_quality.lower(), 2)
+        reliable: list[dict] = []
+        low_quality: list[dict] = []
+        for entry in seen.values():
+            quality = (entry.get("measurement_quality") or "").lower()
+            if not quality:
+                # No quality field — include for backward compat
+                reliable.append(entry)
+            elif self._QUALITY_RANK.get(quality, 2) >= min_rank:
+                reliable.append(entry)
+            else:
+                low_quality.append(entry)
+        return reliable, low_quality
 
     def load_allocation_history(self) -> list[dict]:
         """Load allocation history from findings/allocation_history.jsonl.
@@ -705,6 +735,42 @@ class ContextBuilder:
         except Exception:
             return []
 
+    def load_portfolio_outcomes(self) -> list[dict]:
+        """Load portfolio-level suggestion outcomes from findings/portfolio_outcomes.jsonl.
+
+        Returns recent portfolio change outcomes with verdicts and composite deltas.
+        """
+        path = self._memory_dir / "findings" / "portfolio_outcomes.jsonl"
+        if not path.exists():
+            return []
+        try:
+            entries: list[dict] = []
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if line.strip():
+                    entries.append(json.loads(line))
+            return _apply_temporal_window(entries, max_entries=20)
+        except Exception:
+            return []
+
+    def load_portfolio_metrics(self) -> dict:
+        """Load latest portfolio rolling metrics from curated data.
+
+        Returns the most recent portfolio_rolling_metrics.json if available.
+        """
+        if not self._curated_dir:
+            return {}
+        try:
+            # Find most recent date directory with portfolio metrics
+            portfolio_dirs = sorted(
+                self._curated_dir.glob("*/portfolio/portfolio_rolling_metrics.json"),
+                reverse=True,
+            )
+            if portfolio_dirs:
+                return json.loads(portfolio_dirs[0].read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
     def load_consolidated_patterns(self) -> str:
         """Load patterns_consolidated.md if it exists."""
         path = self._memory_dir / "findings" / "patterns_consolidated.md"
@@ -775,6 +841,12 @@ class ContextBuilder:
     # Items not in this list get lowest priority.
     _CONTEXT_PRIORITY: list[str] = [
         "ground_truth_trend",
+        "portfolio_outcomes",
+        "portfolio_rolling_metrics",
+        "strategy_profiles",
+        "archetype_expectations",
+        "coordination_rules",
+        "portfolio_risk_config",
         "last_week_synthesis",
         "active_suggestions",
         "category_scorecard",
@@ -799,6 +871,7 @@ class ContextBuilder:
         agent_type: str = "",
         bot_configs: dict | None = None,
         context_budget_items: int = 15,
+        strategy_registry=None,
     ) -> PromptPackage:
         """Build a PromptPackage pre-filled with system prompt, corrections, and metadata.
 
@@ -809,7 +882,7 @@ class ContextBuilder:
         """
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
-        outcome_measurements = self.load_outcome_measurements()
+        outcome_measurements, low_quality_outcomes = self.load_outcome_measurements()
         allocation_history = self.load_allocation_history()
         consolidated_patterns = self.load_consolidated_patterns()
         data: dict = {}
@@ -875,8 +948,10 @@ class ContextBuilder:
         if retrospective_synthesis:
             data["last_week_synthesis"] = retrospective_synthesis
         spurious_outcomes = self.load_spurious_outcomes()
-        if spurious_outcomes:
-            data["spurious_outcomes"] = spurious_outcomes
+        # Merge low-quality outcome measurements into spurious_outcomes
+        all_spurious = spurious_outcomes + low_quality_outcomes
+        if all_spurious:
+            data["spurious_outcomes"] = all_spurious
         strategy_ideas = self.load_strategy_ideas()
         if strategy_ideas:
             data["strategy_ideas"] = strategy_ideas
@@ -886,10 +961,32 @@ class ContextBuilder:
         backtest_reliability = self.load_backtest_reliability()
         if backtest_reliability:
             data["backtest_reliability"] = backtest_reliability
+        portfolio_outcomes = self.load_portfolio_outcomes()
+        if portfolio_outcomes:
+            data["portfolio_outcomes"] = portfolio_outcomes
+        portfolio_metrics = self.load_portfolio_metrics()
+        if portfolio_metrics:
+            data["portfolio_rolling_metrics"] = portfolio_metrics
         if session_store and agent_type:
             session_history = self.load_session_history(session_store, agent_type)
             if session_history:
                 data["session_history"] = session_history
+
+        # Inject strategy registry data if available
+        if strategy_registry and getattr(strategy_registry, "strategies", None):
+            data["strategy_profiles"] = {
+                sid: profile.model_dump(mode="json")
+                for sid, profile in strategy_registry.strategies.items()
+            }
+            if strategy_registry.coordination.signals or strategy_registry.coordination.cooldown_pairs:
+                data["coordination_rules"] = strategy_registry.coordination.model_dump(mode="json")
+            if strategy_registry.archetype_expectations:
+                data["archetype_expectations"] = {
+                    k: v.model_dump(mode="json")
+                    for k, v in strategy_registry.archetype_expectations.items()
+                }
+            if strategy_registry.portfolio.heat_cap_R > 0:
+                data["portfolio_risk_config"] = strategy_registry.portfolio.model_dump(mode="json")
 
         # Apply context budget — keep highest-priority items within limit
         if len(data) > context_budget_items:

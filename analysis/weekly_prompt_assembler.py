@@ -47,12 +47,28 @@ When proposing changes:
 5. Check hypothesis_track_record: prioritize hypotheses with positive effectiveness
 6. Structural proposals MUST include acceptance_criteria with measurable metrics
 7. Max 5 suggestions ranked by confidence. Each MUST have a suggestion_id.
+8. Check validation_patterns: categories with 3+ blocks in 30 days need explicit differentiation
 
-## ALLOCATION ASSESSMENT
-Review allocation_analysis data (if present):
-- Validate quantitative rationale against your qualitative analysis
-- For same-instrument strategies: assess signal independence
-- Highlight top 3 allocation changes by expected impact
+## PORTFOLIO IMPROVEMENT ASSESSMENT
+Review portfolio-level data (if present) and propose at most 2 portfolio-level changes:
+- **Family performance trajectory**: compare family_snapshots trends against allocation weights
+- **Portfolio rolling metrics**: reference portfolio_rolling_metrics for Sharpe/Sortino/Calmar trends
+- **Drawdown correlation risk**: check drawdown_correlation for systemic risk signals
+- **Portfolio rule blocks**: review rule_blocks_summary for coordination system effectiveness
+- **Strategy engine detector findings**: If refinement_report data is present, it contains
+  pre-computed statistical findings from 16 automated detectors. For the top 5
+  highest-confidence findings, you MUST state AGREE or DISAGREE with 1-sentence
+  reasoning. Do NOT duplicate detector analysis — focus your effort on patterns
+  the detectors cannot cover (structural issues, cross-bot interactions, novel market conditions)
+- **Allocation analysis**: validate quantitative rationale against your qualitative analysis
+
+Portfolio proposal requirements:
+- All proposals must cite specific family/bot data and projected portfolio Calmar impact
+- portfolio_allocation proposals require 60+ days of evidence
+- portfolio_risk_cap and portfolio_drawdown_tier require 90+ days of evidence
+- Never suggest removing drawdown tiers or loosening stop levels
+- Maximum 15% allocation change per family per cycle, minimum 5% floor
+- Check portfolio_outcomes for past portfolio change track record
 
 ## CROSS-BOT TRANSFER
 Review transfer_proposals (if present):
@@ -111,18 +127,40 @@ If search_reports data is present, the autonomous inner loop has tested paramete
 neighborhoods this week. Reference these results when evaluating parameter-level
 suggestions — avoid re-proposing what the inner loop already explored.
 
-## CONSTRAINTS
+## INTER-STRATEGY COORDINATION
+If coordination_rules data is present:
+- Evaluate whether coordination signals fired correctly (e.g., ATRSS entry → AKC_HELIX
+  stop tightening). Did the coordination improve or hurt outcomes?
+- Check cooldown pair behavior — did cooldowns prevent good setups or correctly block whipsaws?
+- Assess direction filter agreement rates and quality of filtered trades
+- Review stock_coordination for symbol collision events and sizing adjustments
+
+## ARCHETYPE-RELATIVE EVALUATION
+If strategy_profiles and archetype_expectations data are present:
+- Evaluate each strategy against its archetype's expected ranges, not universal benchmarks
+- Trend-followers with 40% win rate and 2.5R payoff are HEALTHY — do not suggest
+  tightening stops to improve win rate
+- Breakout strategies with 35% win rate are NORMAL — focus on cost-per-attempt
+- Flag strategies performing below archetype floor in their PREFERRED regime as problematic
+- Strategies underperforming in ADVERSE regimes is EXPECTED — do not propose changes
+- Use portfolio_risk_config to validate that suggestions stay within risk bounds
+
+## CONSTRAINTS (enforced by validator — violations are automatically stripped)
 - Do NOT restate the computed summary — it's above.
 - Focus analytical effort on the questions, not on re-summarizing data.
-- Reference outcome_measurements: NEGATIVE outcomes mean do NOT re-suggest similar approaches.
-- Reference forecast_meta_analysis for confidence calibration.
-- If spurious_outcomes data is present, note that these outcomes had confounding
-  factors (concurrent changes, regime shifts) — reduce confidence in conclusions
-  drawn from them.
+- BLOCKED: NEGATIVE outcome_measurements categories — do NOT re-suggest similar approaches.
+- BLOCKED: structural proposals without acceptance_criteria with measurable metrics.
+- BLOCKED: hypotheses with effectiveness <= 0 or status="retired" — do NOT re-propose.
+- Overconfident predictions are capped by forecast_meta_analysis calibration data.
+- outcome_measurements contains only HIGH/MEDIUM quality data. spurious_outcomes
+  (if present) had confounding factors (concurrent changes, regime shifts,
+  low/insufficient measurement quality) — treat as hypotheses, not evidence.
 
 ## STRUCTURED OUTPUT (REQUIRED)
 At the END of your analysis, emit a structured data block.
-This block is machine-parsed — do NOT omit it.
+CRITICAL: This block is machine-parsed by the learning system. If you omit it,
+your suggestions and predictions are LOST and cannot improve future performance.
+Always emit it, even if arrays are empty.
 <!-- STRUCTURED_OUTPUT
 {{
   "predictions": [
@@ -133,6 +171,9 @@ This block is machine-parsed — do NOT omit it.
   ],
   "structural_proposals": [
     {{"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high", "acceptance_criteria": [{{"metric": "...", "direction": "improve|not_degrade", "minimum_change": 0.0, "observation_window_days": 14, "minimum_trade_count": 20}}]}}
+  ],
+  "portfolio_proposals": [
+    {{"proposal_type": "allocation_rebalance|risk_cap_change|coordination_change|drawdown_tier_change", "current_config": {{}}, "proposed_config": {{}}, "evidence_summary": "cite specific family metrics, correlation data, and time period", "expected_portfolio_calmar_delta": 0.0, "confidence": 0.0-1.0, "observation_window_days": 30}}
   ]
 }}
 -->"""
@@ -158,6 +199,7 @@ class WeeklyPromptAssembler:
         memory_dir: Path,
         runs_dir: Path,
         bot_configs: dict | None = None,
+        strategy_registry=None,
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -166,6 +208,7 @@ class WeeklyPromptAssembler:
         self.memory_dir = memory_dir
         self.runs_dir = runs_dir
         self.bot_configs = bot_configs
+        self.strategy_registry = strategy_registry
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
     def assemble(self, triage_report=None) -> PromptPackage:
@@ -176,7 +219,7 @@ class WeeklyPromptAssembler:
                 provided, instructions are focused on computed summaries and
                 targeted questions. When None, uses fallback instructions.
         """
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
+        pkg = self._ctx.base_package(bot_configs=self.bot_configs, strategy_registry=self.strategy_registry)
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_data())
         pkg.instructions = self._build_instructions(triage_report)

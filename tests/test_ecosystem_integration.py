@@ -1,24 +1,20 @@
 """Integration tests for ecosystem evaluation gap implementations."""
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from schemas.events import TradeEvent, MissedOpportunityEvent
+from schemas.events import MissedOpportunityEvent
+from tests.factories import make_trade
 
 
 def _make_trade(trade_id, pnl, regime="trending", factors=None, post_1h=None, post_4h=None):
-    return TradeEvent(
-        trade_id=trade_id, bot_id="bot1", pair="BTC/USDT",
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, 10, tzinfo=timezone.utc),
-        exit_time=datetime(2026, 3, 1, 11, tzinfo=timezone.utc),
-        entry_price=100, exit_price=100 + pnl, position_size=1,
-        pnl=pnl, pnl_pct=pnl, market_regime=regime,
+    return make_trade(
+        trade_id=trade_id, pnl=pnl, market_regime=regime,
         spread_at_entry=3.0, signal_factors=factors,
         post_exit_1h_price=post_1h, post_exit_4h_price=post_4h,
-        process_quality_score=80, root_causes=["normal_win" if pnl > 0 else "normal_loss"],
+        process_quality_score=80,
+        root_causes=["normal_win" if pnl > 0 else "normal_loss"],
     )
 
 

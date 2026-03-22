@@ -1,14 +1,16 @@
 """Tests for brain error frequency tracking — prevents error storm resource waste."""
 import json as jsonmod
 from orchestrator.orchestrator_brain import OrchestratorBrain, ActionType
+from tests.factories import make_error_event
 
 
 def _make_error_event(event_id, bot_id="bot1", severity="HIGH", error_type="ConnectionError"):
+    base = make_error_event(event_id=event_id, bot_id=bot_id, severity=severity, error_type=error_type)
     return {
         "event_type": "error",
-        "event_id": event_id,
-        "bot_id": bot_id,
-        "payload": jsonmod.dumps({"severity": severity, "error_type": error_type}),
+        "event_id": base["event_id"],
+        "bot_id": base["bot_id"],
+        "payload": jsonmod.dumps({"severity": base["severity"], "error_type": base["error_type"]}),
     }
 
 

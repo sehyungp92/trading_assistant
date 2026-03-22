@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from orchestrator.agent_runner import AgentRunner, AgentResult
+from schemas.agent_capabilities import AgentCapability, AgentType, CapabilityCheckResult
 from orchestrator.event_stream import EventStream
 from orchestrator.session_store import SessionStore
 from schemas.agent_preferences import (
@@ -18,6 +19,7 @@ from schemas.agent_preferences import (
     ProviderReadiness,
 )
 from schemas.prompt_package import PromptPackage
+from tests.factories import make_sample_package
 
 
 @pytest.fixture
@@ -26,12 +28,7 @@ def session_store(tmp_path: Path) -> SessionStore:
 
 
 @pytest.fixture
-def event_stream() -> EventStream:
-    return EventStream()
-
-
-@pytest.fixture
-def runner(tmp_path: Path, session_store: SessionStore, event_stream: EventStream) -> AgentRunner:
+def runner(tmp_path: Path, session_store: SessionStore, event_stream) -> AgentRunner:
     return AgentRunner(
         runs_dir=tmp_path / "runs",
         session_store=session_store,
@@ -40,10 +37,9 @@ def runner(tmp_path: Path, session_store: SessionStore, event_stream: EventStrea
 
 
 @pytest.fixture
-def sample_package() -> PromptPackage:
-    return PromptPackage(
+def sample_package():
+    return make_sample_package(
         task_prompt="Analyse daily trades.",
-        system_prompt="You are a trading analyst.",
         data={"trades": [{"id": 1}]},
     )
 
@@ -320,3 +316,48 @@ class TestInvokeEventBroadcasting:
         assert len(started) == 1
         assert started[0].data["provider"] == "claude_max"
         assert started[0].data["runtime"] == "claude_cli"
+
+
+# --- Merged from test_agent_capabilities.py ---
+
+
+class TestAgentTypeEnum:
+    def test_has_7_members(self):
+        assert len(AgentType) == 7
+
+    def test_values_are_lowercase(self):
+        for member in AgentType:
+            assert member.value == member.value.lower()
+
+
+class TestAgentCapabilitySchema:
+    def test_construction_with_defaults(self):
+        cap = AgentCapability(agent_type=AgentType.DAILY_ANALYSIS)
+        assert cap.can_execute_shell is False
+        assert cap.max_concurrent_tasks == 1
+        assert cap.allowed_actions == []
+        assert cap.forbidden_actions == []
+
+    def test_construction_with_custom_values(self):
+        cap = AgentCapability(
+            agent_type=AgentType.BUG_TRIAGE,
+            allowed_actions=["read_source", "open_github_issue"],
+            forbidden_actions=["merge_pr"],
+            can_execute_shell=False,
+            max_concurrent_tasks=2,
+        )
+        assert cap.agent_type == AgentType.BUG_TRIAGE
+        assert "read_source" in cap.allowed_actions
+        assert cap.max_concurrent_tasks == 2
+
+
+class TestCapabilityCheckResult:
+    def test_result_construction(self):
+        result = CapabilityCheckResult(
+            allowed=True,
+            agent_type="daily_analysis",
+            action="generate_report",
+            reason="Allowed",
+        )
+        assert result.allowed is True
+        assert result.agent_type == "daily_analysis"

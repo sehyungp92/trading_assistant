@@ -193,3 +193,54 @@ class TestWeeklyPromptAssembler:
         )
         package = assembler.assemble()
         assert len(package.corrections) == 1
+
+
+# ---------------------------------------------------------------------------
+# Learning loop gap closure — weekly prompt instruction tests
+# ---------------------------------------------------------------------------
+
+class TestWeeklyInstructionGapClosures:
+    """Verify weekly prompt instructions have gap closure language."""
+
+    @pytest.fixture()
+    def assembler(self, tmp_path: Path):
+        curated = tmp_path / "curated"
+        curated.mkdir()
+        memory = tmp_path / "memory"
+        (memory / "policies" / "v1").mkdir(parents=True)
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        return WeeklyPromptAssembler(
+            week_start="2026-02-23",
+            week_end="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated,
+            memory_dir=memory,
+            runs_dir=runs,
+        )
+
+    def test_instructions_reference_validation_patterns(self, assembler):
+        pkg = assembler.assemble()
+        assert "validation_patterns" in pkg.instructions
+
+    def test_weekly_constraints_reveal_blocking(self, assembler):
+        pkg = assembler.assemble()
+        assert "BLOCKED" in pkg.instructions
+
+    def test_require_detector_engagement(self, assembler):
+        pkg = assembler.assemble()
+        assert "AGREE or DISAGREE" in pkg.instructions
+
+    def test_structured_output_critical_warning(self, assembler):
+        pkg = assembler.assemble()
+        assert "CRITICAL" in pkg.instructions
+        assert "LOST" in pkg.instructions
+
+    def test_spurious_outcomes_quality_note(self, assembler):
+        pkg = assembler.assemble()
+        assert "low/insufficient measurement quality" in pkg.instructions
+
+    def test_outcome_quality_note_in_constraints(self, assembler):
+        """Weekly constraints should state outcome_measurements is quality-filtered."""
+        pkg = assembler.assemble()
+        assert "HIGH/MEDIUM quality data" in pkg.instructions

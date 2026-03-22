@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
-from schemas.events import TradeEvent, MissedOpportunityEvent
+from schemas.events import TradeEvent
 from schemas.parameter_search import (
     CandidateResult,
     ParameterSearchReport,
@@ -29,6 +29,7 @@ from skills.parameter_searcher import (
     _MAX_CANDIDATES,
     _SAFETY_CRITICAL_IMPROVEMENT,
 )
+from tests.factories import make_trade
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────
@@ -61,15 +62,12 @@ def _make_trades(n: int = 20, pnl_base: float = 10.0) -> list[TradeEvent]:
     trades = []
     for i in range(n):
         pnl = pnl_base if i % 3 != 0 else -pnl_base * 0.5
-        trades.append(TradeEvent(
+        trades.append(make_trade(
             trade_id=f"t{i}",
-            bot_id="bot1",
             pair="BTC/USD",
-            side="LONG",
             entry_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
             exit_time=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
             entry_price=50000.0,
-            exit_price=50000.0 + pnl,
             position_size=0.1,
             pnl=pnl,
             pnl_pct=pnl / 50000.0,

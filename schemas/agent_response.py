@@ -6,7 +6,7 @@ ParsedAnalysis. This enables programmatic tracking, validation, and feedback.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +64,10 @@ CATEGORY_TO_TIER: dict[str, str] = {
     "structural": "hypothesis",
     "position_sizing": "parameter",
     "regime_gate": "filter",
+    "portfolio_allocation": "portfolio",
+    "portfolio_risk_cap": "portfolio",
+    "portfolio_coordination": "portfolio",
+    "portfolio_drawdown_tier": "portfolio",
 }
 
 
@@ -73,6 +77,8 @@ class ParsedAnalysis(BaseModel):
     predictions: list[AgentPrediction] = Field(default_factory=list)
     suggestions: list[AgentSuggestion] = Field(default_factory=list)
     structural_proposals: list[StructuralProposal] = Field(default_factory=list)
+    portfolio_proposals: list[Any] = Field(default_factory=list)  # list[PortfolioProposal] — untyped to avoid circular import
     raw_report: str = ""
     parse_success: bool = True
+    fallback_used: bool = False
     raw_structured: Optional[dict] = None  # Full parsed JSON from STRUCTURED_OUTPUT block

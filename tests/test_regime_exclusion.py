@@ -1,20 +1,11 @@
 """Tests for regime exclusion P&L computation in strategy engine."""
-from datetime import datetime, timezone
-
-from schemas.events import TradeEvent
 from schemas.weekly_metrics import RegimePerformanceTrend
 from analysis.strategy_engine import StrategyEngine
+from tests.factories import make_trade
 
 
 def _make_trade(trade_id, pnl, regime="trending"):
-    return TradeEvent(
-        trade_id=trade_id, bot_id="bot1", pair="BTC/USDT",
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        exit_time=datetime(2026, 3, 1, 1, tzinfo=timezone.utc),
-        entry_price=100, exit_price=100 + pnl, position_size=1,
-        pnl=pnl, pnl_pct=pnl, market_regime=regime,
-    )
+    return make_trade(trade_id=trade_id, pnl=pnl, market_regime=regime)
 
 
 class TestRegimeExclusionPnL:

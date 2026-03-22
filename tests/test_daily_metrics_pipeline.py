@@ -16,23 +16,17 @@ from schemas.daily_metrics import (
     RootCauseSummary,
 )
 from skills.build_daily_metrics import DailyMetricsBuilder
+from tests.factories import make_trade as _factory_trade, make_missed as _factory_missed
 
 
 def _make_trade(trade_id: str, bot_id: str, pnl: float, **kwargs) -> TradeEvent:
     """Helper to create a TradeEvent with sensible defaults."""
-    from datetime import datetime, timezone
-
-    now = datetime.now(timezone.utc)
     defaults = dict(
         trade_id=trade_id,
         bot_id=bot_id,
         pair="BTCUSDT",
-        side="LONG",
-        entry_time=now,
-        exit_time=now,
         entry_price=50000.0,
         exit_price=50000.0 + pnl,
-        position_size=1.0,
         pnl=pnl,
         pnl_pct=pnl / 50000.0 * 100,
         entry_signal="EMA cross",
@@ -42,11 +36,11 @@ def _make_trade(trade_id: str, bot_id: str, pnl: float, **kwargs) -> TradeEvent:
         root_causes=["normal_win"] if pnl > 0 else ["normal_loss"],
     )
     defaults.update(kwargs)
-    return TradeEvent(**defaults)
+    return _factory_trade(**defaults)
 
 
 def _make_missed(bot_id: str, pair: str, blocked_by: str, outcome_24h: float) -> MissedOpportunityEvent:
-    return MissedOpportunityEvent(
+    return _factory_missed(
         bot_id=bot_id,
         pair=pair,
         signal="RSI divergence",
@@ -1137,3 +1131,29 @@ class TestFillQualityPipeline:
         """Verify fill_quality.json is in _CURATED_FILES list."""
         from analysis.prompt_assembler import _CURATED_FILES
         assert "fill_quality.json" in _CURATED_FILES
+
+
+class TestParameterChangeLog:
+    def test_builds_parameter_change_log(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        events = [
+            {"payload": {"strategy_id": "ATRSS", "param_name": "stop_atr_mult", "old_value": 1.5, "new_value": 2.0, "reason": "WFO optimization"}},
+            {"payload": {"strategy_id": "ATRSS", "param_name": "tp_ratio", "old_value": 2.0, "new_value": 2.5, "reason": "Manual"}},
+            {"payload": {"strategy_id": "AKC_HELIX", "param_name": "entry_threshold", "old_value": 0.7, "new_value": 0.8, "reason": "Backtest"}},
+        ]
+        result = builder.build_parameter_change_log(events)
+        assert result["total_changes"] == 3
+        assert result["bot_id"] == "bot1"
+        assert len(result["changes"]) == 3
+        assert result["by_strategy"]["ATRSS"]["count"] == 2
+        assert "stop_atr_mult" in result["by_strategy"]["ATRSS"]["params"]
+
+    def test_empty_events(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        result = builder.build_parameter_change_log([])
+        assert result["total_changes"] == 0
+        assert result["changes"] == []
+
+    def test_prompt_assembler_includes_parameter_changes(self):
+        from analysis.prompt_assembler import _CURATED_FILES
+        assert "parameter_changes.json" in _CURATED_FILES

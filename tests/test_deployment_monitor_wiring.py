@@ -102,28 +102,15 @@ class TestSchedulerDeploymentCheck:
 
 def _make_handlers(tmp_path: Path, deployment_monitor=None, **kwargs):
     """Create a minimal Handlers instance for testing."""
-    from orchestrator.agent_runner import AgentRunner
-    from orchestrator.event_stream import EventStream
-    from orchestrator.handlers import Handlers
-    from schemas.notifications import NotificationPreferences
+    from tests.factories import make_handlers as _factory_make_handlers
 
-    agent_runner = MagicMock(spec=AgentRunner)
-    event_stream = EventStream()
-    dispatcher = MagicMock()
-
-    return Handlers(
-        agent_runner=agent_runner,
-        event_stream=event_stream,
-        dispatcher=dispatcher,
-        notification_prefs=NotificationPreferences(),
-        curated_dir=tmp_path / "curated",
-        memory_dir=tmp_path / "memory",
-        runs_dir=tmp_path / "runs",
-        source_root=tmp_path,
+    handlers, _, _ = _factory_make_handlers(
+        tmp_path,
         bots=["bot1"],
         deployment_monitor=deployment_monitor,
         **kwargs,
     )
+    return handlers
 
 
 class TestHandlersDeploymentMonitor:

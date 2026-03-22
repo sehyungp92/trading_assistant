@@ -21,17 +21,11 @@ from schemas.agent_preferences import (
     ProviderReadiness,
     WorkflowTuning,
 )
-from schemas.prompt_package import PromptPackage
 
 
 def _ready(provider: AgentProvider) -> ProviderReadiness:
     runtime = "codex_cli" if provider == AgentProvider.CODEX_PRO else "claude_cli"
     return ProviderReadiness(provider=provider, available=True, runtime=runtime)
-
-
-@pytest.fixture
-def sample_package() -> PromptPackage:
-    return PromptPackage(task_prompt="Analyse.", system_prompt="Analyst.")
 
 
 # ---------------------------------------------------------------------------

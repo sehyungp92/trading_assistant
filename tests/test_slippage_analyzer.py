@@ -4,22 +4,21 @@ from datetime import datetime
 from schemas.events import TradeEvent
 from schemas.slippage_analysis import SlippageDistribution
 from skills.slippage_analyzer import SlippageAnalyzer
+from tests.factories import make_trade
 
 
 def _make_trade(pair: str, entry_price: float, exit_price: float,
                 spread_at_entry: float, entry_hour: int = 14) -> TradeEvent:
-    return TradeEvent(
+    pnl = exit_price - entry_price
+    return make_trade(
         trade_id=f"t_{pair}_{entry_hour}",
-        bot_id="bot1",
         pair=pair,
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, entry_hour, 0, 0),
-        exit_time=datetime(2026, 3, 1, entry_hour + 1, 0, 0),
         entry_price=entry_price,
         exit_price=exit_price,
-        position_size=1.0,
-        pnl=exit_price - entry_price,
-        pnl_pct=((exit_price - entry_price) / entry_price) * 100,
+        entry_time=datetime(2026, 3, 1, entry_hour, 0, 0),
+        exit_time=datetime(2026, 3, 1, entry_hour + 1, 0, 0),
+        pnl=pnl,
+        pnl_pct=(pnl / entry_price) * 100,
         spread_at_entry=spread_at_entry,
     )
 
@@ -74,20 +73,20 @@ class TestSlippageAnalyzer:
     def test_export_for_cost_model(self):
         """Exports regime->bps mapping for WFO cost model empirical mode."""
         trades = [
-            TradeEvent(
-                trade_id="t1", bot_id="bot1", pair="BTCUSDT", side="LONG",
+            make_trade(
+                trade_id="t1", pair="BTCUSDT",
                 entry_time=datetime(2026, 3, 1, 14, 0),
                 exit_time=datetime(2026, 3, 1, 15, 0),
                 entry_price=50000, exit_price=50100,
-                position_size=1.0, pnl=100, pnl_pct=0.2,
+                pnl=100, pnl_pct=0.2,
                 spread_at_entry=5.0, market_regime="trending_up",
             ),
-            TradeEvent(
-                trade_id="t2", bot_id="bot1", pair="BTCUSDT", side="LONG",
+            make_trade(
+                trade_id="t2", pair="BTCUSDT",
                 entry_time=datetime(2026, 3, 1, 16, 0),
                 exit_time=datetime(2026, 3, 1, 17, 0),
                 entry_price=50200, exit_price=50300,
-                position_size=1.0, pnl=100, pnl_pct=0.2,
+                pnl=100, pnl_pct=0.2,
                 spread_at_entry=8.0, market_regime="ranging",
             ),
         ]

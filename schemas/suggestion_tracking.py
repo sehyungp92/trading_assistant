@@ -42,7 +42,7 @@ class SuggestionRecord(BaseModel):
     measured_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     rejection_reason: str = ""
-    confidence: float = 0.0
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     hypothesis_id: Optional[str] = None
     approval_request_id: Optional[str] = None
     deployment_id: Optional[str] = None

@@ -697,6 +697,42 @@ class DailyMetricsBuilder:
             "total_snapshots": len(spreads),
         }
 
+    def build_parameter_change_log(self, param_events: list[dict]) -> dict:
+        """Summarize parameter changes for the day."""
+        changes: list[dict] = []
+        by_strategy: dict[str, list[dict]] = {}
+
+        for evt in param_events:
+            payload = evt.get("payload", evt)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    continue
+
+            change = {
+                "strategy_id": payload.get("strategy_id", ""),
+                "param_name": payload.get("param_name", ""),
+                "old_value": payload.get("old_value"),
+                "new_value": payload.get("new_value"),
+                "reason": payload.get("reason", ""),
+                "timestamp": payload.get("timestamp", evt.get("timestamp", "")),
+            }
+            changes.append(change)
+            sid = change["strategy_id"] or "unknown"
+            by_strategy.setdefault(sid, []).append(change)
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "total_changes": len(changes),
+            "changes": changes,
+            "by_strategy": {
+                sid: {"count": len(items), "params": [c["param_name"] for c in items]}
+                for sid, items in by_strategy.items()
+            },
+        }
+
     def write_curated(
         self,
         trades: list[TradeEvent],
@@ -708,6 +744,7 @@ class DailyMetricsBuilder:
         filter_decision_events: list[dict] | None = None,
         indicator_snapshot_events: list[dict] | None = None,
         orderbook_context_events: list[dict] | None = None,
+        parameter_change_events: list[dict] | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
@@ -832,6 +869,12 @@ class DailyMetricsBuilder:
                 self.build_orderbook_summary(orderbook_context_events),
             )
 
+        if parameter_change_events:
+            self._write_json(
+                output_dir / "parameter_changes.json",
+                self.build_parameter_change_log(parameter_change_events),
+            )
+
         return output_dir
 
     def _write_json(self, path: Path, data: dict | list) -> None:
@@ -863,3 +906,240 @@ class DailyMetricsBuilder:
             exit_price=t.exit_price,
             atr_at_entry=t.atr_at_entry,
         )
+
+
+# ── Standalone portfolio-level helpers (Phase 0) ────────────────────
+
+
+def build_portfolio_rules_summary(raw_events: list[dict]) -> dict:
+    """Scan raw events for portfolio_rule_check entries and summarize (0B).
+
+    Args:
+        raw_events: list of raw event dicts (from JSONL ingest).  Each
+            ``portfolio_rule_check`` event is expected to have at least
+            ``rule_name``, ``result`` (pass/fail), and optionally
+            ``details`` with ``blocked_symbol``, ``reason``, ``exposure_pct``.
+
+    Returns:
+        Dict with rule evaluation counts, block counts, and per-rule breakdown.
+    """
+    rule_checks = [
+        e for e in raw_events
+        if e.get("event_type") == "portfolio_rule_check"
+        or e.get("type") == "portfolio_rule_check"
+    ]
+
+    if not rule_checks:
+        return {
+            "total_evaluations": 0,
+            "total_blocks": 0,
+            "by_rule": {},
+            "blocked_symbols": [],
+        }
+
+    by_rule: dict[str, dict] = defaultdict(lambda: {
+        "evaluations": 0,
+        "blocks": 0,
+        "block_reasons": [],
+    })
+    blocked_symbols: set[str] = set()
+
+    for evt in rule_checks:
+        payload = evt.get("payload", evt)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                continue
+
+        rule_name = payload.get("rule_name", "unknown")
+        result = payload.get("result", "pass")
+        details = payload.get("details", {})
+
+        bucket = by_rule[rule_name]
+        bucket["evaluations"] += 1
+
+        if result in ("fail", "block", "blocked"):
+            bucket["blocks"] += 1
+            reason = details.get("reason", "")
+            if reason:
+                bucket["block_reasons"].append(reason)
+            symbol = details.get("blocked_symbol", "")
+            if symbol:
+                blocked_symbols.add(symbol)
+
+    total_evals = sum(v["evaluations"] for v in by_rule.values())
+    total_blocks = sum(v["blocks"] for v in by_rule.values())
+
+    return {
+        "total_evaluations": total_evals,
+        "total_blocks": total_blocks,
+        "by_rule": {
+            name: {
+                "evaluations": data["evaluations"],
+                "blocks": data["blocks"],
+                "block_rate": data["blocks"] / data["evaluations"] if data["evaluations"] > 0 else 0.0,
+                "block_reasons": data["block_reasons"],
+            }
+            for name, data in by_rule.items()
+        },
+        "blocked_symbols": sorted(blocked_symbols),
+    }
+
+
+def build_family_snapshots(
+    bot_summaries: list[BotDailySummary],
+    strategy_registry,
+) -> list[dict]:
+    """Aggregate bot summaries by strategy family (0C).
+
+    Args:
+        bot_summaries: Per-bot daily summaries for the day.
+        strategy_registry: Object with a ``get_family(strategy_id) -> str``
+            method (or a dict mapping strategy_id to family name).
+
+    Returns:
+        List of FamilyDailySnapshot dicts, one per family.
+    """
+    from schemas.portfolio_metrics import FamilyDailySnapshot
+
+    # Determine the family lookup function
+    if hasattr(strategy_registry, "get_family"):
+        get_family = strategy_registry.get_family
+    elif isinstance(strategy_registry, dict):
+        get_family = lambda sid: strategy_registry.get(sid, "default")
+    else:
+        get_family = lambda sid: "default"
+
+    # Group per-strategy data by family
+    family_data: dict[str, dict] = defaultdict(lambda: {
+        "strategy_ids": set(),
+        "total_net_pnl": 0.0,
+        "total_fees": 0.0,
+        "trade_count": 0,
+        "win_count": 0,
+        "loss_count": 0,
+        "max_drawdown_pct": 0.0,
+        "exposure_pcts": [],
+        "date": "",
+    })
+
+    for summary in bot_summaries:
+        date = summary.date
+
+        # If per_strategy_summary is available, use it for family grouping
+        if summary.per_strategy_summary:
+            for sid, strat in summary.per_strategy_summary.items():
+                family = get_family(sid)
+                bucket = family_data[family]
+                bucket["date"] = date
+                bucket["strategy_ids"].add(sid)
+                bucket["total_net_pnl"] += strat.net_pnl
+                bucket["trade_count"] += strat.trades
+                bucket["win_count"] += strat.win_count
+                bucket["loss_count"] += strat.loss_count
+        else:
+            # Fallback: treat whole bot as a single strategy
+            family = get_family(summary.bot_id)
+            bucket = family_data[family]
+            bucket["date"] = date
+            bucket["strategy_ids"].add(summary.bot_id)
+            bucket["total_net_pnl"] += summary.net_pnl
+            bucket["trade_count"] += summary.total_trades
+            bucket["win_count"] += summary.win_count
+            bucket["loss_count"] += summary.loss_count
+            bucket["max_drawdown_pct"] = max(
+                bucket["max_drawdown_pct"], summary.max_drawdown_pct
+            )
+            if summary.exposure_pct > 0:
+                bucket["exposure_pcts"].append(summary.exposure_pct)
+
+    snapshots: list[dict] = []
+    for family, data in sorted(family_data.items()):
+        avg_exp = (
+            sum(data["exposure_pcts"]) / len(data["exposure_pcts"])
+            if data["exposure_pcts"]
+            else 0.0
+        )
+        snap = FamilyDailySnapshot(
+            family=family,
+            date=data["date"],
+            strategy_ids=sorted(data["strategy_ids"]),
+            total_net_pnl=data["total_net_pnl"],
+            total_fees=data["total_fees"],
+            trade_count=data["trade_count"],
+            win_count=data["win_count"],
+            loss_count=data["loss_count"],
+            max_drawdown_pct=data["max_drawdown_pct"],
+            avg_exposure_pct=avg_exp,
+            active_strategies=len(data["strategy_ids"]),
+        )
+        snapshots.append(snap.model_dump(mode="json"))
+
+    return snapshots
+
+
+def build_concurrent_position_analysis(trade_events: list[dict]) -> dict:
+    """Extract correlated_pairs_detail from trade event payloads (0D).
+
+    Scans trade events for ``correlated_pairs_detail`` fields (emitted by
+    bots that track concurrent open positions) and aggregates them.
+
+    Args:
+        trade_events: list of raw trade event dicts.
+
+    Returns:
+        Dict with pair co-occurrence counts, total concurrent windows,
+        and per-pair summary.
+    """
+    pair_occurrences: dict[str, int] = defaultdict(int)
+    pair_pnl: dict[str, float] = defaultdict(float)
+    total_windows = 0
+
+    for evt in trade_events:
+        payload = evt.get("payload", evt)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                continue
+
+        details = payload.get("correlated_pairs_detail")
+        if not details:
+            continue
+
+        if isinstance(details, list):
+            for entry in details:
+                pair_key = entry.get("pair", "")
+                if not pair_key:
+                    # Build key from symbols
+                    symbols = sorted([
+                        entry.get("symbol_a", ""),
+                        entry.get("symbol_b", ""),
+                    ])
+                    pair_key = f"{symbols[0]}_{symbols[1]}"
+                pair_occurrences[pair_key] += 1
+                pair_pnl[pair_key] += entry.get("combined_pnl", 0.0)
+                total_windows += 1
+        elif isinstance(details, dict):
+            for pair_key, info in details.items():
+                count = info.get("count", 1) if isinstance(info, dict) else 1
+                pnl = info.get("combined_pnl", 0.0) if isinstance(info, dict) else 0.0
+                pair_occurrences[pair_key] += count
+                pair_pnl[pair_key] += pnl
+                total_windows += count
+
+    per_pair = {
+        pair: {
+            "occurrences": pair_occurrences[pair],
+            "total_combined_pnl": round(pair_pnl[pair], 4),
+            "avg_combined_pnl": round(pair_pnl[pair] / pair_occurrences[pair], 4) if pair_occurrences[pair] > 0 else 0.0,
+        }
+        for pair in sorted(pair_occurrences.keys())
+    }
+
+    return {
+        "total_concurrent_windows": total_windows,
+        "unique_pairs": len(pair_occurrences),
+        "per_pair": per_pair,
+    }

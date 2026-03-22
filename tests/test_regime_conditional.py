@@ -1,8 +1,6 @@
 """Tests for regime-conditional metrics in StrategyEngine."""
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
 from analysis.strategy_engine import StrategyEngine
@@ -14,6 +12,7 @@ from schemas.regime_conditional import (
     RegimeStrategyMetrics,
 )
 from schemas.weekly_metrics import StrategyWeeklySummary
+from tests.factories import make_trade
 
 
 # ---------------------------------------------------------------------------
@@ -29,13 +28,12 @@ def _make_trade(
     entry_time: str = "2026-01-05T10:00:00",
     exit_time: str = "2026-01-05T14:00:00",
 ) -> TradeEvent:
-    return TradeEvent(
+    return make_trade(
         trade_id=f"t-{bot_id}-{pnl}-{market_regime}",
         bot_id=bot_id,
         pair=pair,
-        side="LONG",
-        entry_time=datetime.fromisoformat(entry_time),
-        exit_time=datetime.fromisoformat(exit_time),
+        entry_time=entry_time,
+        exit_time=exit_time,
         entry_price=100.0,
         exit_price=100.0 + pnl / 10,
         position_size=10.0,

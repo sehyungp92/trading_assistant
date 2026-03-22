@@ -8,21 +8,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from orchestrator.handlers import Handlers
+from tests.factories import make_handlers as _factory_make_handlers
 
 
 def _make_handlers(curated_dir: Path) -> Handlers:
     """Build a Handlers instance with minimal mocks for trade loading tests."""
-    return Handlers(
-        agent_runner=MagicMock(),
-        event_stream=MagicMock(),
-        dispatcher=AsyncMock(),
-        notification_prefs=MagicMock(),
+    tmp_path = curated_dir.parent
+    handlers, _, _ = _factory_make_handlers(
+        tmp_path,
         curated_dir=curated_dir,
-        memory_dir=curated_dir.parent / "memory",
-        runs_dir=curated_dir.parent / "runs",
-        source_root=curated_dir.parent,
         bots=["bot_alpha"],
+        create_policy_files=False,
     )
+    return handlers
 
 
 def _sample_trade(bot_id: str = "bot_alpha", trade_id: str = "t1") -> dict:

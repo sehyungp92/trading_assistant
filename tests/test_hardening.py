@@ -20,14 +20,6 @@ from schemas.prompt_package import PromptPackage
 
 
 @pytest.fixture
-def sample_package() -> PromptPackage:
-    return PromptPackage(
-        task_prompt="Analyze today's performance.",
-        system_prompt="You are a trading analyst.",
-    )
-
-
-@pytest.fixture
 def builder() -> InvocationBuilder:
     auth = ProviderAuthChecker(
         claude_command="claude",

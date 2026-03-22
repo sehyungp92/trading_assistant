@@ -1,25 +1,16 @@
 # tests/test_exit_strategy_simulator.py
 """Tests for exit strategy comparison simulator."""
-from datetime import datetime, timezone
-
 import pytest
 
-from schemas.events import TradeEvent
 from schemas.exit_simulation import ExitStrategyType, ExitStrategyConfig, ExitSimulationResult
+from tests.factories import make_trade
 
 
 def _make_trade(trade_id, entry_price, exit_price, pnl, exit_reason="SIGNAL",
                 post_1h=None, post_4h=None, atr=2.0):
-    return TradeEvent(
-        trade_id=trade_id, bot_id="bot1", pair="BTC/USDT",
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        exit_time=datetime(2026, 3, 1, 1, tzinfo=timezone.utc),
-        entry_price=entry_price, exit_price=exit_price,
-        position_size=1, pnl=pnl, pnl_pct=pnl / entry_price * 100,
-        exit_reason=exit_reason, atr_at_entry=atr,
-        post_exit_1h_price=post_1h, post_exit_4h_price=post_4h,
-    )
+    return make_trade(trade_id=trade_id, entry_price=entry_price, exit_price=exit_price,
+                      pnl=pnl, exit_reason=exit_reason, atr_at_entry=atr,
+                      post_exit_1h_price=post_1h, post_exit_4h_price=post_4h)
 
 
 class TestExitSimulationSchema:

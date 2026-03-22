@@ -216,3 +216,38 @@ class TestDailyPromptAssembler:
         )
         prompt = assembler.assemble()
         assert "exit" in prompt.instructions.lower()
+
+
+# ---------------------------------------------------------------------------
+# Learning loop gap closure — prompt instruction tests
+# ---------------------------------------------------------------------------
+
+class TestDailyInstructionGapClosures:
+    """Verify daily prompt instructions reference validation_patterns and reveal blocking rules."""
+
+    @pytest.fixture()
+    def assembler(self, curated_dir: Path, memory_dir: Path):
+        return DailyPromptAssembler(
+            date="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated_dir,
+            memory_dir=memory_dir,
+        )
+
+    def test_instructions_reference_validation_patterns(self, assembler):
+        pkg = assembler.assemble()
+        assert "validation_patterns" in pkg.instructions
+        assert "3+ blocks" in pkg.instructions
+
+    def test_constraints_reveal_blocking(self, assembler):
+        pkg = assembler.assemble()
+        assert "BLOCKED by validator" in pkg.instructions
+
+    def test_structured_output_critical_warning(self, assembler):
+        pkg = assembler.assemble()
+        assert "CRITICAL" in pkg.instructions
+        assert "LOST" in pkg.instructions
+
+    def test_outcome_quality_note_in_constraints(self, assembler):
+        pkg = assembler.assemble()
+        assert "HIGH/MEDIUM quality" in pkg.instructions

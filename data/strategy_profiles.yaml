@@ -1,0 +1,363 @@
+strategies:
+  ATRSS:
+    display_name: "ATR Swing Strategy"
+    bot_id: swing_multi_01
+    family: swing
+    archetype: trend_follow
+    asset_class: mixed
+    symbols: [QQQ, GLD]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 200.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.50
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.018
+
+  AKC_HELIX:
+    display_name: "AKC Helix Divergence Swing"
+    bot_id: swing_multi_01
+    family: swing
+    archetype: divergence_swing
+    asset_class: mixed
+    symbols: [QQQ, GLD]
+    preferred_regimes: [trending_up, trending_down, volatile]
+    adverse_regimes: [ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 200.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.50
+      tp_ratio: 2.5
+    allocation:
+      base_risk_pct: 0.018
+
+  SWING_BREAKOUT_V3:
+    display_name: "Swing Breakout v3"
+    bot_id: swing_multi_01
+    family: swing
+    archetype: breakout
+    asset_class: mixed
+    symbols: [QQQ, GLD]
+    preferred_regimes: [compression]
+    adverse_regimes: [trending_up, trending_down]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 200.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.50
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.018
+
+  S5_PB:
+    display_name: "S5 Pullback"
+    bot_id: swing_multi_01
+    family: swing
+    archetype: pullback
+    asset_class: mixed
+    symbols: [QQQ, GLD]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [volatile, ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 200.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.50
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.018
+
+  S5_DUAL:
+    display_name: "S5 Dual Pullback"
+    bot_id: swing_multi_01
+    family: swing
+    archetype: pullback
+    asset_class: mixed
+    symbols: [QQQ, GLD]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [volatile, ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 200.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.50
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.018
+
+  IARIC_v1:
+    display_name: "IARIC Intraday Momentum v1"
+    bot_id: stock_trader
+    family: stock
+    archetype: intraday_momentum
+    asset_class: equity
+    symbols: []
+    preferred_regimes: [trending_up, volatile]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 150.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.00
+      tp_ratio: 1.5
+    allocation:
+      base_risk_pct: 0.015
+
+  US_ORB_v1:
+    display_name: "US Opening Range Breakout v1"
+    bot_id: stock_trader
+    family: stock
+    archetype: opening_range_breakout
+    asset_class: equity
+    symbols: []
+    preferred_regimes: [volatile]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 150.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.00
+      tp_ratio: 1.5
+    allocation:
+      base_risk_pct: 0.015
+
+  ALCB_v1:
+    display_name: "ALCB Intraday Momentum v1"
+    bot_id: stock_trader
+    family: stock
+    archetype: intraday_momentum
+    asset_class: equity
+    symbols: []
+    preferred_regimes: [trending_up, volatile]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 150.0
+      daily_stop_R: 2.0
+      max_heat_R: 1.00
+      tp_ratio: 1.5
+    allocation:
+      base_risk_pct: 0.015
+
+  AKC_Helix_v40:
+    display_name: "AKC Helix Multi-TF Momentum v40"
+    bot_id: momentum_nq_01
+    family: momentum
+    archetype: multi_tf_momentum
+    asset_class: futures
+    symbols: [NQ]
+    preferred_regimes: [trending_up, trending_down, volatile]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 300.0
+      daily_stop_R: 3.0
+      max_heat_R: 2.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.020
+
+  "NQDTC_v2.1":
+    display_name: "NQ Day Trade Channel v2.1"
+    bot_id: momentum_nq_01
+    family: momentum
+    archetype: box_breakout
+    asset_class: futures
+    symbols: [NQ]
+    preferred_regimes: [compression]
+    adverse_regimes: [trending_up, trending_down]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 300.0
+      daily_stop_R: 3.0
+      max_heat_R: 2.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.020
+
+  VdubusNQ_v4:
+    display_name: "Vdubus NQ VWAP Pullback v4"
+    bot_id: momentum_nq_01
+    family: momentum
+    archetype: vwap_pullback
+    asset_class: futures
+    symbols: [NQ]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 300.0
+      daily_stop_R: 3.0
+      max_heat_R: 2.00
+      tp_ratio: 1.5
+    allocation:
+      base_risk_pct: 0.020
+
+  # --- k_stock_trader (Korean equity, separate VPS, Asia/Seoul) ---
+
+  KMP:
+    display_name: "Korean Momentum Play"
+    bot_id: k_stock_trader
+    family: k_stock
+    archetype: intraday_momentum
+    asset_class: k_equity
+    symbols: []
+    preferred_regimes: [trending_up]
+    adverse_regimes: [ranging]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 6.00
+      tp_ratio: 1.67
+    allocation:
+      base_risk_pct: 0.020
+
+  KPR:
+    display_name: "Korean VWAP Pullback"
+    bot_id: k_stock_trader
+    family: k_stock
+    archetype: vwap_pullback
+    asset_class: k_equity
+    symbols: []
+    preferred_regimes: [ranging, volatile]
+    adverse_regimes: [trending_up, trending_down]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 6.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.020
+
+  PCIM:
+    display_name: "Post-Close Intraday Momentum"
+    bot_id: k_stock_trader
+    family: k_stock
+    archetype: intraday_momentum
+    asset_class: k_equity
+    symbols: []
+    preferred_regimes: [trending_up, ranging]
+    adverse_regimes: [volatile]
+    holding_period: intraday
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 6.00
+      tp_ratio: 1.67
+    allocation:
+      base_risk_pct: 0.020
+
+  NULRIMOK:
+    display_name: "Leader Flow Following"
+    bot_id: k_stock_trader
+    family: k_stock
+    archetype: flow_following
+    asset_class: k_equity
+    symbols: []
+    preferred_regimes: [trending_up, ranging]
+    adverse_regimes: [volatile]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 6.00
+      tp_ratio: 1.25
+    allocation:
+      base_risk_pct: 0.020
+
+coordination:
+  signals:
+    - trigger: {strategy: ATRSS, event: ENTRY_FILL}
+      target: {strategy: AKC_HELIX, action: TIGHTEN_STOP_BE}
+      condition: SAME_SYMBOL
+    - trigger: {strategy: ATRSS, event: POSITION_OPEN}
+      target: {strategy: AKC_HELIX, action: SIZE_BOOST}
+      condition: SAME_SYMBOL_SAME_DIRECTION
+      params: {size_mult: 1.25}
+  cooldown_pairs:
+    - strategies: [AKC_Helix_v40, "NQDTC_v2.1"]
+      minutes: 120
+      session_only: true
+      session_window: ["09:45", "11:30"]
+  direction_filter:
+    observer: VdubusNQ_v4
+    reference: "NQDTC_v2.1"
+    agree_mult: 1.50
+    oppose_mult: 0.0
+  stock_coordination:
+    directional_cap_R: 8.0
+    symbol_collision_action: half_size
+    strategies: [IARIC_v1, US_ORB_v1, ALCB_v1]
+
+portfolio:
+  heat_cap_R: 2.5
+  portfolio_daily_stop_R: 3.0
+  portfolio_weekly_stop_R: 5.0
+  family_allocations:
+    swing: 0.3334
+    stock: 0.3333
+    momentum: 0.3333
+    k_stock: 0.0  # separate capital pool (KRW), not allocated from USD portfolio
+  drawdown_tiers:
+    - [0.08, 1.00]
+    - [0.12, 0.50]
+    - [0.15, 0.25]
+    - [1.00, 0.00]
+
+archetype_expectations:
+  trend_follow:
+    expected_win_rate: [0.35, 0.50]
+    expected_payoff_ratio: [1.8, 3.0]
+    regime_sensitivity: high
+    typical_holding_bars: [20, 200]
+  divergence_swing:
+    expected_win_rate: [0.40, 0.55]
+    expected_payoff_ratio: [1.5, 2.5]
+    regime_sensitivity: medium
+    typical_holding_bars: [10, 100]
+  breakout:
+    expected_win_rate: [0.30, 0.45]
+    expected_payoff_ratio: [2.0, 4.0]
+    regime_sensitivity: high
+    typical_holding_bars: [5, 50]
+  pullback:
+    expected_win_rate: [0.45, 0.60]
+    expected_payoff_ratio: [1.2, 2.0]
+    regime_sensitivity: medium
+    typical_holding_bars: [10, 80]
+  intraday_momentum:
+    expected_win_rate: [0.40, 0.55]
+    expected_payoff_ratio: [1.2, 2.0]
+    regime_sensitivity: medium
+    typical_holding_bars: [1, 20]
+  opening_range_breakout:
+    expected_win_rate: [0.35, 0.50]
+    expected_payoff_ratio: [1.5, 2.5]
+    regime_sensitivity: medium
+    typical_holding_bars: [1, 10]
+  multi_tf_momentum:
+    expected_win_rate: [0.40, 0.55]
+    expected_payoff_ratio: [1.5, 2.5]
+    regime_sensitivity: high
+    typical_holding_bars: [5, 40]
+  box_breakout:
+    expected_win_rate: [0.30, 0.45]
+    expected_payoff_ratio: [2.0, 3.5]
+    regime_sensitivity: high
+    typical_holding_bars: [3, 30]
+  vwap_pullback:
+    expected_win_rate: [0.45, 0.60]
+    expected_payoff_ratio: [1.0, 1.8]
+    regime_sensitivity: medium
+    typical_holding_bars: [1, 15]
+  flow_following:
+    expected_win_rate: [0.40, 0.55]
+    expected_payoff_ratio: [1.0, 1.5]
+    regime_sensitivity: medium
+    typical_holding_bars: [5, 150]

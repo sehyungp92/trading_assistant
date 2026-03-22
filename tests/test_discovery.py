@@ -18,6 +18,7 @@ import pytest
 
 from schemas.discovery import Discovery, DiscoveryReport, TradeReference
 from schemas.prompt_package import PromptPackage
+from tests.factories import make_handlers as _factory_make_handlers
 
 
 # ---------------------------------------------------------------------------
@@ -25,30 +26,17 @@ from schemas.prompt_package import PromptPackage
 # ---------------------------------------------------------------------------
 
 def _make_handlers(tmp_path, **kwargs):
-    from orchestrator.handlers import Handlers
-
-    runner = MagicMock()
-    runner.invoke = AsyncMock()
     event_stream = MagicMock()
     event_stream.broadcast = MagicMock()
-    memory_dir = tmp_path / "memory"
-    (memory_dir / "policies" / "v1").mkdir(parents=True)
-    (memory_dir / "policies" / "v1" / "agents.md").write_text("Agent policy")
-    (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("Rules")
-    (memory_dir / "policies" / "v1" / "soul.md").write_text("Soul")
-    (memory_dir / "findings").mkdir(parents=True)
-    return Handlers(
-        agent_runner=runner,
+    handlers, agent_runner, _ = _factory_make_handlers(
+        tmp_path,
         event_stream=event_stream,
         dispatcher=MagicMock(),
-        notification_prefs=MagicMock(),
-        curated_dir=tmp_path / "curated",
-        memory_dir=memory_dir,
-        runs_dir=tmp_path / "runs",
-        source_root=tmp_path,
         bots=["bot_a"],
+        curated_dir=tmp_path / "curated",
         **kwargs,
-    ), runner, event_stream
+    )
+    return handlers, agent_runner, event_stream
 
 
 def _make_action(date="2026-03-14", bots=None):

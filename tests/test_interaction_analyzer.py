@@ -1,8 +1,6 @@
 """Tests for InteractionAnalyzer — coordinator event analysis."""
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
 from schemas.events import TradeEvent
@@ -12,6 +10,7 @@ from schemas.interaction_analysis import (
     InteractionReport,
 )
 from skills.interaction_analyzer import InteractionAnalyzer
+from tests.factories import make_trade
 
 
 # ---------------------------------------------------------------------------
@@ -31,13 +30,13 @@ def _make_trade(
     post_exit_4h_price: float | None = None,
     market_regime: str = "trending",
 ) -> TradeEvent:
-    return TradeEvent(
+    return make_trade(
         trade_id=f"t-{pair}-{pnl}",
         bot_id="swing_trader",
         pair=pair,
         side=side,
-        entry_time=datetime.fromisoformat(entry_time),
-        exit_time=datetime.fromisoformat(exit_time),
+        entry_time=entry_time,
+        exit_time=exit_time,
         entry_price=entry_price,
         exit_price=exit_price,
         position_size=position_size,

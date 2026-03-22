@@ -19,7 +19,6 @@ from schemas.agent_preferences import (
     FallbackEntry,
     ProviderReadiness,
 )
-from schemas.prompt_package import PromptPackage
 
 
 def _ready(provider: AgentProvider) -> ProviderReadiness:
@@ -30,11 +29,6 @@ def _ready(provider: AgentProvider) -> ProviderReadiness:
 def _unavailable(provider: AgentProvider, reason: str = "down") -> ProviderReadiness:
     runtime = "codex_cli" if provider == AgentProvider.CODEX_PRO else "claude_cli"
     return ProviderReadiness(provider=provider, available=False, runtime=runtime, reason=reason)
-
-
-@pytest.fixture
-def sample_package() -> PromptPackage:
-    return PromptPackage(task_prompt="Analyse trades.", system_prompt="Analyst.")
 
 
 # ---------------------------------------------------------------------------

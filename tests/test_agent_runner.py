@@ -22,6 +22,7 @@ from schemas.agent_preferences import (
     WorkflowTuning,
 )
 from schemas.prompt_package import PromptPackage
+from tests.factories import make_sample_package
 
 
 class _FakeStreamReader:
@@ -146,9 +147,7 @@ def runner(tmp_runs: Path, session_store: SessionStore, event_stream: EventStrea
 
 @pytest.fixture
 def sample_package() -> PromptPackage:
-    return PromptPackage(
-        system_prompt="You are a trading analyst.",
-        task_prompt="Analyze today's performance.",
+    return make_sample_package(
         data={"summary": {"pnl": 100}, "risk": {"drawdown": 0.02}},
         instructions="Step 1: Look at PnL.\nStep 2: Check risk.",
     )

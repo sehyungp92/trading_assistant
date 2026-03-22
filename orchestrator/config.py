@@ -10,6 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from schemas.bot_config import BotConfig
+from schemas.strategy_profile import StrategyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ class AppConfig(BaseModel):
     bot_repo_dir: str = "."
     bot_repo_cache_dir: str = "runs/repo_cache"
     github_token: str = ""
+    strategy_registry: StrategyRegistry = StrategyRegistry()
     autonomous_enabled: bool = False
     adaptive_thresholds_enabled: bool = False
     deployment_monitoring_enabled: bool = False
@@ -162,9 +164,17 @@ class AppConfig(BaseModel):
 
         bot_configs = _parse_bot_timezones(env.get("BOT_TIMEZONES", ""), bot_ids)
 
+        from orchestrator.strategy_registry_loader import load_strategy_registry
+
+        strategy_profiles_path = env.get("STRATEGY_PROFILES_PATH", "")
+        strategy_registry = load_strategy_registry(
+            Path(strategy_profiles_path) if strategy_profiles_path else None
+        )
+
         return cls(
             bot_ids=bot_ids,
             bot_configs=bot_configs,
+            strategy_registry=strategy_registry,
             claude_command=env.get("CLAUDE_COMMAND", "claude"),
             claude_command_args=_parse_command_args(
                 env.get("CLAUDE_COMMAND_ARGS", ""),

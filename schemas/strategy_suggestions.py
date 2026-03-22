@@ -1,10 +1,11 @@
 # schemas/strategy_suggestions.py
-"""Strategy suggestion schemas — 4-tier refinement output models.
+"""Strategy suggestion schemas — 5-tier refinement output models.
 
 Tier 1: Parameter suggestions (automated, high confidence)
 Tier 2: Filter adjustments (automated, medium confidence)
 Tier 3: Strategy variants (semi-automated, requires human judgment)
 Tier 4: New hypotheses (human-led, Claude-assisted)
+Tier 5: Portfolio-level changes (allocation, risk caps, coordination, drawdown tiers)
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ class SuggestionTier(str, Enum):
     FILTER = "filter"
     STRATEGY_VARIANT = "strategy_variant"
     HYPOTHESIS = "hypothesis"
+    PORTFOLIO = "portfolio"
 
 
 class StrategySuggestion(BaseModel):
@@ -28,6 +30,9 @@ class StrategySuggestion(BaseModel):
 
     tier: SuggestionTier
     bot_id: str = ""
+    strategy_id: str = ""
+    strategy_archetype: str = ""
+    archetype_note: str = ""
     title: str
     description: str
     current_value: str = ""

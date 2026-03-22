@@ -4,7 +4,6 @@ Creates trade events -> runs data reduction -> computes portfolio risk ->
 quality gate -> prompt assembly. Validates every stage produces correct output.
 """
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -14,23 +13,18 @@ from skills.build_daily_metrics import DailyMetricsBuilder
 from skills.compute_portfolio_risk import PortfolioRiskComputer
 from analysis.quality_gate import QualityGate
 from analysis.prompt_assembler import DailyPromptAssembler
+from tests.factories import make_trade, make_missed
 
 
 def _make_trades(bot_id: str, n: int = 10) -> list[TradeEvent]:
-    now = datetime.now(timezone.utc)
     trades = []
     for i in range(n):
         pnl = 100.0 if i % 3 != 0 else -50.0
-        trades.append(TradeEvent(
+        trades.append(make_trade(
             trade_id=f"{bot_id}_t{i}",
             bot_id=bot_id,
             pair="BTCUSDT",
-            side="LONG",
-            entry_time=now,
-            exit_time=now,
             entry_price=50000.0,
-            exit_price=50000.0 + pnl,
-            position_size=1.0,
             pnl=pnl,
             pnl_pct=pnl / 500.0,
             entry_signal="EMA cross",
@@ -44,7 +38,7 @@ def _make_trades(bot_id: str, n: int = 10) -> list[TradeEvent]:
 
 def _make_missed(bot_id: str) -> list[MissedOpportunityEvent]:
     return [
-        MissedOpportunityEvent(
+        make_missed(
             bot_id=bot_id,
             pair="ETHUSDT",
             signal="RSI divergence",

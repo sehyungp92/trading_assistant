@@ -22,12 +22,20 @@ class BlockedSuggestion:
 
 
 @dataclass
+class BlockedPortfolioProposal:
+    proposal: object  # PortfolioProposal
+    reason: str
+
+
+@dataclass
 class ValidationResult:
     approved_suggestions: list[AgentSuggestion] = field(default_factory=list)
     blocked_suggestions: list[BlockedSuggestion] = field(default_factory=list)
     approved_predictions: list[AgentPrediction] = field(default_factory=list)
     approved_structural_proposals: list[StructuralProposal] = field(default_factory=list)
     blocked_structural_proposals: list[StructuralProposal] = field(default_factory=list)
+    approved_portfolio_proposals: list = field(default_factory=list)
+    blocked_portfolio_proposals: list[BlockedPortfolioProposal] = field(default_factory=list)
     validator_notes: str = ""
 
 
@@ -43,17 +51,28 @@ def _jaccard_similarity(a: str, b: str) -> float:
 
 
 class ResponseValidator:
+    # Portfolio guardrail constants
+    _MAX_ALLOC_CHANGE_PCT = 0.15  # 15% max per family per cycle
+    _MIN_ALLOC_FLOOR = 0.05  # 5% minimum per family
+    _MAX_RISK_CAP_CHANGE_PCT = 0.20  # 20% max heat_cap change
+    _MIN_EVIDENCE_ALLOC = 60  # days for allocation changes
+    _MIN_EVIDENCE_RISK = 90  # days for risk/drawdown changes
+    _MIN_PREDICTION_ACCURACY = 0.40  # block all portfolio proposals if below
+    _MIN_PORTFOLIO_CONFIDENCE = 0.3  # minimum confidence for portfolio proposals
+
     def __init__(
         self,
         rejected_suggestions: list[dict] | None = None,
         forecast_meta: dict | None = None,
         category_scorecard: CategoryScorecard | None = None,
         hypothesis_track_record: dict | None = None,
+        prediction_accuracy: dict | None = None,
     ) -> None:
         self._rejected = rejected_suggestions or []
         self._forecast_meta = forecast_meta or {}
         self._scorecard = category_scorecard or CategoryScorecard()
         self._hypothesis_track_record = hypothesis_track_record or {}
+        self._prediction_accuracy = prediction_accuracy or {}
 
     def validate(self, parsed: ParsedAnalysis) -> ValidationResult:
         """Validate a parsed analysis, filtering suggestions and adjusting confidence."""
@@ -125,6 +144,13 @@ class ResponseValidator:
             self._validate_structural_proposals(parsed.structural_proposals)
         )
 
+        # Validate portfolio proposals
+        approved_portfolio, blocked_portfolio = (
+            self._validate_portfolio_proposals(
+                getattr(parsed, "portfolio_proposals", [])
+            )
+        )
+
         # Build validator notes
         if blocked:
             notes_lines.append(f"**{len(blocked)} suggestion(s) blocked:**")
@@ -144,12 +170,20 @@ class ResponseValidator:
             for p in blocked_proposals:
                 notes_lines.append(f"- \"{p.title}\"")
 
+        if blocked_portfolio:
+            notes_lines.append(f"\n**{len(blocked_portfolio)} portfolio proposal(s) blocked:**")
+            for bp in blocked_portfolio:
+                title = getattr(bp.proposal, "proposal_type", "unknown")
+                notes_lines.append(f"- {title} — {bp.reason}")
+
         return ValidationResult(
             approved_suggestions=approved,
             blocked_suggestions=blocked,
             approved_predictions=approved_predictions,
             approved_structural_proposals=approved_proposals,
             blocked_structural_proposals=blocked_proposals,
+            approved_portfolio_proposals=approved_portfolio,
+            blocked_portfolio_proposals=blocked_portfolio,
             validator_notes="\n".join(notes_lines),
         )
 
@@ -291,3 +325,147 @@ class ResponseValidator:
                 return confidence  # Bucket matched, gap small — preserve original
 
         return None  # No reliable bucket matched
+
+    def _validate_portfolio_proposals(
+        self,
+        proposals: list,
+    ) -> tuple[list, list["BlockedPortfolioProposal"]]:
+        """Validate portfolio proposals against hard guardrails.
+
+        Returns (approved, blocked).
+        """
+        approved: list = []
+        blocked: list[BlockedPortfolioProposal] = []
+
+        # Global gate: block ALL portfolio proposals if prediction accuracy < 40%
+        overall_acc = self._prediction_accuracy.get("overall_accuracy")
+        if overall_acc is not None and overall_acc < self._MIN_PREDICTION_ACCURACY:
+            for p in proposals:
+                blocked.append(BlockedPortfolioProposal(
+                    proposal=p,
+                    reason=(
+                        f"Blocked: overall prediction accuracy {overall_acc:.0%} "
+                        f"< {self._MIN_PREDICTION_ACCURACY:.0%} minimum"
+                    ),
+                ))
+            return approved, blocked
+
+        for proposal in proposals:
+            block_reason = self._check_portfolio_guardrails(proposal)
+            if block_reason:
+                blocked.append(BlockedPortfolioProposal(
+                    proposal=proposal, reason=block_reason,
+                ))
+            else:
+                approved.append(proposal)
+
+        return approved, blocked
+
+    def _check_portfolio_guardrails(self, proposal) -> str | None:
+        """Check a single portfolio proposal against all hard guardrails.
+
+        Returns block reason string, or None if proposal passes.
+        """
+        proposal_type = getattr(proposal, "proposal_type", "")
+        ptype = proposal_type.value if hasattr(proposal_type, "value") else str(proposal_type)
+        current = getattr(proposal, "current_config", {}) or {}
+        proposed = getattr(proposal, "proposed_config", {}) or {}
+        evidence = getattr(proposal, "evidence_summary", "") or ""
+        obs_window = getattr(proposal, "observation_window_days", 0) or 0
+        confidence = getattr(proposal, "confidence", 0.5) or 0.5
+
+        # Confidence floor — reject very low confidence portfolio proposals
+        if confidence < self._MIN_PORTFOLIO_CONFIDENCE:
+            return (
+                f"Portfolio proposal confidence {confidence:.2f} "
+                f"below {self._MIN_PORTFOLIO_CONFIDENCE:.2f} minimum"
+            )
+
+        # --- Allocation rebalance guardrails ---
+        if ptype == "allocation_rebalance":
+            # Check each family for max change and minimum floor
+            for family, new_weight in proposed.items():
+                old_weight = current.get(family)
+                if old_weight is None:
+                    continue
+                change = abs(new_weight - old_weight)
+                if change > self._MAX_ALLOC_CHANGE_PCT:
+                    return (
+                        f"Allocation change for '{family}' is {change:.0%}, "
+                        f"exceeds {self._MAX_ALLOC_CHANGE_PCT:.0%} max per cycle"
+                    )
+                if new_weight < self._MIN_ALLOC_FLOOR:
+                    return (
+                        f"Proposed allocation for '{family}' is {new_weight:.0%}, "
+                        f"below {self._MIN_ALLOC_FLOOR:.0%} minimum floor"
+                    )
+            # Evidence minimum: 60 days
+            if obs_window < self._MIN_EVIDENCE_ALLOC:
+                return (
+                    f"Allocation proposal observation_window_days={obs_window}, "
+                    f"requires minimum {self._MIN_EVIDENCE_ALLOC} days"
+                )
+
+        # --- Risk cap change guardrails ---
+        elif ptype == "risk_cap_change":
+            old_cap = current.get("heat_cap_R", 0)
+            new_cap = proposed.get("heat_cap_R", 0)
+            if old_cap and new_cap:
+                change_pct = abs(new_cap - old_cap) / old_cap
+                if change_pct > self._MAX_RISK_CAP_CHANGE_PCT:
+                    return (
+                        f"Risk cap change {change_pct:.0%} exceeds "
+                        f"{self._MAX_RISK_CAP_CHANGE_PCT:.0%} maximum"
+                    )
+            if obs_window < self._MIN_EVIDENCE_RISK:
+                return (
+                    f"Risk cap proposal observation_window_days={obs_window}, "
+                    f"requires minimum {self._MIN_EVIDENCE_RISK} days"
+                )
+
+        # --- Drawdown tier change guardrails ---
+        elif ptype == "drawdown_tier_change":
+            old_tiers = current.get("drawdown_tiers", [])
+            new_tiers = proposed.get("drawdown_tiers", [])
+
+            # Block tier removal entirely
+            if len(new_tiers) < len(old_tiers):
+                return "Drawdown tier removal is blocked — tiers can only narrow"
+
+            # Block loosening (higher thresholds or higher multipliers)
+            for i, (old_t, new_t) in enumerate(zip(old_tiers, new_tiers)):
+                old_thresh = old_t[0] if isinstance(old_t, (list, tuple)) else 0
+                new_thresh = new_t[0] if isinstance(new_t, (list, tuple)) else 0
+                old_mult = old_t[1] if isinstance(old_t, (list, tuple)) and len(old_t) > 1 else 1.0
+                new_mult = new_t[1] if isinstance(new_t, (list, tuple)) and len(new_t) > 1 else 1.0
+
+                if new_thresh > old_thresh:
+                    return (
+                        f"Drawdown tier {i} threshold loosened "
+                        f"({old_thresh} → {new_thresh}) — only narrowing allowed"
+                    )
+                if new_mult > old_mult:
+                    return (
+                        f"Drawdown tier {i} multiplier loosened "
+                        f"({old_mult} → {new_mult}) — only tightening allowed"
+                    )
+
+            if obs_window < self._MIN_EVIDENCE_RISK:
+                return (
+                    f"Drawdown tier proposal observation_window_days={obs_window}, "
+                    f"requires minimum {self._MIN_EVIDENCE_RISK} days"
+                )
+
+        # --- Coordination change --- (lighter guardrails, mainly evidence check)
+        elif ptype == "coordination_change":
+            if obs_window < self._MIN_EVIDENCE_ALLOC:
+                return (
+                    f"Coordination proposal observation_window_days={obs_window}, "
+                    f"requires minimum {self._MIN_EVIDENCE_ALLOC} days"
+                )
+
+        else:
+            # Unknown proposal type — block by default for safety
+            return f"Unknown portfolio proposal type '{ptype}' — blocked"
+
+        return None

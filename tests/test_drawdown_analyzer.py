@@ -1,28 +1,18 @@
 """Tests for DrawdownAnalyzer — drawdown episode segmentation + attribution."""
-from datetime import datetime
-
-from schemas.events import TradeEvent
 from schemas.drawdown_analysis import DrawdownAttribution
 from skills.drawdown_analyzer import DrawdownAnalyzer
+from tests.factories import make_trade
 
 
 def _make_trade(trade_id: str, date_str: str, pnl: float,
                 root_causes: list[str] | None = None,
-                regime: str = "trending_up") -> TradeEvent:
-    return TradeEvent(
-        trade_id=trade_id,
-        bot_id="bot1",
-        pair="BTCUSDT",
-        side="LONG",
-        entry_time=datetime.fromisoformat(f"{date_str}T10:00:00"),
-        exit_time=datetime.fromisoformat(f"{date_str}T11:00:00"),
-        entry_price=50000,
-        exit_price=50000 + pnl,
-        position_size=1.0,
-        pnl=pnl,
-        pnl_pct=pnl / 500,
+                regime: str = "trending_up"):
+    return make_trade(
+        trade_id=trade_id, pnl=pnl, pair="BTCUSDT",
+        entry_price=50000, market_regime=regime,
         root_causes=root_causes or [],
-        market_regime=regime,
+        entry_time=f"{date_str}T10:00:00",
+        exit_time=f"{date_str}T11:00:00",
     )
 
 

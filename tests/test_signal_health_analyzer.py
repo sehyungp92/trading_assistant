@@ -1,13 +1,11 @@
 """Tests for SignalHealthAnalyzer — signal health schemas and analyzer logic."""
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
-from schemas.events import TradeEvent
 from schemas.signal_health import ComponentHealth, SignalHealthReport
 from skills.signal_health_analyzer import SignalHealthAnalyzer
+from tests.factories import make_trade
 
 
 # ---------------------------------------------------------------------------
@@ -17,19 +15,9 @@ from skills.signal_health_analyzer import SignalHealthAnalyzer
 def _make_trade(
     pnl: float = 100.0,
     signal_evolution: list[dict] | None = None,
-) -> TradeEvent:
-    return TradeEvent(
-        trade_id=f"t-{pnl}",
-        bot_id="test_bot",
-        pair="NQ",
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, 10, 0),
-        exit_time=datetime(2026, 3, 1, 11, 0),
-        entry_price=100.0,
-        exit_price=101.0,
-        position_size=1.0,
-        pnl=pnl,
-        pnl_pct=pnl / 100.0,
+):
+    return make_trade(
+        trade_id=f"t-{pnl}", bot_id="test_bot", pair="NQ", pnl=pnl,
         signal_evolution=signal_evolution,
     )
 

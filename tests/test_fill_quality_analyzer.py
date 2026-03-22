@@ -1,13 +1,11 @@
 """Tests for FillQualityAnalyzer — fill quality schemas and analyzer logic."""
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
-from schemas.events import TradeEvent
 from schemas.fill_quality import FillQualityReport, FillStats, SymbolFillQuality
 from skills.fill_quality_analyzer import FillQualityAnalyzer
+from tests.factories import make_trade
 
 
 # ---------------------------------------------------------------------------
@@ -19,21 +17,10 @@ def _make_trade(
     pnl: float = 100.0,
     entry_fill: dict | None = None,
     exit_fill: dict | None = None,
-) -> TradeEvent:
-    return TradeEvent(
-        trade_id=f"t-{pair}-{pnl}",
-        bot_id="test_bot",
-        pair=pair,
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, 10, 0),
-        exit_time=datetime(2026, 3, 1, 11, 0),
-        entry_price=100.0,
-        exit_price=101.0,
-        position_size=1.0,
-        pnl=pnl,
-        pnl_pct=pnl / 100.0,
-        entry_fill_details=entry_fill,
-        exit_fill_details=exit_fill,
+):
+    return make_trade(
+        trade_id=f"t-{pair}-{pnl}", bot_id="test_bot", pair=pair, pnl=pnl,
+        entry_fill_details=entry_fill, exit_fill_details=exit_fill,
     )
 
 

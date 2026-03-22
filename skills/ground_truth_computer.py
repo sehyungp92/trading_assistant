@@ -295,3 +295,49 @@ class GroundTruthComputer:
             if isinstance(pq, (int, float)):
                 pqs.append(float(pq))
         return pqs if pqs else [50.0]
+
+    def compute_portfolio_snapshot(
+        self,
+        bots: list[str],
+        as_of_date: str,
+        allocations: dict[str, float] | None = None,
+        period_days: int = 30,
+    ) -> dict:
+        """Compute an allocation-weighted portfolio composite score.
+
+        Formula: sum(bot_composite * bot_allocation_pct) for all bots.
+        When allocations is None, uses equal weighting.
+
+        Returns dict with portfolio_composite, per_bot_composites, and metadata.
+        """
+        if not bots:
+            return {"portfolio_composite": 0.5, "per_bot": {}, "as_of_date": as_of_date}
+
+        if allocations is None:
+            weight = 1.0 / len(bots)
+            allocations = {bot: weight for bot in bots}
+
+        per_bot: dict[str, dict] = {}
+        weighted_sum = 0.0
+        total_weight = 0.0
+
+        for bot in bots:
+            snapshot = self.compute_snapshot(bot, as_of_date, period_days=period_days)
+            alloc = allocations.get(bot, 0.0)
+            per_bot[bot] = {
+                "composite": snapshot.composite_score,
+                "allocation": alloc,
+                "pnl_total": snapshot.pnl_total,
+                "trade_count": snapshot.trade_count,
+            }
+            weighted_sum += snapshot.composite_score * alloc
+            total_weight += alloc
+
+        portfolio_composite = weighted_sum / total_weight if total_weight > 0 else 0.5
+
+        return {
+            "portfolio_composite": round(portfolio_composite, 4),
+            "per_bot": per_bot,
+            "as_of_date": as_of_date,
+            "period_days": period_days,
+        }

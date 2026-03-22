@@ -24,12 +24,14 @@ class TransferProposalBuilder:
         curated_dir: Path,
         bots: list[str],
         findings_dir: Path | None = None,
+        strategy_registry=None,
     ) -> None:
         self._library = pattern_library
         self._curated_dir = curated_dir
         self._bots = bots
         self._findings_dir = findings_dir
         self._outcomes_path = (findings_dir / "transfer_outcomes.jsonl") if findings_dir else None
+        self._strategy_registry = strategy_registry
 
     def build_proposals(self) -> list[TransferProposal]:
         """Build transfer proposals for active patterns (PROPOSED, VALIDATED, IMPLEMENTED)."""
@@ -255,30 +257,106 @@ class TransferProposalBuilder:
             if bot != source and bot not in already_targeted
         ]
 
+    # Asset classes that operate in isolated capital pools / markets.
+    _ISOLATED_ASSET_CLASSES = frozenset({"k_equity"})
+
     def _compute_compatibility(self, pattern: PatternEntry, target_bot: str) -> float:
-        """Score compatibility between a pattern and a target bot."""
-        source_regimes = self._load_regime_distribution(pattern.source_bot)
+        """Score compatibility between a pattern and a target bot.
+
+        Uses archetype-aware scoring when strategy_registry is available,
+        falls back to regime-based scoring otherwise.
+        """
+        if not self._strategy_registry or not getattr(self._strategy_registry, "strategies", None):
+            return self._compute_compatibility_legacy(pattern, target_bot)
+
+        source_arch = self._strategy_registry.archetype_for_strategy(
+            getattr(pattern, "source_strategy_id", "") or ""
+        )
+        target_strategies = self._strategy_registry.strategies_for_bot(target_bot)
+
+        if not source_arch or not target_strategies:
+            return self._compute_compatibility_legacy(pattern, target_bot)
+
+        # Hard gate: isolated markets (e.g., k_equity) cannot transfer to/from other markets
+        if self._cross_market_incompatible(pattern.source_bot, target_bot):
+            return 0.0
+
+        best_score = 0.0
+        for _strat_id, profile in target_strategies.items():
+            target_arch = self._strategy_registry.archetype_for_strategy(_strat_id)
+            if source_arch == target_arch:
+                base = 0.75
+            elif self._same_family(pattern.source_bot, target_bot):
+                base = 0.60
+            else:
+                base = 0.30
+            if self._same_asset_class(pattern.source_bot, target_bot):
+                base = min(1.0, base + 0.10)
+            best_score = max(best_score, base)
+
+        # Blend with regime overlap if available
+        regime_score = self._regime_overlap_score(pattern.source_bot, target_bot)
+        if regime_score is not None:
+            return round(0.6 * best_score + 0.4 * regime_score, 4)
+        return best_score
+
+    def _compute_compatibility_legacy(self, pattern: PatternEntry, target_bot: str) -> float:
+        """Legacy regime-based compatibility scoring."""
+        score = self._regime_overlap_score(pattern.source_bot, target_bot)
+        return score if score is not None else 0.5
+
+    def _cross_market_incompatible(self, source_bot: str, target_bot: str) -> bool:
+        """Check if source and target are in incompatible isolated markets."""
+        if not self._strategy_registry:
+            return False
+        source_strats = self._strategy_registry.strategies_for_bot(source_bot)
+        target_strats = self._strategy_registry.strategies_for_bot(target_bot)
+        source_isolated = any(
+            p.asset_class in self._ISOLATED_ASSET_CLASSES
+            for p in source_strats.values()
+        )
+        target_isolated = any(
+            p.asset_class in self._ISOLATED_ASSET_CLASSES
+            for p in target_strats.values()
+        )
+        return source_isolated != target_isolated
+
+    def _same_family(self, source_bot: str, target_bot: str) -> bool:
+        """Check if two bots belong to the same strategy family."""
+        if not self._strategy_registry:
+            return False
+        source_strats = self._strategy_registry.strategies_for_bot(source_bot)
+        target_strats = self._strategy_registry.strategies_for_bot(target_bot)
+        source_families = {p.family for p in source_strats.values() if p.family}
+        target_families = {p.family for p in target_strats.values() if p.family}
+        return bool(source_families & target_families)
+
+    def _same_asset_class(self, source_bot: str, target_bot: str) -> bool:
+        """Check if two bots trade the same asset class."""
+        if not self._strategy_registry:
+            return False
+        source_strats = self._strategy_registry.strategies_for_bot(source_bot)
+        target_strats = self._strategy_registry.strategies_for_bot(target_bot)
+        source_classes = {p.asset_class for p in source_strats.values() if p.asset_class}
+        target_classes = {p.asset_class for p in target_strats.values() if p.asset_class}
+        return bool(source_classes & target_classes)
+
+    def _regime_overlap_score(self, source_bot: str, target_bot: str) -> float | None:
+        """Compute regime overlap score, or None if data unavailable."""
+        source_regimes = self._load_regime_distribution(source_bot)
         target_regimes = self._load_regime_distribution(target_bot)
-
         if not source_regimes or not target_regimes:
-            return 0.5
-
+            return None
         source_keys = set(source_regimes.keys())
         target_keys = set(target_regimes.keys())
         if not source_keys or not target_keys:
-            return 0.5
-
+            return None
         intersection = source_keys & target_keys
         union = source_keys | target_keys
         regime_overlap = len(intersection) / len(union) if union else 0.0
-
         overlap_weight = 0.0
         for regime in intersection:
-            overlap_weight += min(
-                source_regimes.get(regime, 0),
-                target_regimes.get(regime, 0),
-            )
-
+            overlap_weight += min(source_regimes.get(regime, 0), target_regimes.get(regime, 0))
         return min(1.0, regime_overlap * 0.5 + overlap_weight * 0.5)
 
     def _load_regime_distribution(self, bot_id: str) -> dict[str, float]:

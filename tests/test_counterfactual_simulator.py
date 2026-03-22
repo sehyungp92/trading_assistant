@@ -1,31 +1,18 @@
 # tests/test_counterfactual_simulator.py
 """Tests for counterfactual trade replay simulator."""
-from datetime import datetime, timezone
-
 import pytest
 
-from schemas.events import TradeEvent, MissedOpportunityEvent
 from schemas.counterfactual import ScenarioType, CounterfactualScenario, CounterfactualResult
+from tests.factories import make_trade, make_missed
 
 
 def _make_trade(trade_id, pnl, regime="trending", pair="BTC/USDT"):
-    return TradeEvent(
-        trade_id=trade_id, bot_id="bot1", pair=pair,
-        side="LONG",
-        entry_time=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        exit_time=datetime(2026, 3, 1, 1, tzinfo=timezone.utc),
-        entry_price=100, exit_price=100 + pnl, position_size=1,
-        pnl=pnl, pnl_pct=pnl, market_regime=regime,
-        spread_at_entry=2.0,
-    )
+    return make_trade(trade_id=trade_id, pnl=pnl, market_regime=regime, pair=pair,
+                      spread_at_entry=2.0)
 
 
 def _make_missed(blocked_by, outcome_24h):
-    return MissedOpportunityEvent(
-        bot_id="bot1", pair="BTC/USDT", signal="momentum",
-        blocked_by=blocked_by, outcome_24h=outcome_24h,
-        hypothetical_entry=100.0, confidence=0.8, assumption_tags=[],
-    )
+    return make_missed(blocked_by=blocked_by, outcome_24h=outcome_24h)
 
 
 class TestCounterfactualSchema:

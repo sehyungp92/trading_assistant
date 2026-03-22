@@ -1,18 +1,12 @@
 # tests/test_filter_sensitivity.py
 """Tests for filter sensitivity analysis."""
-from datetime import datetime, timezone
-
-from schemas.events import MissedOpportunityEvent
 from schemas.filter_sensitivity import FilterSensitivityCurve, FilterSensitivityReport
+from tests.factories import make_missed
 
 
 def _make_missed(pair, blocked_by, outcome_24h, margin_pct=None):
-    return MissedOpportunityEvent(
-        bot_id="bot1", pair=pair, signal="momentum",
-        blocked_by=blocked_by, outcome_24h=outcome_24h,
-        confidence=0.8, assumption_tags=[],
-        margin_pct=margin_pct,
-    )
+    return make_missed(pair=pair, blocked_by=blocked_by, outcome_24h=outcome_24h,
+                       margin_pct=margin_pct)
 
 
 class TestFilterSensitivitySchema:

@@ -201,10 +201,6 @@ class TestAgentRunnerCostIntegration:
             cost_tracker=cost_tracker,
         )
 
-    @pytest.fixture
-    def sample_package(self) -> PromptPackage:
-        return PromptPackage(task_prompt="Analyse.", system_prompt="Analyst.")
-
     @pytest.mark.asyncio
     async def test_cost_recorded_after_invocation(self, runner: AgentRunner, cost_tracker: CostTracker, sample_package: PromptPackage):
         runner._auth_checker._provider_status_cache[AgentProvider.CLAUDE_MAX] = _ready(

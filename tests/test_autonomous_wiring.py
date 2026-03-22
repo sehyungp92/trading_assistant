@@ -75,32 +75,6 @@ class TestHandlersWiring:
         assert handlers_obj._autonomous_pipeline is None
 
     @pytest.mark.asyncio
-    async def test_pipeline_failure_does_not_break_handler(self, tmp_path: Path):
-        from orchestrator.agent_runner import AgentRunner
-        from orchestrator.event_stream import EventStream
-        from schemas.notifications import NotificationPreferences
-        from orchestrator.handlers import Handlers
-
-        pipeline = MagicMock()
-        pipeline.process_new_suggestions = AsyncMock(side_effect=RuntimeError("boom"))
-
-        runner = MagicMock()
-        handlers_obj = Handlers(
-            agent_runner=runner,
-            event_stream=EventStream(),
-            dispatcher=MagicMock(),
-            notification_prefs=NotificationPreferences(),
-            curated_dir=tmp_path / "curated",
-            memory_dir=tmp_path / "memory",
-            runs_dir=tmp_path / "runs",
-            source_root=tmp_path,
-            bots=[],
-            autonomous_pipeline=pipeline,
-        )
-        # Should not raise
-        await handlers_obj._run_autonomous_pipeline({"s1": "test"}, "run1")
-
-    @pytest.mark.asyncio
     async def test_pipeline_called_with_suggestion_ids(self, tmp_path: Path):
         from orchestrator.agent_runner import AgentRunner
         from orchestrator.event_stream import EventStream

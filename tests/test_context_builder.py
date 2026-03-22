@@ -1,13 +1,28 @@
-"""Tests for generic context builder (H3)."""
+"""Tests for generic context builder (H3), strategy registry enrichment, session history, and triage context."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from analysis.context_builder import ContextBuilder
 from schemas.prompt_package import PromptPackage
+from analysis.prompt_assembler import DailyPromptAssembler
+from analysis.weekly_prompt_assembler import WeeklyPromptAssembler
+from schemas.strategy_profile import (
+    ArchetypeExpectation,
+    CoordinationConfig,
+    CoordinationSignal,
+    PortfolioConfig,
+    StrategyProfile,
+    StrategyRegistry,
+)
+from orchestrator.session_store import SessionStore
+from schemas.bug_triage import ErrorEvent, BugSeverity, ErrorCategory
+from skills.failure_log import FailureEntry, FailureLog
+from skills.triage_context_builder import TriageContextBuilder, TriageContext
 
 
 @pytest.fixture
@@ -29,6 +44,58 @@ def memory_dir(tmp_path: Path) -> Path:
     (findings_dir / "corrections.jsonl").write_text("\n".join(lines))
 
     return tmp_path
+
+
+@pytest.fixture()
+def strategy_registry() -> StrategyRegistry:
+    return StrategyRegistry(
+        strategies={
+            "ATRSS": StrategyProfile(
+                display_name="ATR Swing",
+                bot_id="swing_multi_01",
+                family="swing",
+                archetype="trend_follow",
+                asset_class="mixed",
+                symbols=["QQQ"],
+                preferred_regimes=["trending_up"],
+                adverse_regimes=["ranging"],
+            ),
+            "IARIC_v1": StrategyProfile(
+                display_name="IARIC",
+                bot_id="stock_trader",
+                family="stock",
+                archetype="intraday_momentum",
+                asset_class="equity",
+            ),
+        },
+        coordination=CoordinationConfig(
+            signals=[
+                CoordinationSignal(
+                    trigger={"strategy": "ATRSS", "event": "ENTRY_FILL"},
+                    target={"strategy": "AKC_HELIX", "action": "TIGHTEN_STOP_BE"},
+                    condition="SAME_SYMBOL",
+                ),
+            ],
+        ),
+        portfolio=PortfolioConfig(
+            heat_cap_R=2.5,
+            portfolio_daily_stop_R=3.0,
+            portfolio_weekly_stop_R=5.0,
+            family_allocations={"swing": 0.5, "stock": 0.5},
+        ),
+        archetype_expectations={
+            "trend_follow": ArchetypeExpectation(
+                expected_win_rate=(0.35, 0.50),
+                expected_payoff_ratio=(1.8, 3.0),
+                regime_sensitivity="high",
+            ),
+        },
+    )
+
+
+@pytest.fixture
+def session_store(tmp_path):
+    return SessionStore(base_dir=str(tmp_path / "sessions"))
 
 
 class TestContextBuilder:
@@ -84,7 +151,6 @@ class TestContextBuilder:
 
     def test_assemblers_use_context_builder(self, memory_dir: Path, tmp_path: Path):
         """Integration test: DailyPromptAssembler uses ContextBuilder."""
-        from analysis.prompt_assembler import DailyPromptAssembler
         curated_dir = tmp_path / "curated"
         curated_dir.mkdir()
 
@@ -325,3 +391,419 @@ class TestLoadBacktestReliability:
         pkg = ctx.base_package()
         assert "backtest_reliability" in pkg.data
         assert pkg.data["backtest_reliability"]["signal"] == 1.0
+
+
+# --- Tests from test_context_enrichment.py (strategy registry context enrichment) ---
+
+
+class TestBasePackageInjection:
+    def test_strategy_profiles_injected(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        assert "strategy_profiles" in pkg.data
+        assert "ATRSS" in pkg.data["strategy_profiles"]
+        assert pkg.data["strategy_profiles"]["ATRSS"]["bot_id"] == "swing_multi_01"
+
+    def test_coordination_rules_injected(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        assert "coordination_rules" in pkg.data
+        assert len(pkg.data["coordination_rules"]["signals"]) == 1
+
+    def test_archetype_expectations_injected(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        assert "archetype_expectations" in pkg.data
+        assert "trend_follow" in pkg.data["archetype_expectations"]
+
+    def test_portfolio_risk_config_injected(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        assert "portfolio_risk_config" in pkg.data
+        assert pkg.data["portfolio_risk_config"]["heat_cap_R"] == 2.5
+
+    def test_no_registry_no_injection(self, tmp_path: Path) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=None)
+
+        assert "strategy_profiles" not in pkg.data
+        assert "coordination_rules" not in pkg.data
+
+    def test_empty_registry_no_injection(self, tmp_path: Path) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=StrategyRegistry())
+
+        assert "strategy_profiles" not in pkg.data
+
+
+class TestContextPriority:
+    def test_strategy_profiles_in_priority_list(self) -> None:
+        assert "strategy_profiles" in ContextBuilder._CONTEXT_PRIORITY
+
+    def test_strategy_profiles_after_ground_truth(self) -> None:
+        idx_gt = ContextBuilder._CONTEXT_PRIORITY.index("ground_truth_trend")
+        idx_sp = ContextBuilder._CONTEXT_PRIORITY.index("strategy_profiles")
+        assert idx_sp > idx_gt  # strategy_profiles comes after ground_truth_trend
+
+
+class TestAssemblerPassthrough:
+    def test_daily_assembler_accepts_strategy_registry(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        assembler = DailyPromptAssembler(
+            date="2026-03-01",
+            bots=["swing_multi_01"],
+            curated_dir=tmp_path / "curated",
+            memory_dir=memory_dir,
+            strategy_registry=strategy_registry,
+        )
+        assert assembler.strategy_registry is strategy_registry
+
+    def test_weekly_assembler_accepts_strategy_registry(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        assembler = WeeklyPromptAssembler(
+            week_start="2026-03-01",
+            week_end="2026-03-07",
+            bots=["swing_multi_01"],
+            curated_dir=tmp_path / "curated",
+            memory_dir=memory_dir,
+            runs_dir=tmp_path / "runs",
+            strategy_registry=strategy_registry,
+        )
+        assert assembler.strategy_registry is strategy_registry
+
+
+# --- Tests from test_session_history_context.py (session history in context, A5) ---
+
+
+class TestSessionHistoryContext:
+    def test_get_recent_sessions_returns_sessions(self, session_store):
+        # Record a session
+        session_store.record_invocation(
+            session_id="sess-1",
+            agent_type="daily_analysis",
+            prompt_package={"task": "test"},
+            response="Analysis complete for all bots",
+            duration_ms=5000,
+        )
+
+        result = session_store.get_recent_sessions("daily_analysis", days=7)
+        assert len(result) == 1
+        assert result[0]["agent_type"] == "daily_analysis"
+        assert result[0]["duration_ms"] == 5000
+        assert "Analysis complete" in result[0]["response_summary"]
+
+    def test_load_session_history_formats_text(self, memory_dir, session_store):
+        session_store.record_invocation(
+            session_id="sess-1",
+            agent_type="daily_analysis",
+            prompt_package={},
+            response="Daily report generated",
+            duration_ms=3000,
+            metadata={
+                "provider": "claude_max",
+                "effective_model": "sonnet",
+                "first_output_ms": 125,
+                "tool_call_count": 2,
+                "stream_event_count": 8,
+                "auth_mode": "claude.ai:max",
+            },
+        )
+
+        ctx = ContextBuilder(memory_dir)
+        result = ctx.load_session_history(session_store, "daily_analysis")
+        assert "Recent daily_analysis sessions" in result
+        assert "3000ms" in result
+        assert "claude_max/sonnet" in result
+        assert "first 125ms" in result
+        assert "tools 2" in result
+        assert "stream 8" in result
+        assert "claude.ai:max" in result
+
+    def test_base_package_includes_session_history(self, memory_dir, session_store):
+        session_store.record_invocation(
+            session_id="sess-1",
+            agent_type="daily_analysis",
+            prompt_package={},
+            response="Daily report output",
+            duration_ms=2000,
+        )
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(session_store=session_store, agent_type="daily_analysis")
+        assert "session_history" in pkg.data
+        assert "daily_analysis" in pkg.data["session_history"]
+
+    def test_empty_session_history_handled_gracefully(self, memory_dir, session_store):
+        ctx = ContextBuilder(memory_dir)
+        result = ctx.load_session_history(session_store, "nonexistent_type")
+        assert result == ""
+
+    def test_session_summary_truncated(self, memory_dir, session_store):
+        long_response = "x" * 1000
+        session_store.record_invocation(
+            session_id="sess-1",
+            agent_type="daily_analysis",
+            prompt_package={},
+            response=long_response,
+            duration_ms=1000,
+        )
+
+        ctx = ContextBuilder(memory_dir)
+        result = ctx.load_session_history(session_store, "daily_analysis")
+        # response_summary is capped at 200 chars, then we take 100 in format
+        assert len(result) < 500
+
+    def test_filters_by_agent_type(self, session_store):
+        session_store.record_invocation(
+            session_id="sess-1",
+            agent_type="daily_analysis",
+            prompt_package={},
+            response="daily",
+            duration_ms=1000,
+        )
+        session_store.record_invocation(
+            session_id="sess-2",
+            agent_type="weekly_analysis",
+            prompt_package={},
+            response="weekly",
+            duration_ms=2000,
+        )
+
+        daily = session_store.get_recent_sessions("daily_analysis", days=7)
+        weekly = session_store.get_recent_sessions("weekly_analysis", days=7)
+
+        assert all(s["agent_type"] == "daily_analysis" for s in daily)
+        assert all(s["agent_type"] == "weekly_analysis" for s in weekly)
+
+
+# --- Tests from test_triage_context_builder.py (triage context builder) ---
+
+
+class TestTriageContext:
+    def test_has_required_fields(self):
+        ctx = TriageContext(
+            error_event_summary="RuntimeError: division by zero in calc.py:10",
+            stack_trace="Traceback...",
+            source_snippet="",
+            recent_git_log="",
+            past_rejections=[],
+        )
+        assert ctx.error_event_summary != ""
+        assert ctx.stack_trace != ""
+
+
+class TestTriageContextBuilder:
+    def test_builds_context_with_source_file(self, tmp_path: Path):
+        # Create a fake source file
+        src = tmp_path / "calc.py"
+        src.write_text("def divide(x, y):\n    return x / y\n")
+
+        e = ErrorEvent(
+            bot_id="bot1", error_type="RuntimeError",
+            message="division by zero",
+            stack_trace='Traceback:\n  File "calc.py", line 2\n    return x / y\nRuntimeError: division by zero',
+            source_file="calc.py",
+            source_line=2,
+        )
+
+        builder = TriageContextBuilder(source_root=tmp_path)
+        ctx = builder.build(e, BugSeverity.HIGH, ErrorCategory.UNKNOWN, [])
+
+        assert "RuntimeError" in ctx.error_event_summary
+        assert "division by zero" in ctx.error_event_summary
+        assert "return x / y" in ctx.source_snippet
+
+    def test_builds_context_without_source_file(self, tmp_path: Path):
+        e = ErrorEvent(
+            bot_id="bot1", error_type="ConnectionError",
+            message="connection lost",
+            stack_trace="...",
+        )
+
+        builder = TriageContextBuilder(source_root=tmp_path)
+        ctx = builder.build(e, BugSeverity.CRITICAL, ErrorCategory.CONNECTION_LOST, [])
+
+        assert ctx.source_snippet == ""
+        assert "ConnectionError" in ctx.error_event_summary
+
+    def test_includes_past_rejections(self, tmp_path: Path):
+        e = ErrorEvent(
+            bot_id="bot1", error_type="ImportError",
+            message="no module foo",
+            stack_trace="...",
+        )
+
+        past = [
+            FailureEntry(
+                bot_id="bot1", error_type="ImportError", message="no module foo",
+                outcome="known_fix", rejection_reason="wrong version",
+            ),
+        ]
+
+        builder = TriageContextBuilder(source_root=tmp_path)
+        ctx = builder.build(e, BugSeverity.HIGH, ErrorCategory.DEPENDENCY, past)
+
+        assert len(ctx.past_rejections) == 1
+        assert "wrong version" in ctx.past_rejections[0]
+
+    def test_source_snippet_includes_surrounding_lines(self, tmp_path: Path):
+        src = tmp_path / "module.py"
+        lines = [f"line {i}\n" for i in range(1, 21)]
+        src.write_text("".join(lines))
+
+        e = ErrorEvent(
+            bot_id="bot1", error_type="E", message="m",
+            stack_trace="...", source_file="module.py", source_line=10,
+        )
+
+        builder = TriageContextBuilder(source_root=tmp_path, context_lines=3)
+        ctx = builder.build(e, BugSeverity.HIGH, ErrorCategory.UNKNOWN, [])
+
+        # Should include lines 7-13 (3 before, target, 3 after)
+        assert "line 7" in ctx.source_snippet
+        assert "line 10" in ctx.source_snippet
+        assert "line 13" in ctx.source_snippet
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Outcome measurement quality gate
+# ---------------------------------------------------------------------------
+
+class TestOutcomeQualityFilter:
+    """Tests for load_outcome_measurements() quality filtering."""
+
+    def _write_outcomes(self, tmp_path: Path, entries: list[dict]) -> None:
+        findings = tmp_path / "findings"
+        findings.mkdir(exist_ok=True)
+        lines = [json.dumps(e) for e in entries]
+        (findings / "outcomes.jsonl").write_text("\n".join(lines))
+
+    def test_excludes_low_and_insufficient(self, tmp_path: Path):
+        self._write_outcomes(tmp_path, [
+            {"suggestion_id": "s1", "verdict": "positive", "measurement_quality": "high"},
+            {"suggestion_id": "s2", "verdict": "negative", "measurement_quality": "low"},
+            {"suggestion_id": "s3", "verdict": "positive", "measurement_quality": "insufficient"},
+        ])
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        reliable, low_q = ctx.load_outcome_measurements()
+        assert len(reliable) == 1
+        assert reliable[0]["suggestion_id"] == "s1"
+        assert len(low_q) == 2
+
+    def test_includes_high_and_medium(self, tmp_path: Path):
+        self._write_outcomes(tmp_path, [
+            {"suggestion_id": "s1", "measurement_quality": "high"},
+            {"suggestion_id": "s2", "measurement_quality": "medium"},
+        ])
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        reliable, low_q = ctx.load_outcome_measurements()
+        assert len(reliable) == 2
+        assert len(low_q) == 0
+
+    def test_backward_compat_no_quality_field(self, tmp_path: Path):
+        """Entries without measurement_quality should be included in reliable."""
+        self._write_outcomes(tmp_path, [
+            {"suggestion_id": "s1", "verdict": "positive"},
+            {"suggestion_id": "s2", "verdict": "negative", "measurement_quality": "low"},
+        ])
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        reliable, low_q = ctx.load_outcome_measurements()
+        assert len(reliable) == 1
+        assert reliable[0]["suggestion_id"] == "s1"
+        assert len(low_q) == 1
+
+    def test_low_quality_in_spurious_via_base_package(self, tmp_path: Path):
+        """LOW/INSUFFICIENT outcomes should appear in spurious_outcomes in base_package."""
+        policies = tmp_path / "policies" / "v1"
+        policies.mkdir(parents=True)
+        self._write_outcomes(tmp_path, [
+            {"suggestion_id": "s1", "measurement_quality": "high"},
+            {"suggestion_id": "s2", "measurement_quality": "low"},
+            {"suggestion_id": "s3", "measurement_quality": "insufficient"},
+        ])
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        pkg = ctx.base_package()
+        # Reliable outcomes only
+        assert len(pkg.data.get("outcome_measurements", [])) == 1
+        # Low-quality merged into spurious
+        spurious = pkg.data.get("spurious_outcomes", [])
+        assert len(spurious) == 2
+        sids = {e["suggestion_id"] for e in spurious}
+        assert sids == {"s2", "s3"}
+
+    def test_empty_file_returns_empty_tuples(self, tmp_path: Path):
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        reliable, low_q = ctx.load_outcome_measurements()
+        assert reliable == []
+        assert low_q == []
+
+    def test_dedup_still_works_with_quality_filter(self, tmp_path: Path):
+        """Last-write-wins dedup should still apply before quality filtering."""
+        self._write_outcomes(tmp_path, [
+            {"suggestion_id": "s1", "measurement_quality": "low", "verdict": "negative"},
+            {"suggestion_id": "s1", "measurement_quality": "high", "verdict": "positive"},
+        ])
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        reliable, low_q = ctx.load_outcome_measurements()
+        # s1 was overwritten to high quality
+        assert len(reliable) == 1
+        assert reliable[0]["measurement_quality"] == "high"
+        assert len(low_q) == 0

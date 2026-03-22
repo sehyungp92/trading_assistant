@@ -24,7 +24,6 @@ Steps:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -46,6 +45,7 @@ from skills.build_daily_metrics import DailyMetricsBuilder
 from skills.forecast_tracker import ForecastTracker
 from skills.suggestion_scorer import SuggestionScorer
 from skills.suggestion_tracker import SuggestionTracker
+from tests.factories import make_trade, make_missed
 
 
 # ---------------------------------------------------------------------------
@@ -58,20 +58,15 @@ BOT_ID = "bot1"
 
 def _make_trades(n: int = 10) -> list[TradeEvent]:
     """Generate realistic trade events."""
-    now = datetime.now(timezone.utc)
     trades: list[TradeEvent] = []
     for i in range(n):
         win = i % 3 != 0
         pnl = 120.0 if win else -60.0
-        trades.append(TradeEvent(
+        trades.append(make_trade(
             trade_id=f"{BOT_ID}_t{i}",
             bot_id=BOT_ID,
             pair="BTCUSDT",
-            side="LONG",
-            entry_time=now,
-            exit_time=now,
             entry_price=50000.0,
-            exit_price=50000.0 + pnl,
             position_size=0.1,
             pnl=pnl,
             pnl_pct=pnl / 50000.0 * 100,
@@ -85,7 +80,7 @@ def _make_trades(n: int = 10) -> list[TradeEvent]:
 
 
 def _make_missed() -> list[MissedOpportunityEvent]:
-    return [MissedOpportunityEvent(
+    return [make_missed(
         bot_id=BOT_ID,
         pair="ETHUSDT",
         signal="RSI_oversold",

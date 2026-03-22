@@ -229,3 +229,139 @@ class TestJsonFenceFallback:
         parsed = parse_response(response)
         assert parsed.parse_success is True
         assert parsed.predictions[0].bot_id == "bot1"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Fallback markdown extraction tests
+# ---------------------------------------------------------------------------
+
+class TestFallbackExtraction:
+    """Tests for _extract_from_markdown() fallback when structured block is missing."""
+
+    def test_fallback_extracts_inline_suggestion(self):
+        """Inline JSON suggestion in markdown should be extracted via fallback."""
+        suggestion = {
+            "suggestion_id": "#s1",
+            "bot_id": "bot1",
+            "category": "exit_timing",
+            "title": "Widen trailing stop",
+            "expected_impact": "+5% PnL",
+            "confidence": 0.7,
+            "evidence_summary": "50 trades show early exits",
+        }
+        response = f"# Analysis\nHere is my suggestion:\n{json.dumps(suggestion)}\nEnd of report."
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.fallback_used is True
+        assert len(parsed.suggestions) == 1
+        assert parsed.suggestions[0].title == "Widen trailing stop"
+
+    def test_fallback_extracts_inline_prediction(self):
+        """Inline JSON prediction should be extracted via fallback."""
+        prediction = {
+            "bot_id": "bot1",
+            "metric": "pnl",
+            "direction": "improve",
+            "confidence": 0.6,
+            "timeframe_days": 7,
+            "reasoning": "Strong momentum",
+        }
+        response = f"# Report\nPrediction:\n{json.dumps(prediction)}\nDone."
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.fallback_used is True
+        assert len(parsed.predictions) == 1
+        assert parsed.predictions[0].bot_id == "bot1"
+        assert parsed.predictions[0].direction == "improve"
+
+    def test_fallback_sets_flag(self):
+        """fallback_used should be True only when fallback path is used."""
+        suggestion = {
+            "suggestion_id": "#s1",
+            "bot_id": "bot1",
+            "category": "signal",
+            "title": "Test",
+            "expected_impact": "+2%",
+            "confidence": 0.5,
+        }
+        response = f"Report text\n{json.dumps(suggestion)}"
+        parsed = parse_response(response)
+        assert parsed.fallback_used is True
+
+    def test_original_path_still_preferred(self):
+        """When structured block exists, fallback should NOT be used."""
+        data = {
+            "predictions": [
+                {"bot_id": "bot1", "metric": "pnl", "direction": "improve", "confidence": 0.7}
+            ],
+            "suggestions": [],
+        }
+        response = f"# Report\n<!-- STRUCTURED_OUTPUT\n{json.dumps(data)}\n-->"
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.fallback_used is False
+        assert len(parsed.predictions) == 1
+
+    def test_no_false_positives_on_random_json(self):
+        """Random JSON without known keys should not be extracted."""
+        response = '# Report\n{"foo": "bar", "count": 42}\nSome analysis text.'
+        parsed = parse_response(response)
+        assert parsed.parse_success is False
+        assert parsed.fallback_used is False
+        assert len(parsed.suggestions) == 0
+        assert len(parsed.predictions) == 0
+
+    def test_fallback_used_false_on_normal_parse(self):
+        """Normal structured output should set fallback_used=False."""
+        data = {"predictions": [], "suggestions": [], "structural_proposals": []}
+        response = f"Report\n<!-- STRUCTURED_OUTPUT\n{json.dumps(data)}\n-->"
+        parsed = parse_response(response)
+        assert parsed.fallback_used is False
+
+    def test_empty_response_no_fallback(self):
+        parsed = parse_response("")
+        assert parsed.parse_success is False
+        assert parsed.fallback_used is False
+
+    def test_fallback_handles_nested_acceptance_criteria(self):
+        """Structural proposal with acceptance_criteria array of dicts should be extracted."""
+        proposal = {
+            "bot_id": "bot1",
+            "title": "Add regime gate",
+            "description": "Gate entries on regime",
+            "reversibility": "easy",
+            "estimated_complexity": "low",
+            "acceptance_criteria": [
+                {"metric": "pnl", "direction": "improve", "minimum_change": 0.0,
+                 "observation_window_days": 14, "minimum_trade_count": 20},
+                {"metric": "win_rate", "direction": "not_degrade", "minimum_change": -0.02,
+                 "observation_window_days": 14, "minimum_trade_count": 20},
+            ],
+        }
+        response = f"# Analysis\nProposal:\n{json.dumps(proposal)}\nEnd."
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.fallback_used is True
+        assert len(parsed.structural_proposals) == 1
+        assert parsed.structural_proposals[0].title == "Add regime gate"
+
+    def test_fallback_handles_bare_wrapper(self):
+        """Bare top-level wrapper without markers should be extracted via fallback."""
+        data = {
+            "predictions": [
+                {"bot_id": "bot1", "metric": "pnl", "direction": "improve",
+                 "confidence": 0.6, "timeframe_days": 7, "reasoning": "momentum"},
+            ],
+            "suggestions": [
+                {"suggestion_id": "#s1", "bot_id": "bot1", "category": "exit_timing",
+                 "title": "Widen stop", "expected_impact": "+5%", "confidence": 0.7},
+            ],
+            "structural_proposals": [],
+        }
+        response = f"# Report\nHere is the output:\n{json.dumps(data)}\nDone."
+        parsed = parse_response(response)
+        assert parsed.parse_success is True
+        assert parsed.fallback_used is True
+        assert len(parsed.predictions) == 1
+        assert len(parsed.suggestions) == 1
+        assert parsed.suggestions[0].title == "Widen stop"

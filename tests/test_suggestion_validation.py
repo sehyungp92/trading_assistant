@@ -538,36 +538,18 @@ class MockSuggestionTracker:
 
 def _make_handlers(tmp_path, suggestion_tracker=None):
     """Create a minimal Handlers instance for testing _record_agent_suggestions."""
-    from orchestrator.agent_runner import AgentRunner
-    from orchestrator.event_stream import EventStream
+    from tests.factories import make_handlers as _factory_make_handlers
 
-    agent_runner = MagicMock(spec=AgentRunner)
-    event_stream = MagicMock(spec=EventStream)
+    event_stream = MagicMock()
     event_stream.broadcast = MagicMock()
-    dispatcher = MagicMock()
-
-    from schemas.notifications import NotificationPreferences
-    notification_prefs = NotificationPreferences()
-
     curated_dir = tmp_path / "curated"
     curated_dir.mkdir(exist_ok=True)
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(exist_ok=True)
-    runs_dir = tmp_path / "runs"
-    runs_dir.mkdir(exist_ok=True)
-
-    from orchestrator.handlers import Handlers
-    handlers = Handlers(
-        agent_runner=agent_runner,
+    handlers, _, _ = _factory_make_handlers(
+        tmp_path,
         event_stream=event_stream,
-        dispatcher=dispatcher,
-        notification_prefs=notification_prefs,
-        curated_dir=curated_dir,
-        memory_dir=memory_dir,
-        runs_dir=runs_dir,
-        source_root=tmp_path,
-        bots=["bot_a"],
         suggestion_tracker=suggestion_tracker,
+        bots=["bot_a"],
+        curated_dir=curated_dir,
     )
     return handlers, curated_dir
 

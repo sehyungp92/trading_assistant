@@ -595,6 +595,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         bot_configs=config.bot_configs,
         reliability_tracker=reliability_tracker,
         structural_experiment_tracker=structural_experiment_tracker,
+        strategy_registry=config.strategy_registry,
     )
 
     # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)

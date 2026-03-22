@@ -113,6 +113,46 @@ class SuggestionTracker:
             rejected = [s for s in rejected if s.get("bot_id") == bot_id]
         return rejected
 
+    def get_deployed_portfolio_count(self) -> int:
+        """Count DEPLOYED suggestions with bot_id='PORTFOLIO'.
+
+        Used to enforce concurrent deployment limit (max 1 portfolio change at a time).
+        """
+        suggestions = self.load_all()
+        return sum(
+            1 for s in suggestions
+            if s.get("bot_id") == "PORTFOLIO"
+            and s.get("status") == SuggestionStatus.DEPLOYED.value
+        )
+
+    def get_last_portfolio_proposal_date(self, proposal_type: str = "") -> str | None:
+        """Get the date of the most recent portfolio proposal (any status).
+
+        Args:
+            proposal_type: Optional filter by category (e.g., 'portfolio_allocation').
+
+        Returns:
+            ISO date string of most recent proposal, or None if no history.
+        """
+        suggestions = self.load_all()
+        portfolio = [
+            s for s in suggestions
+            if s.get("bot_id") == "PORTFOLIO"
+        ]
+        if proposal_type:
+            portfolio = [s for s in portfolio if s.get("category") == proposal_type]
+        if not portfolio:
+            return None
+        # Find most recent by proposed_at, created_at, or timestamp
+        dates = []
+        for s in portfolio:
+            for key in ("proposed_at", "created_at", "timestamp", "accepted_at"):
+                val = s.get(key)
+                if val:
+                    dates.append(val)
+                    break
+        return max(dates) if dates else None
+
     def _update_status(
         self,
         suggestion_id: str,

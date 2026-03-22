@@ -15,7 +15,6 @@ from orchestrator.invocation_builder import (
     _CLAUDE_RUNTIME,
     _OPENAI_ENV_KEYS_TO_CLEAR,
 )
-from orchestrator.event_stream import EventStream
 from orchestrator.session_store import SessionStore
 from schemas.agent_preferences import AgentProvider, AgentSelection
 from schemas.prompt_package import PromptPackage
@@ -27,25 +26,11 @@ def session_store(tmp_path: Path) -> SessionStore:
 
 
 @pytest.fixture
-def event_stream() -> EventStream:
-    return EventStream()
-
-
-@pytest.fixture
-def runner(tmp_path: Path, session_store: SessionStore, event_stream: EventStream) -> AgentRunner:
+def runner(tmp_path: Path, session_store: SessionStore, event_stream) -> AgentRunner:
     return AgentRunner(
         runs_dir=tmp_path / "runs",
         session_store=session_store,
         event_stream=event_stream,
-    )
-
-
-@pytest.fixture
-def sample_package() -> PromptPackage:
-    return PromptPackage(
-        task_prompt="Analyse daily trades.",
-        system_prompt="You are a trading analyst.",
-        data={"trades": [{"id": 1}]},
     )
 
 
