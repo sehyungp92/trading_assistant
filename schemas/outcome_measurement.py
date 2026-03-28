@@ -57,6 +57,11 @@ class OutcomeMeasurement(BaseModel):
     # Quality assessment
     measurement_quality: MeasurementQuality = MeasurementQuality.HIGH
 
+    # Targeted metric evaluation
+    target_metric: Optional[str] = None  # "pnl" | "win_rate" | "drawdown"
+    target_metric_improved: Optional[bool] = None
+    target_metric_delta: float = 0.0
+
     # Effect significance
     effect_size: float = 0.0
     noise_estimate: float = 0.0
@@ -100,9 +105,23 @@ def compute_measurement_quality(
     after_trade_count: int,
     volatility_ratio: float,
     concurrent_changes: list[str],
+    window_days: int = 7,
 ) -> MeasurementQuality:
-    """Determine measurement quality from regime/sample/confounder data."""
-    if before_trade_count < 3 or after_trade_count < 3:
+    """Determine measurement quality from regime/sample/confounder data.
+
+    Args:
+        window_days: Measurement window size. Larger windows require more
+            trades for INSUFFICIENT threshold: 7d→3, 14d→5, 30d→10.
+    """
+    # Scale trade count minimums with window size
+    if window_days >= 30:
+        min_trades = 10
+    elif window_days >= 14:
+        min_trades = 5
+    else:
+        min_trades = 3
+
+    if before_trade_count < min_trades or after_trade_count < min_trades:
         return MeasurementQuality.INSUFFICIENT
 
     if not regime_matched:

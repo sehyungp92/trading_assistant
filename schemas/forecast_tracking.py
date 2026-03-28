@@ -64,3 +64,4 @@ class ForecastMetaAnalysis(BaseModel):
     expected_calibration_error: Optional[float] = None
     brier_score: Optional[float] = None
     calibration_sample_size: int = 0
+    directional_bias: dict[str, dict] = {}

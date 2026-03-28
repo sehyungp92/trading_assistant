@@ -23,6 +23,17 @@ from schemas.outcome_measurement import (
 class AutoOutcomeMeasurer:
     """Measures suggestion outcomes by comparing pre/post performance."""
 
+    # Maps suggestion category → the metric that category primarily targets.
+    CATEGORY_TO_TARGET_METRIC: dict[str, str] = {
+        "stop_loss": "drawdown",
+        "exit_timing": "pnl",
+        "signal": "win_rate",
+        "filter_threshold": "win_rate",
+        "position_sizing": "pnl",
+        "regime_gate": "drawdown",
+        "structural": "pnl",
+    }
+
     def __init__(
         self,
         curated_dir: Path,
@@ -103,6 +114,7 @@ class AutoOutcomeMeasurer:
             after_trade_count=after_total,
             volatility_ratio=vol_ratio,
             concurrent_changes=concurrent,
+            window_days=after_days,
         )
 
         # Effect significance
@@ -142,12 +154,113 @@ class AutoOutcomeMeasurer:
             significance_score=round(sig, 4),
         )
 
+        # Evaluate targeted metric improvement
+        measurement = self._evaluate_target_metric(measurement, suggestion_id)
+
         # Feed back to calibration tracker (approximate composite delta)
         if self._calibration_tracker:
             delta = self._estimate_composite_delta(measurement)
             self._calibration_tracker.record_outcome(suggestion_id, delta)
 
         return measurement
+
+    def _load_suggestion_category(self, suggestion_id: str) -> tuple[str, str | None]:
+        """Load category and target_param for a suggestion from suggestions.jsonl.
+
+        Returns (category, target_param) or ("", None) if not found.
+        """
+        if not self._findings_dir:
+            return "", None
+        path = self._findings_dir / "suggestions.jsonl"
+        if not path.exists():
+            return "", None
+        try:
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if rec.get("suggestion_id") == suggestion_id:
+                    return rec.get("category", ""), rec.get("target_param")
+        except (OSError, json.JSONDecodeError):
+            pass
+        return "", None
+
+    def _evaluate_target_metric(
+        self, measurement: OutcomeMeasurement, suggestion_id: str,
+    ) -> OutcomeMeasurement:
+        """Check whether the specific targeted metric improved.
+
+        For drawdown, improvement means decrease. For pnl/win_rate, improvement
+        means increase. Updates measurement with target_metric fields.
+        """
+        category, target_param = self._load_suggestion_category(suggestion_id)
+        if not category:
+            return measurement
+
+        target_metric = self.CATEGORY_TO_TARGET_METRIC.get(category)
+        if not target_metric:
+            return measurement
+
+        # Compute delta for the targeted metric
+        if target_metric == "pnl":
+            delta = measurement.pnl_after - measurement.pnl_before
+            improved = delta > 0
+        elif target_metric == "win_rate":
+            delta = measurement.win_rate_after - measurement.win_rate_before
+            improved = delta > 0
+        elif target_metric == "drawdown":
+            # For drawdown, decrease = improvement
+            delta = measurement.drawdown_after - measurement.drawdown_before
+            improved = delta < 0
+        else:
+            return measurement
+
+        return measurement.model_copy(update={
+            "target_metric": target_metric,
+            "target_metric_improved": improved,
+            "target_metric_delta": round(delta, 6),
+        })
+
+    _PROGRESSIVE_WINDOWS = [7, 14, 30]
+    _QUALITY_RANK = {"high": 3, "medium": 2, "low": 1, "insufficient": 0}
+
+    def measure_progressive(
+        self,
+        suggestion_id: str,
+        bot_id: str,
+        implemented_date: str,
+    ) -> OutcomeMeasurement | None:
+        """Try progressively wider measurement windows, returning the best quality result.
+
+        Windows: 7d, 14d, 30d. Only attempts a window if sufficient calendar
+        time has elapsed since implemented_date. Returns the result with the
+        highest measurement quality, or the widest attempted window on tie.
+        """
+        impl_date = datetime.strptime(implemented_date, "%Y-%m-%d")
+        today = datetime.now(timezone.utc)
+        elapsed_days = (today - impl_date.replace(tzinfo=timezone.utc)).days
+
+        best: OutcomeMeasurement | None = None
+        best_rank = -1
+
+        for window in self._PROGRESSIVE_WINDOWS:
+            if elapsed_days < window:
+                break
+            result = self.measure(
+                suggestion_id=suggestion_id,
+                bot_id=bot_id,
+                implemented_date=implemented_date,
+                before_days=window,
+                after_days=window,
+            )
+            if result is None:
+                continue
+            rank = self._QUALITY_RANK.get(result.measurement_quality.value, 0)
+            if rank > best_rank:
+                best = result
+                best_rank = rank
+
+        return best
 
     @staticmethod
     def _estimate_composite_delta(m: OutcomeMeasurement) -> float:

@@ -67,12 +67,27 @@ class ResponseValidator:
         category_scorecard: CategoryScorecard | None = None,
         hypothesis_track_record: dict | None = None,
         prediction_accuracy: dict | None = None,
+        recalibrations: list[dict] | None = None,
     ) -> None:
         self._rejected = rejected_suggestions or []
         self._forecast_meta = forecast_meta or {}
         self._scorecard = category_scorecard or CategoryScorecard()
         self._hypothesis_track_record = hypothesis_track_record or {}
         self._prediction_accuracy = prediction_accuracy or {}
+        # Build recalibration index: (bot_id, category) → mean revised_confidence
+        self._recalib_by_key: dict[tuple[str, str], float] = {}
+        if recalibrations:
+            from collections import defaultdict
+            _groups: dict[tuple[str, str], list[float]] = defaultdict(list)
+            for rec in recalibrations:
+                bot = rec.get("bot_id", "")
+                cat = rec.get("category", "")
+                rev = rec.get("revised_confidence")
+                if bot and cat and rev is not None:
+                    _groups[(bot, cat)].append(float(rev))
+            self._recalib_by_key = {
+                k: sum(v) / len(v) for k, v in _groups.items()
+            }
 
     def validate(self, parsed: ParsedAnalysis) -> ValidationResult:
         """Validate a parsed analysis, filtering suggestions and adjusting confidence."""
@@ -213,6 +228,13 @@ class ResponseValidator:
         """
         confidence = suggestion.confidence
 
+        # Apply causal recalibration if available for this (bot_id, category)
+        recalib_conf = self._recalib_by_key.get(
+            (suggestion.bot_id, suggestion.category),
+        )
+        if recalib_conf is not None:
+            confidence = confidence * 0.6 + recalib_conf * 0.4
+
         # Try empirical bucket-based adjustment first
         bucket_adjusted = self._bucket_adjust_confidence(confidence)
         if bucket_adjusted is not None:
@@ -255,6 +277,22 @@ class ResponseValidator:
         calibration = self._forecast_meta.get("calibration_adjustment", 0)
         if calibration and calibration < -0.2:
             confidence = min(confidence, 0.6)
+
+        # Apply directional bias correction from prediction track record
+        directional_bias = self._forecast_meta.get("directional_bias", {})
+        if directional_bias:
+            metric_bias = directional_bias.get(prediction.metric, {})
+            bias_direction = metric_bias.get("bias", "balanced")
+            gap_pct = metric_bias.get("gap_pct", 0)
+
+            # Systematically optimistic about "improve" → reduce confidence
+            if bias_direction == "optimistic" and prediction.direction == "improve":
+                penalty = min(0.2, gap_pct / 100)
+                confidence *= (1.0 - penalty)
+            # Systematically pessimistic about "decline" → reduce confidence
+            elif bias_direction == "pessimistic" and prediction.direction == "decline":
+                penalty = min(0.2, gap_pct / 100)
+                confidence *= (1.0 - penalty)
 
         confidence = max(0.0, min(1.0, round(confidence, 3)))
         return prediction.model_copy(update={"confidence": confidence})

@@ -946,11 +946,14 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             sid = s.get("suggestion_id", "")
             if sid in measured_ids:
                 continue
+            # Portfolio suggestions are measured separately below
+            if s.get("bot_id") == "PORTFOLIO":
+                continue
             anchor_date = (s.get("deployed_at") or "")[:10]
             if not anchor_date:
                 continue
             try:
-                result = outcome_measurer.measure(
+                result = outcome_measurer.measure_progressive(
                     suggestion_id=sid,
                     bot_id=s.get("bot_id", ""),
                     implemented_date=anchor_date,
@@ -992,6 +995,38 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             logger.warning("Failed to promote pattern for suggestion %s", sid)
             except Exception:
                 logger.warning("Outcome measurement failed for %s", sid)
+
+        # --- Portfolio-level outcome measurement ---
+        try:
+            from skills.portfolio_outcome_measurer import PortfolioOutcomeMeasurer
+
+            portfolio_measurer = PortfolioOutcomeMeasurer(
+                findings_dir=db_path / "memory" / "findings",
+                curated_dir=curated_dir,
+            )
+            portfolio_outcomes = portfolio_measurer.measure_deployed()
+            for po in portfolio_outcomes:
+                po_sid = po.get("suggestion_id", "")
+                if po_sid:
+                    suggestion_tracker.mark_measured(po_sid)
+                    # Link hypothesis outcome if suggestion has hypothesis_id
+                    po_verdict = po.get("verdict", "")
+                    po_hyp_id = None
+                    for s in deployed:
+                        if s.get("suggestion_id") == po_sid:
+                            po_hyp_id = s.get("hypothesis_id")
+                            break
+                    if po_hyp_id and po_verdict in ("positive", "negative"):
+                        try:
+                            hypothesis_library.record_outcome(
+                                po_hyp_id, positive=(po_verdict == "positive"),
+                            )
+                        except Exception:
+                            logger.warning("Failed to record hypothesis outcome for portfolio %s", po_hyp_id)
+            if portfolio_outcomes:
+                logger.info("Measured %d portfolio outcomes", len(portfolio_outcomes))
+        except Exception:
+            logger.warning("Portfolio outcome measurement failed")
 
         # Evaluate predictions against actual curated data
         try:
@@ -1073,6 +1108,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             spurious_path = findings / "spurious_outcomes.jsonl"
                             recalib_path = findings / "recalibrations.jsonl"
 
+                            # Build suggestion lookup for enriching recalibrations
+                            suggestion_lookup = {s.get("suggestion_id", ""): s for s in deployed}
+
                             # Hoist builder outside loop (reused for all transferable reasonings)
                             _tpb = None
                             for r in parsed_reasoning.raw_structured["reasonings"]:
@@ -1110,9 +1148,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                                 if revised is not None and sid:
                                     try:
                                         recalib_path.parent.mkdir(parents=True, exist_ok=True)
+                                        sugg_rec = suggestion_lookup.get(sid, {})
                                         with open(recalib_path, "a", encoding="utf-8") as _rf:
                                             _rf.write(_json.dumps({
                                                 "suggestion_id": sid,
+                                                "bot_id": sugg_rec.get("bot_id", ""),
+                                                "category": sugg_rec.get("category", ""),
                                                 "revised_confidence": revised,
                                                 "lessons_learned": r.get("lessons_learned", []),
                                                 "recorded_at": datetime.now(timezone.utc).isoformat(),

@@ -8,7 +8,7 @@ class TestSubagentManager:
     async def test_spawn_returns_agent_id(self):
         mgr = SubagentManager(max_concurrent=3)
         async def work():
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0)
         agent_id = await mgr.spawn("daily_analysis", work)
         assert agent_id is not None
         assert "daily_analysis" in agent_id
@@ -64,7 +64,7 @@ class TestSubagentManager:
             return "done"
 
         agent_id = await mgr.spawn("fast", quick_work)
-        await asyncio.sleep(0.1)  # Let it complete
+        await asyncio.sleep(0)  # Let it complete
         assert len(mgr.get_running()) == 0
         assert len(mgr.get_all()) == 1
 
@@ -87,7 +87,7 @@ class TestSubagentManager:
             raise ValueError("boom")
 
         agent_id = await mgr.spawn("failing", failing_work)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
 
         # Should be in all but not in running
         assert len(mgr.get_running()) == 0

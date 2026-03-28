@@ -237,7 +237,9 @@ class TestSuggestionScorer:
         scorer = SuggestionScorer(tmp_path)
         scorecard = scorer.compute_scorecard()
         assert len(scorecard.scores) == 1
-        assert scorecard.scores[0].confidence_multiplier == 1.0  # insufficient data
+        # Bayesian posterior with temporal decay: no timestamp → weight=0.5
+        # posterior = (0 + 1) / (0.5 + 2) * 2.0 = 0.8
+        assert scorecard.scores[0].confidence_multiplier == pytest.approx(0.8, abs=0.01)
 
     def test_get_score(self, tmp_path):
         scorecard = CategoryScorecard(scores=[

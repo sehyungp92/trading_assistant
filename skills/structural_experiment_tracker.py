@@ -122,6 +122,13 @@ class StructuralExperimentTracker:
         """Return active experiments past their observation window."""
         return [r for r in self._load_all() if r.is_evaluable]
 
+    def get_failed_experiments(self) -> list[ExperimentRecord]:
+        """Return all experiments with FAILED or ABANDONED status."""
+        return [
+            r for r in self._load_all()
+            if r.status in (ExperimentStatus.FAILED, ExperimentStatus.ABANDONED)
+        ]
+
     def compute_track_record(self) -> dict:
         """Compute pass/fail/abandon counts and pass rate."""
         records = self._load_all()

@@ -153,6 +153,31 @@ class SuggestionTracker:
                     break
         return max(dates) if dates else None
 
+    def get_recent_by_bot(self, bot_id: str, weeks: int = 4) -> list[dict]:
+        """Return non-rejected suggestions for bot_id within time window."""
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(weeks=weeks)
+        suggestions = self.load_all()
+        result: list[dict] = []
+        for s in suggestions:
+            if s.get("bot_id") != bot_id:
+                continue
+            if s.get("status") == SuggestionStatus.REJECTED.value:
+                continue
+            ts_str = s.get("proposed_at", "")
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            result.append(s)
+        return result
+
     def _update_status(
         self,
         suggestion_id: str,

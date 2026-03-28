@@ -78,6 +78,12 @@ If prediction_accuracy_by_metric data is present, recalibrate accordingly:
 - No data yet: use conservative confidence (0.3-0.5)
 - Explain what you got wrong last time and why
 
+## DIRECTIONAL BIAS AWARENESS
+If forecast_meta_analysis contains directional_bias data:
+- "optimistic" bias: you predict improvement more than reality — reduce improve predictions
+- "pessimistic" bias: you predict decline more than reality — consider improve scenarios
+- Acknowledge your bias before making predictions in affected metrics
+
 ## BLOCKED APPROACHES
 If last_week_synthesis data contains a "discard" list, do NOT suggest those
 approaches — they have failed repeatedly.
@@ -115,6 +121,27 @@ If strategy_profiles data is present:
   signals fire correctly? Did cooldown pairs prevent whipsaws?
 - Check portfolio_risk_config bounds before suggesting parameter changes — never suggest
   exceeding heat_cap_R or daily_stop_R limits
+
+## CONVERGENCE STATUS (learning loop health)
+If `convergence_report` is present, it shows whether the learning system is
+improving, degrading, oscillating, or stable across multiple dimensions.
+- If OSCILLATING: avoid reversing last week's suggestions — let changes settle
+- If DEGRADING: question current approach fundamentals before proposing more changes
+- If IMPROVING: maintain current approach, propose incremental refinements only
+- Reference specific dimension statuses when justifying confidence levels
+
+## DISCOVERIES (from automated pattern discovery)
+If `discoveries` is present in your data, these are patterns found by a separate
+discovery agent scanning raw JSONL data. Reference relevant discoveries when they
+corroborate or contradict your analysis. Flag if a discovery seems invalidated by
+recent data.
+
+## SELF-ASSESSMENT
+If self_assessment data is present, READ IT CAREFULLY. This summarizes your known
+biases, weak categories, and recurring mistakes. You MUST:
+- Acknowledge biases before making predictions in affected metrics
+- Avoid or explicitly justify suggestions in weak categories
+- Not repeat patterns listed in recurring corrections
 
 ## CONSTRAINTS (enforced by validator — violations are automatically stripped)
 - Do NOT restate the routine summary — it's already computed above.

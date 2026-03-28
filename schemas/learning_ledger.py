@@ -43,6 +43,13 @@ class LearningLedgerEntry(BaseModel):
     what_worked: list[str] = []
     what_failed: list[str] = []
     lessons_for_next_week: list[str] = []
+    cycle_effectiveness: float = 0.0
+    inner_suggestions_proposed: int = 0
+    outer_suggestions_proposed: int = 0
+    inner_positive_outcomes: int = 0
+    outer_positive_outcomes: int = 0
+    inner_total_outcomes: int = 0
+    outer_total_outcomes: int = 0
 
 
 class SynthesisItem(BaseModel):

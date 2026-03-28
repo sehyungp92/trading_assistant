@@ -19,7 +19,7 @@ _FINDINGS_MAX_ENTRIES = 50
 
 def _parse_timestamp(entry: dict) -> datetime | None:
     """Try to parse a timestamp from common fields."""
-    for key in ("timestamp", "created_at", "date"):
+    for key in ("timestamp", "created_at", "recorded_at", "date"):
         val = entry.get(key)
         if val and isinstance(val, str):
             try:
@@ -380,7 +380,7 @@ class ContextBuilder:
         """Load forecast meta-analysis from findings/forecast_history.jsonl.
 
         When prediction verdicts are available, includes empirical calibration
-        buckets, ECE, and Brier score.
+        buckets, ECE, and Brier score. Also includes directional bias analysis.
         """
         try:
             from skills.forecast_tracker import ForecastTracker
@@ -392,8 +392,20 @@ class ContextBuilder:
 
             # Load prediction verdicts for empirical calibration
             verdicts = self._load_prediction_verdicts()
+
+            # Compute directional bias from prediction tracker
+            dir_bias: dict[str, dict] = {}
+            try:
+                from skills.prediction_tracker import PredictionTracker as _PT
+                if self._curated_dir:
+                    pt = _PT(self._memory_dir / "findings")
+                    dir_bias = pt.compute_directional_bias(self._curated_dir)
+            except Exception:
+                pass
+
             meta = tracker.compute_meta_analysis(
                 prediction_verdicts=verdicts if verdicts else None,
+                directional_bias=dir_bias if dir_bias else None,
             )
             return meta.model_dump(mode="json")
         except Exception:
@@ -452,6 +464,56 @@ class ContextBuilder:
         except Exception:
             pass
         return {}
+
+    def load_optimization_allocation(self) -> dict:
+        """Load per-category value analysis for optimization direction guidance."""
+        try:
+            from skills.suggestion_scorer import SuggestionScorer
+
+            scorer = SuggestionScorer(self._memory_dir / "findings")
+            value_map = scorer.compute_category_value_map()
+            if value_map and len(value_map) > 1:  # more than just _recommendations
+                return value_map
+        except Exception:
+            pass
+        return {}
+
+    def load_search_signal_summary(self) -> dict:
+        """Load search signal approve/discard summary from search_signals.jsonl."""
+        path = self._memory_dir / "findings" / "search_signals.jsonl"
+        if not path.exists():
+            return {}
+        from collections import defaultdict
+        counts: dict[tuple[str, str], dict[str, int]] = defaultdict(
+            lambda: {"approve": 0, "discard": 0}
+        )
+        try:
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                bot_id = rec.get("bot_id", "")
+                category = rec.get("category", "")
+                key = (bot_id, category)
+                if rec.get("positive"):
+                    counts[key]["approve"] += 1
+                else:
+                    counts[key]["discard"] += 1
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        if not counts:
+            return {}
+
+        summary: dict[str, dict] = {}
+        for (bot_id, category), c in counts.items():
+            total = c["approve"] + c["discard"]
+            summary[f"{bot_id}:{category}"] = {
+                "approve_count": c["approve"],
+                "discard_count": c["discard"],
+                "approve_rate": round(c["approve"] / total, 3) if total > 0 else 0.0,
+            }
+        return summary
 
     def load_prediction_accuracy(self) -> dict:
         """Load per-metric prediction accuracy from the prediction tracker.
@@ -519,6 +581,24 @@ class ContextBuilder:
         except Exception:
             pass
         return {}
+
+    def load_recalibrations(self) -> list[dict]:
+        """Load causal recalibrations from findings/recalibrations.jsonl.
+
+        Returns recalibrations with bot_id, category, revised_confidence,
+        and lessons_learned, filtered by temporal window (90d, 30-entry cap).
+        """
+        path = self._memory_dir / "findings" / "recalibrations.jsonl"
+        if not path.exists():
+            return []
+        entries: list[dict] = []
+        for line in path.read_text(encoding="utf-8").strip().splitlines():
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        return _apply_temporal_window(entries, max_entries=30)
 
     def load_outcome_reasonings(self) -> list[dict]:
         """Load causal outcome reasonings from findings/outcome_reasonings.jsonl.
@@ -658,7 +738,8 @@ class ContextBuilder:
     def load_ground_truth_trend(self) -> dict:
         """Load ground truth composite score trend from learning_ledger.jsonl.
 
-        Returns last 12 weeks of composite scores per bot, plus recent lessons.
+        Returns last 12 weeks of composite scores per bot, recent lessons,
+        and curated analysis notes (deduplicated, relevance-decayed, outcome-boosted).
         """
         try:
             from skills.learning_ledger import LearningLedger
@@ -666,13 +747,16 @@ class ContextBuilder:
             ledger = LearningLedger(self._memory_dir / "findings")
             trend = ledger.get_trend(weeks=12)
             lessons = ledger.get_lessons(weeks=4)
-            if not trend and not lessons:
+            curated_notes = ledger.get_curated_notes(max_notes=30)
+            if not trend and not lessons and not curated_notes:
                 return {}
             result: dict = {}
             if trend:
                 result["composite_trend"] = trend
             if lessons:
                 result["recent_lessons"] = lessons
+            if curated_notes:
+                result["curated_analysis_notes"] = curated_notes
             try:
                 latest = ledger.get_latest()
                 if latest:
@@ -683,6 +767,56 @@ class ContextBuilder:
                 # Still return trend + lessons
                 pass
             return result
+        except Exception:
+            return {}
+
+    def load_cycle_effectiveness(self) -> list[dict]:
+        """Load last 8 cycle effectiveness entries from learning_ledger.jsonl."""
+        path = self._memory_dir / "findings" / "learning_ledger.jsonl"
+        if not path.exists():
+            return []
+        entries: list[dict] = []
+        try:
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if line.strip():
+                    entries.append(json.loads(line))
+        except Exception:
+            return []
+        entries.sort(key=lambda e: e.get("week_start", ""))
+        recent = entries[-8:]
+        result = []
+        for e in recent:
+            ce = e.get("cycle_effectiveness", 0.0)
+            if ce > 0 or e.get("suggestions_proposed", 0) > 0:
+                result.append({
+                    "week": e.get("week_start", ""),
+                    "effectiveness": ce,
+                    "net_improvement": e.get("net_improvement", False),
+                    "suggestions_proposed": e.get("suggestions_proposed", 0),
+                    "suggestions_implemented": e.get("suggestions_implemented", 0),
+                })
+        return result
+
+    def load_suggestion_quality_trend(self, value_map: dict | None = None) -> dict:
+        """Load suggestion quality trend from SuggestionScorer."""
+        try:
+            from skills.suggestion_scorer import SuggestionScorer
+            scorer = SuggestionScorer(self._memory_dir / "findings")
+            return scorer.compute_suggestion_quality_trend(value_map=value_map)
+        except Exception:
+            return {}
+
+    def load_convergence_report(self) -> dict:
+        """Load convergence report synthesising learning loop health."""
+        try:
+            from skills.convergence_tracker import ConvergenceTracker
+
+            tracker = ConvergenceTracker(self._memory_dir / "findings")
+            report = tracker.compute_report(weeks=12)
+            # Only include if we have real data (not all insufficient_data)
+            if report.overall_status.value == "insufficient_data":
+                return {}
+            return report.model_dump(mode="json")
         except Exception:
             return {}
 
@@ -837,32 +971,157 @@ class ContextBuilder:
         except Exception:
             return {}
 
+    def build_self_assessment(
+        self,
+        forecast_meta: dict | None = None,
+        category_scorecard: dict | None = None,
+        correction_patterns: list[dict] | None = None,
+        recalibrations: list[dict] | None = None,
+    ) -> str:
+        """Synthesize a plain-text self-assessment from multiple learning signals.
+
+        Combines directional biases, calibration state, category strengths/weaknesses,
+        recurring corrections, and causal lessons into a narrative summary.
+        Returns empty string if fewer than 2 signals are available.
+
+        When called from base_package(), pre-loaded data is passed to avoid
+        duplicate I/O. When called standalone, loads data on demand.
+        """
+        if forecast_meta is None:
+            forecast_meta = self.load_forecast_meta()
+        if category_scorecard is None:
+            category_scorecard = self.load_category_scorecard()
+        if correction_patterns is None:
+            correction_patterns = self.load_correction_patterns()
+        if recalibrations is None:
+            recalibrations = self.load_recalibrations()
+
+        signals: list[str] = []
+
+        # 1. Directional biases from forecast meta
+        dir_bias = forecast_meta.get("directional_bias", {})
+        if dir_bias:
+            bias_lines = []
+            for metric, info in dir_bias.items():
+                bias = info.get("bias", "balanced")
+                if bias != "balanced":
+                    mag = info.get("bias_magnitude", 0)
+                    bias_lines.append(
+                        f"  - {metric}: {bias} (magnitude {mag:.2f})"
+                    )
+            if bias_lines:
+                signals.append(
+                    "Directional biases:\n" + "\n".join(bias_lines)
+                )
+
+        # 2. Calibration state
+        ece = forecast_meta.get("expected_calibration_error")
+        if ece is not None:
+            cal_adj = forecast_meta.get("calibration_adjustment", 0)
+            if cal_adj < -0.1:
+                direction = "overconfident"
+            elif cal_adj > 0.1:
+                direction = "underconfident"
+            else:
+                direction = "reasonably calibrated"
+            signals.append(f"Calibration: ECE={ece:.3f}, {direction}")
+
+        # 3. Category strengths/weaknesses from scorecard
+        scores = category_scorecard.get("scores", [])
+        if scores:
+            strong = []
+            weak = []
+            for s in scores:
+                wr = s.get("win_rate", 0)
+                n = s.get("sample_size", 0)
+                if n < 3:
+                    continue
+                label = f"{s.get('bot_id', '?')}/{s.get('category', '?')} ({wr:.0%}, n={n})"
+                if wr >= 0.6:
+                    strong.append(label)
+                elif wr < 0.4:
+                    weak.append(label)
+            if strong:
+                signals.append("Strong categories: " + ", ".join(strong[:5]))
+            if weak:
+                signals.append("Weak categories (avoid or justify): " + ", ".join(weak[:5]))
+
+        # 4. Recurring corrections (top 3 by count)
+        if correction_patterns:
+            sorted_patterns = sorted(correction_patterns, key=lambda p: p.get("count", 0), reverse=True)
+            top = sorted_patterns[:3]
+            lines = [
+                f"  - {p.get('description', '?')} (count={p.get('count', 0)})"
+                for p in top
+            ]
+            signals.append("Recurring corrections:\n" + "\n".join(lines))
+
+        # 5. Causal lessons from recalibrations
+        if recalibrations:
+            all_lessons: list[str] = []
+            seen: set[str] = set()
+            for r in recalibrations:
+                for lesson in r.get("lessons_learned", []):
+                    if lesson and lesson not in seen:
+                        seen.add(lesson)
+                        all_lessons.append(lesson)
+            if all_lessons:
+                signals.append(
+                    "Causal lessons learned:\n"
+                    + "\n".join(f"  - {l}" for l in all_lessons[:5])
+                )
+
+        if len(signals) < 2:
+            return ""
+
+        return "SELF-ASSESSMENT (auto-synthesized from learning data):\n\n" + "\n\n".join(signals)
+
     # Priority order for context items (highest value first).
     # Items not in this list get lowest priority.
     _CONTEXT_PRIORITY: list[str] = [
+        # Core context — always include when available
         "ground_truth_trend",
         "portfolio_outcomes",
         "portfolio_rolling_metrics",
+        "self_assessment",
+        "convergence_report",
         "strategy_profiles",
         "archetype_expectations",
         "coordination_rules",
         "portfolio_risk_config",
         "last_week_synthesis",
+        # Learning signals — high value for improvement
         "active_suggestions",
+        "rejected_suggestions",
         "category_scorecard",
         "prediction_accuracy_by_metric",
         "outcome_measurements",
         "forecast_meta_analysis",
+        "correction_patterns",
+        "validation_patterns",
         "active_experiments",
         "backtest_reliability",
+        "transfer_track_record",
+        "cycle_effectiveness_trend",
+        "suggestion_quality_trend",
+        "optimization_allocation",
+        "search_signal_summary",
         "search_reports",
         "hypothesis_track_record",
         "discoveries",
         "strategy_ideas",
+        # Lower-priority learning context
         "outcome_reasonings",
+        "recalibrations",
+        "threshold_profile",
+        "experiment_track_record",
+        "consolidated_patterns",
         "spurious_outcomes",
         "pattern_library",
+        "failure_log",
         "reliability_summary",
+        "allocation_history",
+        "session_history",
     ]
 
     def base_package(
@@ -938,12 +1197,40 @@ class ContextBuilder:
         outcome_reasonings = self.load_outcome_reasonings()
         if outcome_reasonings:
             data["outcome_reasonings"] = outcome_reasonings
+        recalibrations = self.load_recalibrations()
+        if recalibrations:
+            data["recalibrations"] = recalibrations
         discoveries = self.load_discoveries()
         if discoveries:
             data["discoveries"] = discoveries
+        optimization_allocation = self.load_optimization_allocation()
+        if optimization_allocation:
+            data["optimization_allocation"] = optimization_allocation
+        search_signal_summary = self.load_search_signal_summary()
+        if search_signal_summary:
+            data["search_signal_summary"] = search_signal_summary
         ground_truth_trend = self.load_ground_truth_trend()
         if ground_truth_trend:
             data["ground_truth_trend"] = ground_truth_trend
+        self_assessment = self.build_self_assessment(
+            forecast_meta=forecast_meta,
+            category_scorecard=category_scorecard,
+            correction_patterns=correction_patterns,
+            recalibrations=recalibrations,
+        )
+        if self_assessment:
+            data["self_assessment"] = self_assessment
+        convergence_report = self.load_convergence_report()
+        if convergence_report:
+            data["convergence_report"] = convergence_report
+        cycle_effectiveness = self.load_cycle_effectiveness()
+        if cycle_effectiveness:
+            data["cycle_effectiveness_trend"] = cycle_effectiveness
+        suggestion_quality_trend = self.load_suggestion_quality_trend(
+            value_map=optimization_allocation,
+        )
+        if suggestion_quality_trend:
+            data["suggestion_quality_trend"] = suggestion_quality_trend
         retrospective_synthesis = self.load_retrospective_synthesis()
         if retrospective_synthesis:
             data["last_week_synthesis"] = retrospective_synthesis
@@ -988,8 +1275,18 @@ class ContextBuilder:
             if strategy_registry.portfolio.heat_cap_R > 0:
                 data["portfolio_risk_config"] = strategy_registry.portfolio.model_dump(mode="json")
 
-        # Apply context budget — keep highest-priority items within limit
-        if len(data) > context_budget_items:
+        # Apply context budget — adaptive: expand default budget up to 25 when
+        # many items have data, but never exceed an explicitly set budget.
+        # The default of 15 auto-expands; explicit low values are respected.
+        total_available = len(data)
+        if context_budget_items == 15:
+            # Default budget — allow adaptive expansion
+            effective_budget = max(context_budget_items, min(total_available, 25))
+        else:
+            effective_budget = context_budget_items
+
+        omitted_keys: list[str] = []
+        if total_available > effective_budget:
             priority_set = set(self._CONTEXT_PRIORITY)
             # Split into prioritized and unprioritized
             prioritized = {
@@ -1007,22 +1304,30 @@ class ContextBuilder:
                 key=lambda k: priority_order.get(k, 999),
             )
             # Take top N from prioritized, fill remainder with unprioritized
-            budget_keys = sorted_keys[:context_budget_items]
-            remaining = context_budget_items - len(budget_keys)
+            budget_keys = sorted_keys[:effective_budget]
+            remaining = effective_budget - len(budget_keys)
             if remaining > 0:
                 budget_keys.extend(list(unprioritized.keys())[:remaining])
             dropped = set(data.keys()) - set(budget_keys)
+            omitted_keys = sorted(dropped)
             if dropped:
                 logger.warning(
                     "Context budget: dropped %d low-priority items: %s",
-                    len(dropped), sorted(dropped),
+                    len(dropped), omitted_keys,
                 )
             data = {k: data[k] for k in budget_keys if k in data}
+
+        metadata = self.runtime_metadata(bot_configs=bot_configs)
+        metadata["_context_budget_manifest"] = {
+            "included": sorted(data.keys()),
+            "omitted": omitted_keys,
+            "total_available": total_available,
+        }
 
         return PromptPackage(
             system_prompt=self.build_system_prompt(),
             corrections=self.load_corrections(),
             context_files=self.list_policy_files(),
-            metadata=self.runtime_metadata(bot_configs=bot_configs),
+            metadata=metadata,
             data=data,
         )

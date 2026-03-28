@@ -40,7 +40,7 @@ class TestMessageBus:
         await bus.start(outbound_handler=handler)
         payload = NotificationPayload(notification_type="test", title="Consumed")
         await bus.put_outbound(OutboundMessage(payload=payload))
-        await asyncio.sleep(0.1)  # Let consumer process
+        await asyncio.sleep(0)  # Let consumer process
         await bus.stop()
         assert len(received) == 1
         assert received[0].payload.title == "Consumed"
@@ -56,7 +56,7 @@ class TestMessageBus:
         await bus.start(outbound_handler=failing_handler)
         payload = NotificationPayload(notification_type="test")
         await bus.put_outbound(OutboundMessage(payload=payload))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0)
         await bus.stop()
         assert call_count == 1  # Handler was called despite error
 
@@ -70,7 +70,7 @@ class TestMessageBus:
         for i in range(5):
             payload = NotificationPayload(notification_type="test", title=f"msg-{i}")
             await bus.put_outbound(OutboundMessage(payload=payload))
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0)
         await bus.stop()
         assert received == [f"msg-{i}" for i in range(5)]
 

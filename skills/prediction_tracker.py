@@ -18,6 +18,14 @@ from schemas.prediction_tracking import (
 )
 
 
+_NOISE_THRESHOLDS: dict[str, float] = {
+    "pnl": 50.0,
+    "win_rate": 0.03,
+    "drawdown": 0.005,
+    "sharpe": 0.1,
+}
+
+
 class PredictionTracker:
     def __init__(self, findings_dir: Path) -> None:
         self._path = findings_dir / "predictions.jsonl"
@@ -88,13 +96,8 @@ class PredictionTracker:
                 ))
                 continue
 
-            actual_direction = (
-                "improve" if actual > 0
-                else "decline" if actual < 0
-                else "stable"
-            )
-            # For drawdown, "decline" means drawdown increased, which is bad
-            # but direction logic stays consistent with the metric direction
+            actual_direction = self._classify_direction(actual, pred.metric)
+            mag_score = self._compute_magnitude_score(pred.direction, actual, pred.metric)
             correct = pred.direction == actual_direction
             verdicts.append(PredictionVerdict(
                 bot_id=pred.bot_id,
@@ -104,6 +107,7 @@ class PredictionTracker:
                 correct=correct,
                 confidence=pred.confidence,
                 status="correct" if correct else "incorrect",
+                magnitude_score=round(mag_score, 3),
             ))
 
         # Compute aggregates
@@ -127,6 +131,10 @@ class PredictionTracker:
             m: sum(vals) / len(vals) for m, vals in by_metric.items()
         }
 
+        # Magnitude-weighted accuracy
+        mag_sum = sum(v.magnitude_score for v in evaluated) if evaluated else 0.0
+        mw_accuracy = mag_sum / total if total > 0 else 0.0
+
         return PredictionEvaluation(
             week=week,
             verdicts=verdicts,
@@ -135,7 +143,68 @@ class PredictionTracker:
             accuracy=round(accuracy, 3),
             confidence_weighted_accuracy=round(cw_accuracy, 3),
             accuracy_by_metric={m: round(v, 3) for m, v in accuracy_by_metric.items()},
+            magnitude_weighted_accuracy=round(mw_accuracy, 3),
         )
+
+    def compute_directional_bias(
+        self, curated_dir: Path, lookback_weeks: int = 12,
+    ) -> dict[str, dict]:
+        """Compute directional bias per metric over recent predictions.
+
+        For each metric, compares the fraction of predictions predicting
+        "improve" vs the fraction of actual "improve" outcomes.
+
+        Returns:
+            {metric: {predicted_improve_pct, actual_improve_pct, bias,
+            bias_magnitude, sample_size}}
+        """
+        if not self._path.exists():
+            return {}
+
+        predictions = self.load_predictions()
+        if not predictions:
+            return {}
+
+        # Filter to recent predictions within lookback window
+        weeks = sorted({p.week for p in predictions})
+        if len(weeks) > lookback_weeks:
+            cutoff_week = weeks[-lookback_weeks]
+            predictions = [p for p in predictions if p.week >= cutoff_week]
+
+        # Group by metric, evaluate each
+        by_metric: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+        for pred in predictions:
+            anchor = self._parse_date(pred.week)
+            actual = self._load_actual_metric_change(
+                pred.bot_id, pred.metric, curated_dir,
+                anchor, pred.timeframe_days,
+            )
+            if actual is None:
+                continue
+            actual_dir = self._classify_direction(actual, pred.metric)
+            by_metric[pred.metric].append((pred.direction, actual_dir))
+
+        result: dict[str, dict] = {}
+        for metric, pairs in by_metric.items():
+            if len(pairs) < 5:
+                continue
+            pred_improve = sum(1 for d, _ in pairs if d == "improve") / len(pairs)
+            actual_improve = sum(1 for _, a in pairs if a == "improve") / len(pairs)
+            gap = pred_improve - actual_improve
+            if gap > 0.15:
+                bias = "optimistic"
+            elif gap < -0.15:
+                bias = "pessimistic"
+            else:
+                bias = "balanced"
+            result[metric] = {
+                "predicted_improve_pct": round(pred_improve, 3),
+                "actual_improve_pct": round(actual_improve, 3),
+                "bias": bias,
+                "bias_magnitude": round(abs(gap), 3),
+                "sample_size": len(pairs),
+            }
+        return result
 
     def get_accuracy_by_metric(self, curated_dir: Path) -> dict[str, float]:
         """Compute rolling accuracy per metric type across all evaluated weeks."""
@@ -164,6 +233,43 @@ class PredictionTracker:
             for m, vals in all_by_metric.items()
             if vals
         }
+
+    @staticmethod
+    def _classify_direction(actual: float, metric: str) -> str:
+        """Classify direction with per-metric noise thresholds.
+
+        Changes below the noise threshold are classified as "stable"
+        instead of "improve"/"decline".
+        """
+        threshold = _NOISE_THRESHOLDS.get(metric, 0.0)
+        if abs(actual) < threshold:
+            return "stable"
+        return "improve" if actual > 0 else "decline"
+
+    @staticmethod
+    def _compute_magnitude_score(
+        predicted_direction: str, actual: float, metric: str,
+    ) -> float:
+        """Compute alignment strength between prediction and actual change.
+
+        Returns 0-1: 1.0 = perfect alignment, 0.0 = opposite direction.
+        """
+        threshold = _NOISE_THRESHOLDS.get(metric, 0.0)
+        if threshold <= 0:
+            return 1.0 if predicted_direction == "stable" else 0.5
+
+        # Normalize actual change relative to threshold
+        normalized = actual / threshold  # >1 means above noise
+
+        if predicted_direction == "improve":
+            # Higher positive actual → better score
+            return max(0.0, min(1.0, 0.5 + normalized * 0.25))
+        elif predicted_direction == "decline":
+            # Higher negative actual → better score
+            return max(0.0, min(1.0, 0.5 - normalized * 0.25))
+        else:  # stable
+            # Closer to zero → better score
+            return max(0.0, 1.0 - abs(normalized) * 0.25)
 
     def _load_actual_metric_change(
         self,

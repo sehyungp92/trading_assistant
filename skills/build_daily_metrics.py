@@ -1143,3 +1143,59 @@ def build_concurrent_position_analysis(trade_events: list[dict]) -> dict:
         "unique_pairs": len(pair_occurrences),
         "per_pair": per_pair,
     }
+
+
+def build_sector_exposure(trade_events: list[dict]) -> dict:
+    """Aggregate sector/industry exposure from stock trade events (0E).
+
+    Args:
+        trade_events: list of raw trade event dicts.
+
+    Returns:
+        Dict with per-sector exposure breakdown and sector count.
+    """
+    sector_data: dict[str, dict] = {}
+
+    for evt in trade_events:
+        payload = evt.get("payload", evt)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                continue
+
+        sector = payload.get("sector", "")
+        if not sector:
+            continue
+        symbol = payload.get("pair", "")
+        strategy = payload.get("strategy_id", "")
+        direction = payload.get("side", "LONG")
+        exposure = payload.get("position_size_quote", 0.0)
+
+        if sector not in sector_data:
+            sector_data[sector] = {
+                "total_exposure": 0.0, "position_count": 0,
+                "symbols": set(), "strategies": set(),
+                "long_exposure": 0.0, "short_exposure": 0.0,
+            }
+        entry = sector_data[sector]
+        entry["total_exposure"] += exposure
+        entry["position_count"] += 1
+        entry["symbols"].add(symbol)
+        entry["strategies"].add(strategy)
+        if direction == "LONG":
+            entry["long_exposure"] += exposure
+        else:
+            entry["short_exposure"] += exposure
+
+    result = {}
+    for sector, data in sector_data.items():
+        result[sector] = {
+            "total_exposure": round(data["total_exposure"], 2),
+            "position_count": data["position_count"],
+            "symbols": sorted(data["symbols"]),
+            "strategies": sorted(data["strategies"]),
+            "long_exposure": round(data["long_exposure"], 2),
+            "short_exposure": round(data["short_exposure"], 2),
+        }
+    return {"sectors": result, "sector_count": len(result)}

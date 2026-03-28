@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from schemas.learning_ledger import LearningLedgerEntry
+from skills._outcome_utils import is_conclusive_outcome, is_positive_outcome
 
 logger = logging.getLogger(__name__)
+
+_BLACKLIST_EXPIRY_WEEKS = 12  # allow re-testing after ~1 market regime cycle
 
 
 class LearningCycle:
@@ -130,6 +134,21 @@ class LearningCycle:
         else:
             net_improvement = False
 
+        # 7. Loop source attribution — classify suggestions by origin
+        inner_proposed, outer_proposed, inner_pos, outer_pos, inner_total, outer_total = (
+            self._classify_loop_sources(week_start, week_end, findings_dir)
+        )
+
+        # 8. Cycle effectiveness score
+        cycle_effectiveness = ledger.compute_cycle_effectiveness(
+            composite_delta=composite_delta,
+            suggestions_proposed=suggestions_proposed,
+            suggestions_implemented=suggestions_implemented,
+            lessons=synthesis.lessons,
+            week_start=week_start,
+            week_end=week_end,
+        )
+
         entry = ledger.record_week(
             week_start=week_start,
             week_end=week_end,
@@ -146,6 +165,13 @@ class LearningCycle:
             what_worked=[item.title for item in synthesis.what_worked],
             what_failed=[item.title for item in synthesis.what_failed],
             lessons_for_next_week=synthesis.lessons,
+            cycle_effectiveness=cycle_effectiveness,
+            inner_suggestions_proposed=inner_proposed,
+            outer_suggestions_proposed=outer_proposed,
+            inner_positive_outcomes=inner_pos,
+            outer_positive_outcomes=outer_pos,
+            inner_total_outcomes=inner_total,
+            outer_total_outcomes=outer_total,
         )
 
         # Log calibration reliability summary (informational only)
@@ -196,6 +222,82 @@ class LearningCycle:
                 logger.info("Calibration summary: %d entries written", len(summaries))
             except Exception:
                 logger.exception("Failed to write calibration summary")
+
+    # ── Loop source classification ──
+
+    @staticmethod
+    def classify_suggestion_source(suggestion: dict) -> str:
+        """Classify a suggestion as 'inner' or 'outer' loop origin.
+
+        Inner loop: has detection_context with a detector_name (strategy engine).
+        Outer loop: everything else (LLM structural proposals).
+        """
+        ctx = suggestion.get("detection_context") or {}
+        if isinstance(ctx, dict) and ctx.get("detector_name"):
+            return "inner"
+        return "outer"
+
+    def _classify_loop_sources(
+        self, week_start: str, week_end: str, findings_dir: Path,
+    ) -> tuple[int, int, int, int, int, int]:
+        """Count inner/outer suggestions and outcomes for the week.
+
+        Returns: (inner_proposed, outer_proposed,
+                  inner_positive, outer_positive,
+                  inner_total, outer_total)
+        """
+        inner_proposed = outer_proposed = 0
+        inner_pos = outer_pos = inner_total = outer_total = 0
+
+        # Build suggestion_id → source mapping from ALL suggestions (not just
+        # current week) so that outcomes measured this week for older suggestions
+        # get correct source attribution.  Only count proposals for current week.
+        sid_to_source: dict[str, str] = {}
+        if self._suggestion_tracker:
+            try:
+                for s in self._suggestion_tracker.load_all():
+                    sid = s.get("suggestion_id", "")
+                    source = self.classify_suggestion_source(s)
+                    sid_to_source[sid] = source  # ALL suggestions → mapping
+                    ts = s.get("timestamp", "") or s.get("created_at", "")
+                    if ts and week_start <= ts[:10] <= week_end:
+                        if source == "inner":
+                            inner_proposed += 1
+                        else:
+                            outer_proposed += 1
+            except Exception:
+                logger.warning("Failed to classify suggestion sources")
+
+        # Count outcomes by source
+        outcomes_path = findings_dir / "outcomes.jsonl"
+        if outcomes_path.exists():
+            try:
+                for line in outcomes_path.read_text(encoding="utf-8").strip().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = entry.get("measured_at") or entry.get("timestamp", "")
+                    if not ts or not (week_start <= ts[:10] <= week_end):
+                        continue
+                    if not is_conclusive_outcome(entry):
+                        continue
+                    sid = entry.get("suggestion_id", "")
+                    source = sid_to_source.get(sid, "outer")
+                    if source == "inner":
+                        inner_total += 1
+                        if is_positive_outcome(entry):
+                            inner_pos += 1
+                    else:
+                        outer_total += 1
+                        if is_positive_outcome(entry):
+                            outer_pos += 1
+            except Exception:
+                logger.warning("Failed to classify outcome sources")
+
+        return inner_proposed, outer_proposed, inner_pos, outer_pos, inner_total, outer_total
 
     # ── Counting helpers ──
 
@@ -275,13 +377,41 @@ class LearningCycle:
     def _select_next_experiments(self) -> list[dict]:
         """Select next experiments: max 2 per bot, positive-effectiveness only.
 
-        Skips hypotheses in discarded categories.
+        Skips hypotheses in discarded categories and hypothesis+bot combos
+        that already failed an experiment.
         """
         if not self._hypothesis_library or not self._experiment_tracker:
             return []
 
         # Load discarded categories
         discarded = self._load_discarded_categories()
+
+        # Load failed experiment combos (hypothesis_id, bot_id),
+        # allowing re-testing after expiry (market regime cycle)
+        expiry_cutoff = datetime.now(timezone.utc) - timedelta(weeks=_BLACKLIST_EXPIRY_WEEKS)
+        failed_combos: set[tuple[str, str]] = set()
+        try:
+            for exp in self._experiment_tracker.get_failed_experiments():
+                resolved_at = getattr(exp, "resolved_at", None)
+                if resolved_at is not None:
+                    if isinstance(resolved_at, str):
+                        try:
+                            resolved_at = datetime.fromisoformat(
+                                resolved_at.replace("Z", "+00:00"),
+                            )
+                        except (ValueError, TypeError):
+                            resolved_at = None
+                    if resolved_at is not None:
+                        if resolved_at.tzinfo is None:
+                            resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+                        if resolved_at < expiry_cutoff:
+                            continue  # expired — allow re-testing
+                hyp_id = getattr(exp, "hypothesis_id", "") or ""
+                bot_id = getattr(exp, "bot_id", "") or ""
+                if hyp_id and bot_id:
+                    failed_combos.add((hyp_id, bot_id))
+        except Exception:
+            logger.warning("Failed to load failed experiments for blacklist")
 
         try:
             hypotheses = self._hypothesis_library.get_active()
@@ -312,6 +442,8 @@ class LearningCycle:
                 if bot_exp_count.get(bot_id, 0) >= 2:
                     continue
                 if (bot_id, category) in discarded:
+                    continue
+                if (hyp_id, bot_id) in failed_combos:
                     continue
 
                 selected.append({

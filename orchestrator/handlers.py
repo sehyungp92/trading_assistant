@@ -434,10 +434,50 @@ class Handlers:
             # Run strategy engine
             from analysis.strategy_engine import StrategyEngine
 
+            # Compute category scorecard and per-detector confidence
+            _scorecard = None
+            _scorer_inst = None
+            _detector_confidence: dict[str, float] = {}
+            try:
+                from skills.suggestion_scorer import SuggestionScorer as _Scorer
+                _scorer_inst = _Scorer(self._context_builder.memory_dir / "findings")
+                _scorecard = _scorer_inst.compute_scorecard()
+                _detector_confidence = _scorer_inst.compute_detector_confidence()
+            except Exception:
+                logger.debug("Could not load category scorecard / detector confidence")
+
+            # Load recent suggestions per bot for anti-oscillation
+            _recent_suggestions: list[dict] = []
+            if self._suggestion_tracker:
+                for bid in portfolio_summary.bot_summaries:
+                    _recent_suggestions.extend(
+                        self._suggestion_tracker.get_recent_by_bot(bid, weeks=4)
+                    )
+
+            # Load convergence report for oscillation dampening
+            _convergence_report: dict = {}
+            try:
+                _convergence_report = self._context_builder.load_convergence_report()
+            except Exception:
+                pass
+
+            # Compute category value map for optimization allocation
+            _category_value_map: dict = {}
+            if _scorer_inst:
+                try:
+                    _category_value_map = _scorer_inst.compute_category_value_map()
+                except Exception:
+                    pass
+
             engine = StrategyEngine(
                 week_start=week_start, week_end=week_end,
                 threshold_learner=self._threshold_learner,
                 strategy_registry=self._strategy_registry,
+                category_scorecard=_scorecard,
+                detector_confidence=_detector_confidence,
+                recent_suggestions=_recent_suggestions,
+                convergence_report=_convergence_report,
+                category_value_map=_category_value_map,
             )
             refinement_report = engine.build_report(
                 portfolio_summary.bot_summaries,
@@ -497,6 +537,7 @@ class Handlers:
             # Record suggestions from strategy engine to SuggestionTracker
             suggestion_ids = self._record_suggestions(
                 getattr(refinement_report, "suggestions", []), run_id,
+                category_scorecard=_scorecard,
             )
 
             # Run autonomous pipeline on recorded suggestions
@@ -680,6 +721,26 @@ class Handlers:
             except Exception:
                 logger.error("Forecast tracking failed — skipping", exc_info=True)
 
+            # Inject outcome-derived lessons into learning ledger
+            try:
+                from skills.learning_ledger import LearningLedger
+
+                _ledger = LearningLedger(self._memory_dir / "findings")
+                outcome_lessons: list[str] = []
+                outcomes_data = package.data.get("outcome_measurements", [])
+                for om in outcomes_data:
+                    verdict = om.get("verdict", "")
+                    sid = om.get("suggestion_id", "")
+                    if verdict in ("positive", "negative"):
+                        outcome_lessons.append(
+                            f"Suggestion {sid}: {verdict} outcome "
+                            f"(PnL delta={om.get('pnl_delta', 0):.2f})"
+                        )
+                if outcome_lessons:
+                    _ledger.record_outcome_lessons(week_start, outcome_lessons)
+            except Exception:
+                logger.debug("Outcome-derived lesson injection failed")
+
             # Correction pattern extraction — surface recurring human correction patterns
             try:
                 from skills.correction_pattern_extractor import CorrectionPatternExtractor
@@ -699,6 +760,25 @@ class Handlers:
                         with open(patterns_path, "w", encoding="utf-8") as f:
                             for p in pattern_report.patterns:
                                 f.write(json.dumps(p.model_dump(mode="json")) + "\n")
+
+                        # Synthesize persistent correction patterns into learning ledger lessons
+                        try:
+                            from skills.learning_ledger import LearningLedger as _LL
+                            correction_lessons = []
+                            for p in pattern_report.patterns[:5]:
+                                if p.count >= 3:
+                                    target = getattr(p, "target", "") or ""
+                                    correction_lessons.append(
+                                        f"[correction] {p.description}. "
+                                        f"Adjust analysis approach for {target}."
+                                    )
+                            if correction_lessons:
+                                _corr_ledger = _LL(self._memory_dir / "findings")
+                                _corr_ledger.record_outcome_lessons(
+                                    week_start, correction_lessons, source="corrections",
+                                )
+                        except Exception:
+                            logger.debug("Correction lesson synthesis failed")
             except Exception:
                 logger.error("Correction pattern extraction failed — skipping", exc_info=True)
 
@@ -1815,12 +1895,14 @@ class Handlers:
 
             hypothesis_tr = ctx.load_hypothesis_track_record()
             prediction_accuracy = ctx.load_prediction_accuracy()
+            recalibrations = ctx.load_recalibrations()
             validator = ResponseValidator(
                 rejected_suggestions=rejected,
                 forecast_meta=forecast_meta,
                 category_scorecard=scorecard,
                 hypothesis_track_record=hypothesis_tr,
                 prediction_accuracy=prediction_accuracy,
+                recalibrations=recalibrations,
             )
             validation = validator.validate(parsed)
 
@@ -2018,6 +2100,29 @@ class Handlers:
                 except Exception:
                     logger.warning("detect_heat_cap_utilization failed", exc_info=True)
 
+        # Drawdown correlation across families
+        if family_snapshots and len(family_snapshots) >= 2:
+            try:
+                from itertools import accumulate
+                from skills.compute_portfolio_risk import PortfolioRiskComputer
+
+                family_equity: dict[str, list[float]] = {}
+                for fam, daily_list in family_snapshots.items():
+                    # Convert daily PnL to cumulative equity curve —
+                    # _drawdown_series() computes drawdown from peak and
+                    # expects an equity curve, not individual daily values.
+                    family_equity[fam] = list(accumulate(
+                        s.get("total_net_pnl", 0.0) for s in daily_list
+                    ))
+                dd_corr = PortfolioRiskComputer.compute_drawdown_correlation(family_equity)
+                weekly_dir = self._curated_dir / "weekly" / week_start
+                weekly_dir.mkdir(parents=True, exist_ok=True)
+                (weekly_dir / "drawdown_correlation.json").write_text(
+                    json.dumps(dd_corr, indent=2, default=str), encoding="utf-8"
+                )
+            except Exception:
+                logger.warning("compute_drawdown_correlation failed", exc_info=True)
+
         return results
 
     def _record_portfolio_proposals(self, validation, run_id: str) -> None:
@@ -2064,13 +2169,21 @@ class Handlers:
                     current = getattr(proposal, "current_config", {}) or {}
                     # Build family PnL series from curated snapshots
                     family_pnl = self._load_family_pnl_for_what_if()
-                    if family_pnl and current:
+                    # Try trade-level loading for enriched metrics
+                    family_trades = None
+                    if self._strategy_registry:
+                        try:
+                            family_trades = self._load_family_trades_for_what_if()
+                        except Exception:
+                            logger.warning("Trade-level loading failed, using daily aggregates")
+                    if (family_pnl or family_trades) and current:
                         what_if = PortfolioWhatIf(
-                            family_daily_pnl=family_pnl,
+                            family_daily_pnl=family_pnl or {},
                             current_weights=current,
+                            family_trades=family_trades,
                         )
                         what_if_result = what_if.evaluate(proposed)
-                    if what_if_result.get("calmar_delta", 0) < 0:
+                    if what_if_result and what_if_result.get("calmar_delta", 0) < 0:
                         logger.info(
                             "What-if shows negative Calmar delta for allocation proposal — skipping",
                         )
@@ -2168,10 +2281,67 @@ class Handlers:
             family_pnl[fam].reverse()
         return family_pnl
 
+    def _load_family_trades_for_what_if(
+        self, lookback_days: int = 60,
+    ) -> dict[str, list]:
+        """Load per-family trade-level data for enriched what-if analysis.
+
+        Scans curated directories for trades.jsonl files, groups trades by
+        family using strategy_registry bot_id → family mapping.
+        Returns family_name → list[TradeEvent].
+        """
+        from datetime import timedelta as _td_trades
+        from schemas.events import TradeEvent
+
+        if not self._strategy_registry:
+            return {}
+
+        # Build bot_id → family mapping
+        bot_to_family: dict[str, str] = {}
+        for _sid, profile in self._strategy_registry.strategies.items():
+            if profile.bot_id and profile.family:
+                bot_to_family[profile.bot_id] = profile.family
+
+        if not bot_to_family:
+            return {}
+
+        family_trades: dict[str, list] = {}
+        end = datetime.now(timezone.utc)
+
+        for d in range(lookback_days):
+            date_str = (end - _td_trades(days=d)).strftime("%Y-%m-%d")
+            date_dir = self._curated_dir / date_str
+            if not date_dir.is_dir():
+                continue
+
+            for bot_id, family in bot_to_family.items():
+                trades_file = date_dir / bot_id / "trades.jsonl"
+                if not trades_file.exists():
+                    continue
+                for line in trades_file.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        try:
+                            trade = TradeEvent(**json.loads(line))
+                            family_trades.setdefault(family, []).append(trade)
+                        except Exception:
+                            logger.warning("Bad trade record in %s", trades_file)
+
+        logger.info(
+            "Loaded %d families with %d total trades for what-if",
+            len(family_trades),
+            sum(len(ts) for ts in family_trades.values()),
+        )
+        return family_trades
+
     def _record_suggestions(
         self, suggestions: list, run_id: str,
+        category_scorecard=None,
     ) -> dict[str, str]:
         """Convert StrategySuggestions to SuggestionRecords and persist via tracker.
+
+        Applies scorecard pre-validation: skips suggestions in categories with
+        poor track records (win_rate < 0.3, sample_size >= 5) to prevent
+        category leakage when scorecard was unavailable during build_report().
 
         Returns a mapping of suggestion_id → title for metadata injection.
         """
@@ -2179,6 +2349,7 @@ class Handlers:
             return {}
 
         import hashlib
+        from schemas.agent_response import CATEGORY_TO_TIER as _C2T
         from schemas.suggestion_tracking import SuggestionRecord
 
         id_map: dict[str, str] = {}
@@ -2187,6 +2358,24 @@ class Handlers:
             bot_id = getattr(suggestion, "bot_id", "") or ""
             tier = getattr(suggestion, "tier", "parameter")
             description = getattr(suggestion, "description", "") or ""
+
+            # Pre-validation: skip suggestions in categories with poor track record
+            if category_scorecard is not None:
+                tier_val = str(tier.value) if hasattr(tier, "value") else str(tier)
+                _skip = False
+                for _score in getattr(category_scorecard, "scores", []):
+                    if _score.bot_id != bot_id:
+                        continue
+                    _cat_tier = _C2T.get(_score.category, _score.category)
+                    if _cat_tier == tier_val and _score.sample_size >= 5 and _score.win_rate < 0.3:
+                        logger.info(
+                            "Skipping strategy suggestion in poor category %s/%s (win_rate=%.0f%%, n=%d)",
+                            bot_id, _score.category, _score.win_rate * 100, _score.sample_size,
+                        )
+                        _skip = True
+                        break
+                if _skip:
+                    continue
 
             # Deterministic ID: SHA256(run_id + index + title)[:12]
             raw = f"{run_id}:{idx}:{title}"
@@ -2198,6 +2387,34 @@ class Handlers:
             det_ctx_dict = None
             if isinstance(det_ctx, BaseModel):
                 det_ctx_dict = det_ctx.model_dump(mode="json")
+            # Derive category from detector_name when not set on suggestion
+            if not category_str and det_ctx:
+                from analysis.strategy_engine import StrategyEngine
+                _det_name = ""
+                if isinstance(det_ctx, BaseModel):
+                    _det_name = getattr(det_ctx, "detector_name", "")
+                elif isinstance(det_ctx, dict):
+                    _det_name = det_ctx.get("detector_name", "")
+                if _det_name:
+                    category_str = StrategyEngine._DETECTOR_TO_CATEGORY.get(_det_name, "")
+            # Extract target_param and proposed_value from detection context
+            target_param = None
+            proposed_value = None
+            expected_impact = ""
+            if det_ctx:
+                if isinstance(det_ctx, BaseModel):
+                    target_param = getattr(det_ctx, "threshold_name", None)
+                elif isinstance(det_ctx, dict):
+                    target_param = det_ctx.get("threshold_name")
+            raw_suggested = getattr(suggestion, "suggested_value", None)
+            if raw_suggested is not None:
+                try:
+                    proposed_value = float(raw_suggested)
+                except (TypeError, ValueError):
+                    pass
+            if description:
+                expected_impact = description[:200]
+
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -2207,6 +2424,9 @@ class Handlers:
                 source_report_id=run_id,
                 description=description,
                 confidence=confidence,
+                target_param=target_param,
+                proposed_value=proposed_value,
+                expected_impact=expected_impact,
                 detection_context=det_ctx_dict,
             )
 
@@ -2324,6 +2544,19 @@ class Handlers:
             if val_result and val_result.requires_review:
                 detection_ctx["requires_review"] = True
 
+            # Extract target fields from AgentSuggestion
+            _raw_tp = getattr(suggestion, "target_param", None)
+            agent_target_param = str(_raw_tp) if isinstance(_raw_tp, str) else None
+            agent_proposed_value = None
+            raw_pv = getattr(suggestion, "proposed_value", None)
+            if raw_pv is not None:
+                try:
+                    agent_proposed_value = float(raw_pv)
+                except (TypeError, ValueError):
+                    pass
+            _raw_ei = getattr(suggestion, "expected_impact", None)
+            agent_expected_impact = str(_raw_ei) if isinstance(_raw_ei, str) else ""
+
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -2333,6 +2566,9 @@ class Handlers:
                 source_report_id=run_id,
                 description=suggestion.evidence_summary or "",
                 confidence=confidence,
+                target_param=agent_target_param,
+                proposed_value=agent_proposed_value,
+                expected_impact=agent_expected_impact,
                 hypothesis_id=(
                     structural_context.get("hypothesis_id")
                     if structural_context is not None
@@ -3439,6 +3675,131 @@ class Handlers:
                     exc_info=True,
                 )
 
+        # ── Portfolio-level curated files ──────────────────────────────
+        try:
+            from schemas.daily_metrics import BotDailySummary
+            from skills.build_daily_metrics import (
+                build_concurrent_position_analysis,
+                build_family_snapshots,
+                build_portfolio_rules_summary,
+                build_sector_exposure,
+            )
+            from skills.compute_portfolio_risk import PortfolioRiskComputer
+            from skills.portfolio_metrics_tracker import PortfolioMetricsTracker
+
+            # Collect all trade records and portfolio_rule events across bots
+            all_trade_records: list[dict] = []
+            all_rule_events: list[dict] = []
+            for bot_id in target_bots:
+                bot_raw = self._raw_data_dir / date / bot_id
+                if not bot_raw.exists():
+                    continue
+                all_trade_records.extend(self._load_raw_json_records(bot_raw, "trade"))
+                all_rule_events.extend(self._load_raw_json_records(bot_raw, "portfolio_rule"))
+
+            # Load BotDailySummary from just-written per-bot summary.json files
+            bot_summaries: list[BotDailySummary] = []
+            for bot_id in target_bots:
+                summary_path = self._curated_dir / date / bot_id / "summary.json"
+                if summary_path.exists():
+                    try:
+                        raw = json.loads(summary_path.read_text(encoding="utf-8"))
+                        bot_summaries.append(BotDailySummary.model_validate(raw))
+                    except Exception:
+                        logger.warning("Failed to load summary for %s/%s", date, bot_id)
+
+            if all_trade_records or all_rule_events or bot_summaries:
+                portfolio_dir = self._curated_dir / date / "portfolio"
+                portfolio_dir.mkdir(parents=True, exist_ok=True)
+
+                # 1. rule_blocks_summary.json
+                rules_summary = build_portfolio_rules_summary(all_rule_events)
+                (portfolio_dir / "rule_blocks_summary.json").write_text(
+                    json.dumps(rules_summary, indent=2, default=str), encoding="utf-8",
+                )
+
+                # 2. family_snapshots.json (must be BEFORE portfolio_rolling_metrics)
+                family_snaps = build_family_snapshots(bot_summaries, self._strategy_registry)
+                (portfolio_dir / "family_snapshots.json").write_text(
+                    json.dumps(family_snaps, indent=2, default=str), encoding="utf-8",
+                )
+
+                # 3. concurrent_position_analysis.json
+                concurrent = build_concurrent_position_analysis(all_trade_records)
+                (portfolio_dir / "concurrent_position_analysis.json").write_text(
+                    json.dumps(concurrent, indent=2, default=str), encoding="utf-8",
+                )
+
+                # 4. sector_exposure.json
+                sector_exp = build_sector_exposure(all_trade_records)
+                (portfolio_dir / "sector_exposure.json").write_text(
+                    json.dumps(sector_exp, indent=2, default=str), encoding="utf-8",
+                )
+
+                # 5. portfolio_rolling_metrics.json (reads family_snapshots.json)
+                try:
+                    tracker = PortfolioMetricsTracker(self._curated_dir)
+                    rolling = tracker.compute(date)
+                    (portfolio_dir / "portfolio_rolling_metrics.json").write_text(
+                        json.dumps(rolling.model_dump(mode="json"), indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    logger.warning("Failed to compute portfolio rolling metrics for %s", date, exc_info=True)
+
+                # 6. portfolio_risk_card.json
+                try:
+                    position_details: dict[str, list[dict]] = {}
+                    for evt in all_trade_records:
+                        payload = evt.get("payload", evt)
+                        bid = payload.get("bot_id", "")
+                        if bid:
+                            position_details.setdefault(bid, []).append({
+                                "symbol": payload.get("pair", ""),
+                                "direction": payload.get("side", "LONG"),
+                                "exposure_pct": payload.get("exposure_pct", 0.0),
+                            })
+
+                    historical_pnl: dict[str, list[float]] = {}
+                    for hbot_id in target_bots:
+                        pnls: list[float] = []
+                        for d in range(20):
+                            past = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=d)).strftime("%Y-%m-%d")
+                            sp = self._curated_dir / past / hbot_id / "summary.json"
+                            if sp.exists():
+                                try:
+                                    pnls.append(json.loads(sp.read_text(encoding="utf-8")).get("net_pnl", 0.0))
+                                except (json.JSONDecodeError, OSError):
+                                    pass
+                        if pnls:
+                            pnls.reverse()
+                            historical_pnl[hbot_id] = pnls
+
+                    sector_map: dict[str, str] = {}
+                    for evt in all_trade_records:
+                        payload = evt.get("payload", evt)
+                        sym = payload.get("pair", "")
+                        sec = payload.get("sector", "")
+                        if sym and sec:
+                            sector_map[sym] = sec
+
+                    computer = PortfolioRiskComputer(
+                        date=date,
+                        bot_summaries=bot_summaries,
+                        position_details=position_details,
+                        historical_pnl=historical_pnl,
+                        sector_map=sector_map,
+                    )
+                    risk_card = computer.compute()
+                    (self._curated_dir / date / "portfolio_risk_card.json").write_text(
+                        json.dumps(risk_card.model_dump(mode="json"), indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    logger.warning("Failed to compute portfolio risk card for %s", date, exc_info=True)
+        except Exception:
+            logger.warning("Failed to rebuild portfolio curated files for %s", date, exc_info=True)
+
     def _build_enriched_curated(self, date: str, bots: list[str] | None = None) -> None:
         """Compatibility wrapper for the old enriched-curated rebuild entrypoint."""
         self._rebuild_daily_curated_from_raw(date, bots)
@@ -3460,6 +3821,8 @@ class Handlers:
                     continue
                 if isinstance(data, dict):
                     records.append(data)
+                elif isinstance(data, list):
+                    records.extend(d for d in data if isinstance(d, dict))
                 continue
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()

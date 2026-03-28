@@ -59,6 +59,35 @@ class StrategyEngine:
         },
     }
 
+    # Map detector_name → suggestion category for value-map lookups.
+    _DETECTOR_TO_CATEGORY: dict[str, str] = {
+        "tight_stop": "stop_loss",
+        "wide_stop": "stop_loss",
+        "filter_cost": "filter_threshold",
+        "regime_loss": "regime_gate",
+        "alpha_decay": "signal",
+        "signal_decay": "signal",
+        "component_signal_decay": "signal",
+        "factor_decay": "signal",
+        "exit_timing": "exit_timing",
+        "correlation": "signal",
+        "time_of_day": "signal",
+        "drawdown_concentration": "stop_loss",
+        "position_sizing": "position_sizing",
+        "filter_interactions": "filter_threshold",
+        "microstructure": "signal",
+    }
+
+    # Keywords indicating direction of change
+    _DECREASE_KEYWORDS = frozenset({
+        "tighten", "reduce", "lower", "decrease", "narrow", "less", "smaller",
+        "cut", "shrink", "restrict", "shorten",
+    })
+    _INCREASE_KEYWORDS = frozenset({
+        "widen", "increase", "raise", "expand", "more", "larger", "bigger",
+        "extend", "loosen", "relax", "lengthen",
+    })
+
     def __init__(
         self,
         week_start: str,
@@ -69,6 +98,11 @@ class StrategyEngine:
         regime_min_weeks: int = 3,
         threshold_learner: object | None = None,
         strategy_registry: object | None = None,
+        category_scorecard: object | None = None,
+        detector_confidence: dict[str, float] | None = None,
+        recent_suggestions: list[dict] | None = None,
+        convergence_report: dict | None = None,
+        category_value_map: dict | None = None,
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -78,6 +112,11 @@ class StrategyEngine:
         self.regime_min_weeks = regime_min_weeks
         self._threshold_learner = threshold_learner
         self._strategy_registry = strategy_registry
+        self._category_scorecard = category_scorecard
+        self._detector_confidence = detector_confidence or {}
+        self._recent_suggestions = recent_suggestions or []
+        self._convergence_report = convergence_report or {}
+        self._category_value_map = category_value_map or {}
 
     def _get_threshold(
         self,
@@ -961,6 +1000,77 @@ class StrategyEngine:
 
         return suggestions
 
+    def _infer_direction(self, suggestion: StrategySuggestion) -> int:
+        """Infer change direction: +1 (increase), -1 (decrease), 0 (unknown).
+
+        Tries numeric comparison first, falls back to keyword analysis.
+        """
+        # Try numeric comparison: suggested_value vs current_value
+        try:
+            sv = suggestion.suggested_value
+            cv = suggestion.current_value
+            if sv and cv:
+                sv_f = float(str(sv).split("=")[-1].split(">")[0].split("<")[0].strip())
+                cv_f = float(str(cv).split("=")[-1].split(">")[0].split("<")[0].strip())
+                if sv_f > cv_f:
+                    return 1
+                elif sv_f < cv_f:
+                    return -1
+        except (ValueError, TypeError, IndexError, AttributeError):
+            pass
+
+        # Fall back to keyword analysis on title + description
+        text = (suggestion.title + " " + suggestion.description).lower()
+        for kw in self._INCREASE_KEYWORDS:
+            if kw in text:
+                return 1
+        for kw in self._DECREASE_KEYWORDS:
+            if kw in text:
+                return -1
+        return 0
+
+    def _infer_direction_from_dict(self, rec: dict) -> int:
+        """Infer direction from a persisted suggestion dict."""
+        # Try proposed_value vs detection_context.threshold_value
+        pv = rec.get("proposed_value")
+        ctx = rec.get("detection_context") or {}
+        cv = ctx.get("threshold_value") or ctx.get("observed_value")
+        if pv is not None and cv is not None:
+            try:
+                if float(pv) > float(cv):
+                    return 1
+                elif float(pv) < float(cv):
+                    return -1
+            except (ValueError, TypeError):
+                pass
+
+        text = (rec.get("title", "") + " " + rec.get("description", "")).lower()
+        for kw in self._INCREASE_KEYWORDS:
+            if kw in text:
+                return 1
+        for kw in self._DECREASE_KEYWORDS:
+            if kw in text:
+                return -1
+        return 0
+
+    def _contradicts_recent(
+        self, bot_id: str, detector_name: str, direction: int,
+    ) -> bool:
+        """Check if a recent suggestion from same detector+bot had opposite direction."""
+        if direction == 0 or not self._recent_suggestions:
+            return False
+        for rec in self._recent_suggestions:
+            if rec.get("bot_id") != bot_id:
+                continue
+            ctx = rec.get("detection_context") or {}
+            rec_detector = ctx.get("detector_name", "")
+            if rec_detector != detector_name:
+                continue
+            rec_direction = self._infer_direction_from_dict(rec)
+            if rec_direction != 0 and rec_direction != direction:
+                return True
+        return False
+
     def build_report(
         self,
         bot_summaries: dict[str, BotWeeklySummary],
@@ -1054,11 +1164,99 @@ class StrategyEngine:
                     self.detect_microstructure_issues(bot_id, ob_data)
                 )
 
+        # Apply per-detector confidence calibration from outcome data
+        if self._detector_confidence:
+            calibrated: list[StrategySuggestion] = []
+            for s in all_suggestions:
+                det_name = ""
+                if s.detection_context:
+                    det_name = s.detection_context.detector_name
+                multiplier = self._detector_confidence.get(det_name, 1.0)
+                if multiplier != 1.0 and det_name:
+                    adjusted_conf = round(s.confidence * multiplier, 3)
+                    s = s.model_copy(update={"confidence": adjusted_conf})
+                calibrated.append(s)
+            all_suggestions = calibrated
+
+        # Anti-oscillation: filter out suggestions that contradict recent ones
+        if self._recent_suggestions:
+            filtered: list[StrategySuggestion] = []
+            for s in all_suggestions:
+                det_name = ""
+                if s.detection_context:
+                    det_name = s.detection_context.detector_name
+                direction = self._infer_direction(s)
+                if det_name and direction != 0 and self._contradicts_recent(
+                    s.bot_id, det_name, direction,
+                ):
+                    continue  # Skip contradictory suggestion
+                filtered.append(s)
+            all_suggestions = filtered
+
+        # If convergence report shows oscillation, dampen all confidence
+        if self._convergence_report.get("oscillation_detected"):
+            all_suggestions = [
+                s.model_copy(update={"confidence": round(s.confidence * 0.7, 3)})
+                for s in all_suggestions
+            ]
+
+        # Optimization allocation: adjust confidence based on category value
+        if self._category_value_map:
+            adjusted: list[StrategySuggestion] = []
+            for s in all_suggestions:
+                det_name_for_cat = ""
+                if s.detection_context:
+                    det_name_for_cat = s.detection_context.detector_name
+                cat = self._DETECTOR_TO_CATEGORY.get(det_name_for_cat, "")
+                key = f"{s.bot_id}:{cat}" if cat else ""
+                entry = self._category_value_map.get(key, {}) if key else {}
+                vps = entry.get("value_per_suggestion") if entry else None
+                if entry.get("unexplored"):
+                    pass  # neutral treatment — don't penalize unexplored categories
+                elif vps is not None and vps != 0:
+                    # Scale factor proportionally, clamped to +-10%
+                    raw_adj = max(-0.1, min(0.1, vps * 0.5))
+                    factor = 1.0 + raw_adj
+                    s = s.model_copy(update={
+                        "confidence": round(s.confidence * factor, 3),
+                    })
+                adjusted.append(s)
+            all_suggestions = adjusted
+
+        # Suppress suggestions for categories with proven poor track records
+        if self._category_scorecard:
+            all_suggestions = [
+                s for s in all_suggestions
+                if not self._should_suppress(s.bot_id, s.tier.value)
+            ]
+
         return RefinementReport(
             week_start=self.week_start,
             week_end=self.week_end,
             suggestions=all_suggestions,
         )
+
+    def _should_suppress(self, bot_id: str, tier_value: str) -> bool:
+        """Check if a (bot_id, tier) pair should be suppressed due to poor track record.
+
+        Maps scorecard categories back to suggestion tiers via CATEGORY_TO_TIER,
+        then suppresses when sample_size >= 5 AND win_rate < 0.3 AND avg_pnl_delta < 0.
+        """
+        if not self._category_scorecard:
+            return False
+        scores = getattr(self._category_scorecard, "scores", None)
+        if not scores:
+            return False
+        from schemas.agent_response import CATEGORY_TO_TIER
+        for score in scores:
+            if score.bot_id != bot_id:
+                continue
+            mapped_tier = CATEGORY_TO_TIER.get(score.category, score.category)
+            if mapped_tier != tier_value:
+                continue
+            if score.sample_size >= 5 and score.win_rate < 0.3 and score.avg_pnl_delta < 0:
+                return True
+        return False
 
     # ── Portfolio-level detectors (Phase 2) ───────────────────────────
 

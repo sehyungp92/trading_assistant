@@ -73,10 +73,21 @@ Per-category win rate scorecard → blocks suggestion types with poor track reco
          ↓
 Prediction accuracy tracking → confidence calibration on future analyses
          ↓
+Convergence tracker → is the learning system improving, degrading, or oscillating?
+         ↓
 All of the above injected into the next analysis prompt
 ```
 
-The system won't re-suggest rejected ideas. Categories with low success rates get their suggestions stripped before delivery. Confidence levels are capped based on historical prediction accuracy. Hypotheses that accumulate rejections and negative outcomes are auto-retired.
+The system won't re-suggest rejected ideas. Categories with low success rates get their suggestions stripped before delivery. Confidence levels are capped based on historical prediction accuracy. Hypotheses that accumulate rejections and negative outcomes are auto-retired. 
+
+Crucially, the learning system is self-correcting — it monitors whether its own optimisation process is working and adjusts accordingly:
+
+- **Convergence tracking** synthesises composite score trends, prediction accuracy, outcome ratios, and scorecard evolution into an overall signal (improving/degrading/oscillating/stable). When oscillation is detected, the LLM is instructed to hold steady rather than reversing last week's suggestions.
+- **Temporal decay on scorecards** applies 5%/week exponential decay to outcome weights, matching the learning ledger's existing decay rate. Categories recover from early failures as old negatives fade, making the inner loop adaptive rather than accumulative.
+- **Directional bias correction** detects systematic optimism or pessimism per metric in the LLM's prediction track record and reduces confidence on predictions that match the bias pattern (capped at 20%).
+- **Per-detector confidence calibration** gives each of the strategy engine's 11 detectors an empirical confidence multiplier derived from its outcome history. This is distinct from threshold learning (which adapts *when* a detector fires) — confidence calibration adapts *how much to trust* a detection once it fires.
+- **Suggestion pre-validation** filters strategy engine suggestions against the scorecard at recording time, preventing category leakage when the scorecard was unavailable during report generation.
+- **Discovery and convergence context** in prompt instructions tells the LLM how to use automated pattern discoveries and convergence status that were previously loaded into data but invisible to the instruction set.
 
 ## Design Philosophy: OpenClaw Governance + Autoresearch Optimisation
 
@@ -114,7 +125,7 @@ OpenClaw's permission gates prevent the failure mode Autoresearch is vulnerable 
 
 Autoresearch's inner loop prevents the failure mode OpenClaw is vulnerable to: an LLM that confidently proposes changes without empirical validation. Every parameter suggestion gets backtested, robustness-tested, and cost-sensitivity-tested before a human even sees it. The approval card a human receives includes the full exploration summary — not just the LLM's reasoning, but the inner loop's empirical evidence.
 
-The feedback loop closes through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, and prediction accuracy into every prompt. The LLM is told what the inner loop already explored (so it does not re-propose tested values), what past suggestions actually achieved (so it calibrates confidence), and which suggestion categories have poor track records (so those get automatically stripped). The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
+The feedback loop closes through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, prediction accuracy, convergence reports, and directional bias data into every prompt. The LLM is told what the inner loop already explored (so it does not re-propose tested values), what past suggestions actually achieved (so it calibrates confidence), which suggestion categories have poor track records (so those get automatically stripped), whether the learning system is converging or oscillating (so it avoids destabilising reversals), and where its own directional biases lie (so it corrects for systematic over-optimism or over-pessimism). The inner loop, in turn, calibrates its own detector confidence and scorecard weights from the outcomes its suggestions produce — closing the loop in both directions. The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
 
 ### Matching the change type to the right tool
 
@@ -122,7 +133,7 @@ The learning system routes each type of improvement to whichever tool handles it
 
 Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading performance data in context, forming hypotheses about *why* something is failing, and proposing changes that may not have an obvious metric to optimise against. These belong to the LLM, which receives the full context package (ground truth trends, outcome history, regime analysis, root cause distributions) and reasons about what to change and why. Structural proposals always surface in reports for human review — they are never auto-implemented, because the right structural change depends on judgment that neither a grid search nor a language model should make alone.
 
-Portfolio-level changes — rebalancing family allocation weights, adjusting risk caps, modifying coordination rules between strategies, changing drawdown tier multipliers — operate above individual strategies. The strategy engine runs portfolio-level detectors (correlation crowding, family imbalance, drawdown synchronisation) and produces structured `PortfolioProposal` objects. Allocation proposals are validated through a what-if analysis (`skills/portfolio_what_if.py`) that rescales historical family PnL under the proposed weights to estimate portfolio Calmar, Sharpe, and max drawdown before any change is recorded. Portfolio outcomes are measured over a 30-day observation window (vs 7 days for strategy-level), and regime shifts during the window yield INCONCLUSIVE verdicts rather than false signals. Each strategy carries an archetype profile (`data/strategy_profiles.yaml`) that sets archetype-specific detection thresholds — trend-following strategies get looser alpha decay thresholds than intraday momentum, for example — so the engine's suggestions respect each strategy's inherent characteristics rather than applying uniform rules.
+Portfolio-level changes — rebalancing family allocation weights, adjusting risk caps, modifying coordination rules between strategies, changing drawdown tier multipliers — operate above individual strategies. The strategy engine runs portfolio-level detectors (correlation crowding, family imbalance, drawdown synchronisation) and produces structured `PortfolioProposal` objects. Allocation proposals are validated through a what-if analysis (`skills/portfolio_what_if.py`) that rescales historical family PnL under the proposed weights to estimate portfolio Calmar, Sharpe, and max drawdown before any change is recorded. When per-family trade-level data is available, the what-if uses individual trades instead of daily aggregates — producing intra-day max drawdown from the per-trade equity curve, Sortino ratio, profit factor, and PnL-by-regime breakdowns that daily aggregation would mask. Portfolio outcomes are measured over a 30-day observation window (vs 7 days for strategy-level), and regime shifts during the window yield INCONCLUSIVE verdicts rather than false signals. Each strategy carries an archetype profile (`data/strategy_profiles.yaml`) that sets archetype-specific detection thresholds — trend-following strategies get looser alpha decay thresholds than intraday momentum, for example — so the engine's suggestions respect each strategy's inherent characteristics rather than applying uniform rules.
 
 ## Architecture
 
@@ -152,7 +163,7 @@ skills/         — data pipelines, metrics builders, simulation runners, tracke
 comms/          — Telegram, Discord, Email adapters + dispatcher + renderers
 schemas/        — Pydantic v2 models for all data contracts
 memory/         — policies/ (human-edited) + findings/ (system-written)
-tests/          — pytest, asyncio_mode=auto, ~2750 tests
+tests/          — pytest, asyncio_mode=auto, ~2980 tests
 ```
 
 ## Quick Start

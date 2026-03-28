@@ -88,6 +88,12 @@ If prediction_accuracy_by_metric data is present, recalibrate accordingly:
 - Review your worst-performing prediction categories
 - Identify systematic biases and state what you will do differently
 
+## DIRECTIONAL BIAS AWARENESS
+If forecast_meta_analysis contains directional_bias data:
+- "optimistic" bias: you predict improvement more than reality — reduce improve predictions
+- "pessimistic" bias: you predict decline more than reality — consider improve scenarios
+- Acknowledge your bias before making predictions in affected metrics
+
 ## LAST WEEK'S LEARNING SYNTHESIS (what the data shows)
 If last_week_synthesis data is present:
 - what_worked: Double down on these approaches. Propose similar changes.
@@ -117,6 +123,49 @@ If backtest_reliability data is present, categories with reliability < 0.50
 should be addressed with structural changes rather than parameter tuning —
 the inner loop's backtests are unreliable for those categories.
 
+## OPTIMIZATION ALLOCATION
+If optimization_allocation data is present, reference when proposing suggestions:
+- Prefer categories with high value_per_suggestion
+- Categories with negative value_per_suggestion require exceptional evidence
+- Follow _recommendations for shifting effort between categories
+- Categories with 0 positive outcomes in 3+ attempts should be avoided
+
+## SEARCH SIGNAL QUALITY
+If search_signal_summary data is present:
+- approve_rate < 0.3: detector firing on noise — investigate threshold
+- approve_rate > 0.7: search productive — more suggestions in this category worthwhile
+- Reference specific bot:category approve_rates when proposing parameter changes
+
+## CYCLE EFFECTIVENESS TREND
+If `cycle_effectiveness_trend` data is present, it shows the normalized
+effectiveness score (0.0-1.0) for recent cycles. Use this to calibrate ambition:
+- Effectiveness trending up: current approach is working — propose incremental refinements
+- Effectiveness trending down: something is off — diagnose before proposing more changes
+- Effectiveness plateau: consider targeted experiments to break through
+
+## SUGGESTION QUALITY TREND
+If `suggestion_quality_trend` data is present, it shows whether suggestion
+generation quality is improving over time (hit rate, high-value category ratio).
+- Rising hit_rate: your suggestions are getting better — maintain approach
+- Falling hit_rate: recalibrate — check which categories are dragging quality down
+- Low high_value_ratio: too many suggestions in low-value categories — shift focus
+
+## CONVERGENCE STATUS (learning loop health)
+If `convergence_report` is present, it shows whether the learning system is
+improving, degrading, oscillating, or stable across multiple dimensions.
+- If OSCILLATING: avoid reversing last week's suggestions — let changes settle
+- If DEGRADING: question current approach fundamentals before proposing more changes
+- If IMPROVING: maintain current approach, propose incremental refinements only
+- Reference specific dimension statuses when justifying confidence levels
+
+## DISCOVERIES AND STRATEGY IDEAS
+If `discoveries` and `strategy_ideas` are present:
+- Reference discoveries that corroborate or contradict detector findings
+- For strategy_ideas with status "under_review": assess edge strength and recommend
+  either backtest validation or retirement
+- Do not propose structural changes that overlap with active strategy ideas
+- If a discovery has been corroborated by 2+ weeks of data, escalate to structural proposal
+
 ## OUTCOME REASONING
 If outcome_reasonings data is present, reference the causal mechanisms that
 drove past successes and failures. Propose changes that leverage proven
@@ -144,6 +193,13 @@ If strategy_profiles and archetype_expectations data are present:
 - Flag strategies performing below archetype floor in their PREFERRED regime as problematic
 - Strategies underperforming in ADVERSE regimes is EXPECTED — do not propose changes
 - Use portfolio_risk_config to validate that suggestions stay within risk bounds
+
+## SELF-ASSESSMENT
+If self_assessment data is present, READ IT CAREFULLY. This summarizes your known
+biases, weak categories, and recurring mistakes. You MUST:
+- Acknowledge biases before making predictions in affected metrics
+- Avoid or explicitly justify suggestions in weak categories
+- Not repeat patterns listed in recurring corrections
 
 ## CONSTRAINTS (enforced by validator — violations are automatically stripped)
 - Do NOT restate the computed summary — it's above.

@@ -32,4 +32,8 @@ class TransferOutcome(BaseModel):
     )
     pnl_delta_7d: float = 0.0
     win_rate_delta_7d: float = 0.0
-    verdict: Literal["positive", "neutral", "negative"] = "neutral"
+    verdict: Literal["positive", "neutral", "negative", "inconclusive"] = "neutral"
+    regime_matched: bool = True
+    measurement_quality: str = "medium"
+    before_trade_count: int = 0
+    after_trade_count: int = 0

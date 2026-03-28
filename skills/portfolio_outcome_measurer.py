@@ -37,10 +37,15 @@ class PortfolioOutcomeMeasurer:
         if not suggestions:
             return []
 
+        # Skip suggestions already measured (idempotency guard)
+        already_measured = self._load_measured_ids()
+
         outcomes: list[dict] = []
         now = datetime.now(timezone.utc)
 
         for suggestion in suggestions:
+            if suggestion.get("suggestion_id", "") in already_measured:
+                continue
             deployed_at = suggestion.get("deployed_at", "")
             if not deployed_at:
                 continue
@@ -71,13 +76,13 @@ class PortfolioOutcomeMeasurer:
             after_composite = after.get("composite_score", 0.5)
             delta = after_composite - before_composite
 
-            # Determine verdict
+            # Determine verdict (lowercase to match SuggestionScorer._is_positive)
             if abs(delta) < 0.02:
-                verdict = "INCONCLUSIVE"
+                verdict = "inconclusive"
             elif delta > 0:
-                verdict = "POSITIVE"
+                verdict = "positive"
             else:
-                verdict = "NEGATIVE"
+                verdict = "negative"
 
             outcome = {
                 "suggestion_id": suggestion.get("suggestion_id", ""),
@@ -92,6 +97,12 @@ class PortfolioOutcomeMeasurer:
                 "verdict": verdict,
                 "measurement_quality": "high" if days_since >= _MIN_OBSERVATION_DAYS * 1.5 else "medium",
             }
+
+            # Compare what-if predictions against actual outcome
+            prediction_check = self._check_what_if_accuracy(suggestion, delta)
+            if prediction_check:
+                outcome["what_if_accuracy"] = prediction_check
+
             outcomes.append(outcome)
             self._write_outcome(outcome)
 
@@ -149,6 +160,83 @@ class PortfolioOutcomeMeasurer:
                 }
 
         return None
+
+    @staticmethod
+    def _check_what_if_accuracy(
+        suggestion: dict, actual_composite_delta: float,
+    ) -> dict | None:
+        """Compare what-if predictions against actual outcome.
+
+        Extracts the what_if_result from the suggestion's detection_context
+        and checks whether predicted direction matched actual direction for
+        each metric. Returns accuracy dict or None if no predictions.
+        """
+        detection_ctx = suggestion.get("detection_context", {})
+        if not detection_ctx:
+            return None
+        what_if = detection_ctx.get("what_if_result")
+        if not what_if:
+            return None
+
+        result: dict = {}
+
+        # Track which mode was used (trade-level produces sortino/profit_factor)
+        has_enriched = "current_sortino" in what_if
+        result["mode"] = "trade_level" if has_enriched else "daily_aggregate"
+
+        # Check direction accuracy for each predicted delta
+        # inverted=True means negative delta = improvement (e.g. drawdown decreasing)
+        delta_keys = [
+            ("calmar_delta", "calmar", False),
+            ("sharpe_delta", "sharpe", False),
+            ("drawdown_delta", "drawdown", True),
+        ]
+        if has_enriched:
+            delta_keys.extend([
+                ("sortino_delta", "sortino", False),
+                ("profit_factor_delta", "profit_factor", False),
+            ])
+
+        correct = 0
+        total = 0
+        for key, label, inverted in delta_keys:
+            predicted = what_if.get(key)
+            if predicted is None:
+                continue
+            total += 1
+            # Normalize direction: for inverted metrics, flip sign
+            adj_predicted = -predicted if inverted else predicted
+            predicted_dir = 0 if abs(adj_predicted) < 1e-6 else (1 if adj_predicted > 0 else -1)
+            actual_dir = 0 if abs(actual_composite_delta) < 0.02 else (
+                1 if actual_composite_delta > 0 else -1
+            )
+            match = predicted_dir == actual_dir or predicted_dir == 0 or actual_dir == 0
+            result[f"{label}_predicted"] = round(predicted, 4)
+            result[f"{label}_direction_match"] = match
+            if match:
+                correct += 1
+
+        if total > 0:
+            result["direction_accuracy"] = round(correct / total, 2)
+
+        return result if total > 0 else None
+
+    def _load_measured_ids(self) -> set[str]:
+        """Load suggestion IDs that already have outcomes recorded."""
+        if not self._outcomes_path.exists():
+            return set()
+        ids: set[str] = set()
+        try:
+            for line in self._outcomes_path.read_text(encoding="utf-8").strip().splitlines():
+                if line.strip():
+                    try:
+                        ids.add(json.loads(line).get("suggestion_id", ""))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        ids.discard("")
+        return ids
 
     def _load_deployed_portfolio_suggestions(self) -> list[dict]:
         """Load DEPLOYED suggestions with bot_id=PORTFOLIO."""

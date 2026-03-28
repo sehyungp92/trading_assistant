@@ -103,15 +103,35 @@ class TransferProposalBuilder:
                 if before is None or after is None:
                     continue
 
+                before_trades = before.get("trade_count", 0)
+                after_trades = after.get("trade_count", 0)
+
+                # Quality gate: require minimum trade counts
+                if before_trades < 5 or after_trades < 5:
+                    continue
+
                 pnl_delta = after.get("pnl", 0) - before.get("pnl", 0)
                 wr_delta = after.get("win_rate", 0) - before.get("win_rate", 0)
 
-                if pnl_delta > 0 and wr_delta >= 0:
+                # Regime matching
+                before_regime = before.get("dominant_regime", "")
+                after_regime = after.get("dominant_regime", "")
+                regime_matched = (
+                    before_regime == after_regime
+                    or not before_regime
+                    or not after_regime
+                )
+
+                if not regime_matched:
+                    verdict = "inconclusive"
+                elif pnl_delta > 0 and wr_delta >= 0:
                     verdict = "positive"
                 elif pnl_delta < 0:
                     verdict = "negative"
                 else:
                     verdict = "neutral"
+
+                quality = "high" if regime_matched and before_trades >= 10 and after_trades >= 10 else "medium"
 
                 outcome = TransferOutcome(
                     pattern_id=pattern.pattern_id,
@@ -121,6 +141,10 @@ class TransferProposalBuilder:
                     pnl_delta_7d=round(pnl_delta, 4),
                     win_rate_delta_7d=round(wr_delta, 4),
                     verdict=verdict,
+                    regime_matched=regime_matched,
+                    measurement_quality=quality,
+                    before_trade_count=before_trades,
+                    after_trade_count=after_trades,
                 )
                 outcomes.append(outcome)
 
@@ -134,27 +158,11 @@ class TransferProposalBuilder:
         return outcomes
 
     def compute_transfer_track_record(self) -> dict[str, dict]:
-        """Compute per-pattern success rates across all measured transfers."""
-        outcomes = self._load_outcomes()
-        if not outcomes:
-            return {}
+        """Compute per-pattern success rates across all measured transfers.
 
-        by_pattern: dict[str, list[dict]] = defaultdict(list)
-        for o in outcomes:
-            by_pattern[o.get("pattern_id", "")].append(o)
-
-        track_record: dict[str, dict] = {}
-        for pattern_id, pattern_outcomes in by_pattern.items():
-            positive = sum(1 for o in pattern_outcomes if o.get("verdict") == "positive")
-            total = len(pattern_outcomes)
-            track_record[pattern_id] = {
-                "total": total,
-                "positive": positive,
-                "negative": sum(1 for o in pattern_outcomes if o.get("verdict") == "negative"),
-                "success_rate": round(positive / total, 3) if total > 0 else 0.0,
-            }
-
-        return track_record
+        Excludes "inconclusive" verdicts from success rate calculation.
+        """
+        return self._build_track_record(self._load_outcomes())
 
     def create_from_reasoning(
         self, reasoning: dict, source_bot: str,
@@ -218,20 +226,28 @@ class TransferProposalBuilder:
                     records.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
-        if not records:
+        return TransferProposalBuilder._build_track_record(records)
+
+    @staticmethod
+    def _build_track_record(outcomes: list[dict]) -> dict[str, dict]:
+        """Compute per-pattern success rates, excluding inconclusive verdicts."""
+        if not outcomes:
             return {}
         by_pattern: dict[str, list[dict]] = defaultdict(list)
-        for o in records:
+        for o in outcomes:
             by_pattern[o.get("pattern_id", "")].append(o)
         track_record: dict[str, dict] = {}
         for pattern_id, pattern_outcomes in by_pattern.items():
-            positive = sum(1 for o in pattern_outcomes if o.get("verdict") == "positive")
-            total = len(pattern_outcomes)
+            decisive = [o for o in pattern_outcomes if o.get("verdict") != "inconclusive"]
+            positive = sum(1 for o in decisive if o.get("verdict") == "positive")
+            total_decisive = len(decisive)
             track_record[pattern_id] = {
-                "total": total,
+                "total": len(pattern_outcomes),
+                "decisive": total_decisive,
                 "positive": positive,
-                "negative": sum(1 for o in pattern_outcomes if o.get("verdict") == "negative"),
-                "success_rate": round(positive / total, 3) if total > 0 else 0.0,
+                "negative": sum(1 for o in decisive if o.get("verdict") == "negative"),
+                "inconclusive": len(pattern_outcomes) - total_decisive,
+                "success_rate": round(positive / total_decisive, 3) if total_decisive > 0 else 0.0,
             }
         return track_record
 
@@ -392,7 +408,10 @@ class TransferProposalBuilder:
     def _load_bot_metrics(
         self, bot_id: str, date: str, curated_dir: Path, before: bool,
     ) -> dict | None:
-        """Load aggregated bot metrics for 7 days before or after a date."""
+        """Load aggregated bot metrics for 7 days before or after a date.
+
+        Returns dict with pnl, win_rate, trade_count, and dominant_regime.
+        """
         from datetime import datetime, timedelta
 
         if not date:
@@ -410,6 +429,8 @@ class TransferProposalBuilder:
 
         pnl_total = 0.0
         wr_values: list[float] = []
+        trade_count = 0
+        regime_counts: dict[str, int] = {}
         found = 0
 
         for d in dates:
@@ -421,14 +442,29 @@ class TransferProposalBuilder:
                     wr = data.get("win_rate")
                     if wr is not None:
                         wr_values.append(float(wr))
+                    trade_count += data.get("total_trades", 0)
                     found += 1
                 except (json.JSONDecodeError, OSError, ValueError):
+                    pass
+
+            # Load regime data
+            regime_path = curated_dir / d / bot_id / "regime_analysis.json"
+            if regime_path.exists():
+                try:
+                    rdata = json.loads(regime_path.read_text(encoding="utf-8"))
+                    regime = rdata.get("dominant_regime", "") or rdata.get("regime", "")
+                    if regime:
+                        regime_counts[regime] = regime_counts.get(regime, 0) + 1
+                except (json.JSONDecodeError, OSError):
                     pass
 
         if found < 3:
             return None
 
+        dominant_regime = max(regime_counts, key=regime_counts.get) if regime_counts else ""  # type: ignore[arg-type]
         return {
             "pnl": pnl_total,
             "win_rate": sum(wr_values) / len(wr_values) if wr_values else 0.0,
+            "trade_count": trade_count,
+            "dominant_regime": dominant_regime,
         }

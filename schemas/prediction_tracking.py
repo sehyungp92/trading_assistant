@@ -37,6 +37,7 @@ class PredictionVerdict(BaseModel):
     correct: bool = False
     confidence: float = 0.0
     status: Literal["correct", "incorrect", "insufficient_data"] = "insufficient_data"
+    magnitude_score: float = 0.0
 
 
 class PredictionEvaluation(BaseModel):
@@ -49,3 +50,4 @@ class PredictionEvaluation(BaseModel):
     accuracy: float = 0.0
     confidence_weighted_accuracy: float = 0.0
     accuracy_by_metric: dict[str, float] = {}
+    magnitude_weighted_accuracy: float = 0.0

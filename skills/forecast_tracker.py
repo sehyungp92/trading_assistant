@@ -40,6 +40,7 @@ class ForecastTracker:
     def compute_meta_analysis(
         self,
         prediction_verdicts: list[PredictionVerdict] | None = None,
+        directional_bias: dict[str, dict] | None = None,
     ) -> ForecastMetaAnalysis:
         """Compute rolling accuracy, trend, and calibration from all records.
 
@@ -114,6 +115,7 @@ class ForecastTracker:
             expected_calibration_error=ece,
             brier_score=brier,
             calibration_sample_size=cal_sample_size,
+            directional_bias=directional_bias or {},
         )
 
     @staticmethod

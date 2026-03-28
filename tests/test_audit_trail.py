@@ -25,7 +25,7 @@ async def test_consumer_writes_events_to_jsonl(event_stream, log_dir):
     consumer.start(event_stream)
 
     event_stream.broadcast("test_event", {"key": "value"})
-    await asyncio.sleep(0.05)  # let consumer process
+    await asyncio.sleep(0)  # let consumer process
 
     await consumer.stop()
 
@@ -45,7 +45,7 @@ async def test_file_named_by_date(event_stream, log_dir):
 
     ev = event_stream.broadcast("date_test", {})
     date_str = ev.timestamp.strftime("%Y-%m-%d")
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
 
     await consumer.stop()
 
@@ -60,7 +60,7 @@ async def test_events_include_timestamp_and_sequence(event_stream, log_dir):
 
     event_stream.broadcast("ev1", {"n": 1})
     event_stream.broadcast("ev2", {"n": 2})
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
 
     await consumer.stop()
 
@@ -82,7 +82,7 @@ async def test_consumer_handles_multiple_events(event_stream, log_dir):
 
     for i in range(10):
         event_stream.broadcast(f"event_{i}", {"i": i})
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0)
 
     await consumer.stop()
 
@@ -111,7 +111,7 @@ async def test_graceful_on_write_errors(event_stream, tmp_path):
     consumer.start(event_stream)
 
     event_stream.broadcast("fail_test", {})
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
 
     # Should not crash
     await consumer.stop()

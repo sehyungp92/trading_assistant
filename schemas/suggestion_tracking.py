@@ -47,6 +47,9 @@ class SuggestionRecord(BaseModel):
     approval_request_id: Optional[str] = None
     deployment_id: Optional[str] = None
     pr_url: Optional[str] = None
+    target_param: Optional[str] = None
+    proposed_value: Optional[float] = None
+    expected_impact: str = ""
     detection_context: Optional[dict] = None
     implementation_context: Optional[dict] = None
 
