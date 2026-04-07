@@ -152,3 +152,17 @@ class RootCauseSummary(BaseModel):
     date: str
     distribution: dict[str, int] = {}
     total_trades: int = 0
+
+
+class MacroRegimeAnalysis(BaseModel):
+    """Daily performance breakdown by macro regime (G/R/S/D)."""
+
+    bot_id: str
+    date: str
+    macro_regime: str = ""  # active macro regime for the day
+    regime_confidence: float = 0.0
+    stress_level: float = 0.0
+    applied_config: dict = {}  # directional_cap_R, unit_risk_mult, etc.
+    regime_pnl_30d: float = 0.0  # trailing 30d PnL while in this regime
+    regime_trade_count_30d: int = 0
+    regime_win_rate_30d: float = 0.0

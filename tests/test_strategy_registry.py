@@ -242,16 +242,62 @@ class TestFullYAMLFile:
         return load_strategy_registry(_REAL_YAML)
 
     def test_loads_all_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies) == 15
+        assert len(full_registry.strategies) == 17
 
-    def test_swing_bot_has_5_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies_for_bot("swing_multi_01")) == 5
+    def test_swing_bot_has_6_strategies(self, full_registry: StrategyRegistry) -> None:
+        assert len(full_registry.strategies_for_bot("swing_multi_01")) == 6
 
-    def test_momentum_bot_has_3_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies_for_bot("momentum_nq_01")) == 3
+    def test_momentum_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
+        assert len(full_registry.strategies_for_bot("momentum_nq_01")) == 4
 
     def test_stock_bot_has_3_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("stock_trader")) == 3
 
     def test_k_stock_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("k_stock_trader")) == 4
+
+    def test_brs_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
+        assert full_registry.archetype_for_strategy("BRS_R9") == StrategyArchetype.BEAR_REGIME_SWING
+
+    def test_downturn_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
+        assert full_registry.archetype_for_strategy("DOWNTURN") == StrategyArchetype.MULTI_ENGINE_BEAR
+
+    def test_iaric_archetype_updated(self, full_registry: StrategyRegistry) -> None:
+        assert full_registry.archetype_for_strategy("IARIC_v1") == StrategyArchetype.MEAN_REVERSION_PULLBACK
+
+    def test_new_archetype_expectations(self, full_registry: StrategyRegistry) -> None:
+        for arch in ("bear_regime_swing", "multi_engine_bear", "mean_reversion_pullback"):
+            exp = full_registry.expectations_for_archetype(arch)
+            assert exp is not None, f"Missing archetype_expectations for {arch}"
+
+    def test_profile_metadata_fields(self, full_registry: StrategyRegistry) -> None:
+        brs = full_registry.strategies["BRS_R9"]
+        assert len(brs.entry_types) == 6
+        assert "S1_PULLBACK" in brs.entry_types
+        assert brs.regime_model == "5_state_bear"
+        assert len(brs.analysis_focus) == 4
+
+        downturn = full_registry.strategies["DOWNTURN"]
+        assert downturn.sub_engines == ["REVERSAL", "BREAKDOWN", "FADE"]
+        assert downturn.regime_model == "composite_with_vol_state"
+        assert len(downturn.key_metadata_fields) == 6
+
+    def test_brs_coordination_signal(self, full_registry: StrategyRegistry) -> None:
+        brs_signals = [
+            s for s in full_registry.coordination.signals
+            if s.trigger.get("strategy") == "BRS_R9"
+        ]
+        assert len(brs_signals) == 1
+        assert brs_signals[0].target.get("action") == "REDUCE_SIZE"
+        assert brs_signals[0].condition == "SAME_SYMBOL_OPPOSITE_DIRECTION"
+        assert brs_signals[0].params.get("size_mult") == 0.5
+
+    def test_downturn_cooldown_pair(self, full_registry: StrategyRegistry) -> None:
+        downturn_pairs = [
+            p for p in full_registry.coordination.cooldown_pairs
+            if "DOWNTURN" in p.strategies
+        ]
+        assert len(downturn_pairs) == 1
+        assert downturn_pairs[0].minutes == 60
+        assert downturn_pairs[0].session_only is True
+        assert downturn_pairs[0].session_window == ["09:45", "16:00"]

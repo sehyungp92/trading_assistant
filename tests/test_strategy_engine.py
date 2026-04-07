@@ -135,6 +135,18 @@ def _make_registry_for_engine() -> StrategyRegistry:
                 bot_id="breakout_bot", family="momentum",
                 archetype="box_breakout", asset_class="futures",
             ),
+            "BRS_R9": StrategyProfile(
+                bot_id="bear_bot", family="swing",
+                archetype="bear_regime_swing", asset_class="mixed",
+            ),
+            "DOWNTURN": StrategyProfile(
+                bot_id="downturn_bot", family="momentum",
+                archetype="multi_engine_bear", asset_class="futures",
+            ),
+            "MR_PULLBACK": StrategyProfile(
+                bot_id="mr_bot", family="stock",
+                archetype="mean_reversion_pullback", asset_class="equity",
+            ),
         },
     )
 
@@ -254,6 +266,120 @@ class TestArchetypeTimeOfDay:
         )
         assert len(result) == 1
         assert "LOW RELEVANCE" in result[0].archetype_note
+
+
+class TestBearRegimeSwingArchetype:
+    def test_alpha_decay_uses_loose_threshold(self):
+        """Bear regime swing uses 0.50 decay threshold."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        # 0.45 ratio → no fire at 0.50 threshold
+        result = engine.detect_alpha_decay(
+            "bear_bot", rolling_sharpe_30d=0.55, rolling_sharpe_60d=0.8,
+            rolling_sharpe_90d=1.0, strategy_id="BRS_R9",
+        )
+        assert len(result) == 0
+
+    def test_exit_timing_uses_wide_threshold(self):
+        """Bear regime swing uses 0.25 efficiency threshold (like trend_follow)."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        result = engine.detect_exit_timing_issues(
+            "bear_bot", avg_exit_efficiency=0.30, premature_exit_pct=0.3,
+            strategy_id="BRS_R9",
+        )
+        assert len(result) == 0
+
+    def test_time_of_day_low_relevance(self):
+        """Bear regime swing is multi-day, gets LOW RELEVANCE."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        bucket = MagicMock(hour=10, trade_count=20, pnl=-100, win_rate=0.2)
+        result = engine.detect_time_of_day_patterns(
+            "bear_bot", [bucket], strategy_id="BRS_R9",
+        )
+        assert len(result) == 1
+        assert "LOW RELEVANCE" in result[0].archetype_note
+
+
+class TestMultiEngineBearArchetype:
+    def test_alpha_decay_moderate_threshold(self):
+        """Multi-engine bear uses 0.55 decay threshold."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        result = engine.detect_alpha_decay(
+            "downturn_bot", rolling_sharpe_30d=0.55, rolling_sharpe_60d=0.8,
+            rolling_sharpe_90d=1.0, strategy_id="DOWNTURN",
+        )
+        assert len(result) == 0
+
+    def test_exit_timing_moderate_threshold(self):
+        """Multi-engine bear uses 0.35 efficiency threshold."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        # 0.30 < 0.35 threshold → fires
+        result = engine.detect_exit_timing_issues(
+            "downturn_bot", avg_exit_efficiency=0.30, premature_exit_pct=0.3,
+            strategy_id="DOWNTURN",
+        )
+        assert len(result) == 1
+
+    def test_time_of_day_high_relevance(self):
+        """Multi-engine bear is intraday NQ, gets HIGH RELEVANCE."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        bucket = MagicMock(hour=10, trade_count=20, pnl=-100, win_rate=0.2)
+        result = engine.detect_time_of_day_patterns(
+            "downturn_bot", [bucket], strategy_id="DOWNTURN",
+        )
+        assert len(result) == 1
+        assert "HIGH RELEVANCE" in result[0].archetype_note
+
+
+class TestMeanReversionPullbackArchetype:
+    def test_alpha_decay_tight_threshold(self):
+        """Mean reversion pullback uses 0.80 decay threshold (stable archetype)."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        result = engine.detect_alpha_decay(
+            "mr_bot", rolling_sharpe_30d=0.55, rolling_sharpe_60d=0.8,
+            rolling_sharpe_90d=1.0, strategy_id="MR_PULLBACK",
+        )
+        assert len(result) == 0
+
+    def test_exit_timing_tight_threshold(self):
+        """Mean reversion pullback uses 0.45 efficiency threshold (tight MR exits)."""
+        registry = _make_registry_for_engine()
+        engine = StrategyEngine(
+            week_start="2026-03-01", week_end="2026-03-07",
+            strategy_registry=registry,
+        )
+        result = engine.detect_exit_timing_issues(
+            "mr_bot", avg_exit_efficiency=0.40, premature_exit_pct=0.3,
+            strategy_id="MR_PULLBACK",
+        )
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------

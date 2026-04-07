@@ -19,6 +19,7 @@ class RegimeStrategyMetrics(BaseModel):
     sharpe: float = 0.0
     max_drawdown_pct: float = 0.0
     avg_exit_efficiency: float = 0.0
+    macro_regime: str = ""  # G/R/S/D if this is a macro regime metric
 
 
 class RegimeAllocation(BaseModel):
@@ -47,3 +48,17 @@ class RegimeConditionalReport(BaseModel):
     optimal_allocations: list[RegimeAllocation] = []
     regime_distribution: list[RegimeDistribution] = []
     suggestions: list[dict] = []  # {regime, strategy, current_alloc, suggested_alloc, reason}
+
+
+class MacroRegimeConditionalReport(BaseModel):
+    """Portfolio-level macro regime (G/R/S/D) performance breakdown."""
+
+    week_start: str
+    week_end: str
+    current_macro_regime: str = ""
+    regime_confidence: float = 0.0
+    stress_level: float = 0.0
+    metrics_by_regime: list[RegimeStrategyMetrics] = []  # macro_regime field populated
+    config_effectiveness: list[dict] = []  # {regime, config_key, config_value, pnl, win_rate}
+    transition_costs: list[dict] = []  # {from, to, date, pnl_5d_window}
+    suggestions: list[dict] = []

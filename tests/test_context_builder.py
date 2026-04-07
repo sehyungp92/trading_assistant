@@ -67,6 +67,25 @@ def strategy_registry() -> StrategyRegistry:
                 archetype="intraday_momentum",
                 asset_class="equity",
             ),
+            "BRS_R9": StrategyProfile(
+                display_name="Bear Regime Swing R9",
+                bot_id="swing_multi_01",
+                family="swing",
+                archetype="bear_regime_swing",
+                asset_class="mixed",
+                entry_types=["S1_PULLBACK", "S2_BREAKDOWN"],
+                regime_model="5_state_bear",
+                analysis_focus=["regime_identification_accuracy"],
+            ),
+            "DOWNTURN": StrategyProfile(
+                display_name="Downturn Multi-Engine Bear",
+                bot_id="momentum_nq_01",
+                family="momentum",
+                archetype="multi_engine_bear",
+                asset_class="futures",
+                sub_engines=["REVERSAL", "BREAKDOWN", "FADE"],
+                key_metadata_fields=["engine_tag", "composite_regime_at_entry"],
+            ),
         },
         coordination=CoordinationConfig(
             signals=[
@@ -88,6 +107,21 @@ def strategy_registry() -> StrategyRegistry:
                 expected_win_rate=(0.35, 0.50),
                 expected_payoff_ratio=(1.8, 3.0),
                 regime_sensitivity="high",
+            ),
+            "bear_regime_swing": ArchetypeExpectation(
+                expected_win_rate=(0.30, 0.45),
+                expected_payoff_ratio=(2.0, 4.0),
+                regime_sensitivity="high",
+            ),
+            "multi_engine_bear": ArchetypeExpectation(
+                expected_win_rate=(0.35, 0.50),
+                expected_payoff_ratio=(1.5, 3.0),
+                regime_sensitivity="high",
+            ),
+            "mean_reversion_pullback": ArchetypeExpectation(
+                expected_win_rate=(0.55, 0.70),
+                expected_payoff_ratio=(0.8, 1.5),
+                regime_sensitivity="medium",
             ),
         },
     )
@@ -480,6 +514,42 @@ class TestBasePackageInjection:
         pkg = ctx.base_package(strategy_registry=StrategyRegistry())
 
         assert "strategy_profiles" not in pkg.data
+
+    def test_new_archetype_expectations_injected(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        expectations = pkg.data["archetype_expectations"]
+        for arch in ("bear_regime_swing", "multi_engine_bear", "mean_reversion_pullback"):
+            assert arch in expectations, f"Missing {arch} in archetype_expectations"
+
+    def test_profile_metadata_in_context(self, tmp_path: Path, strategy_registry: StrategyRegistry) -> None:
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "policies" / "v1").mkdir(parents=True)
+        (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+
+        ctx = ContextBuilder(memory_dir)
+        pkg = ctx.base_package(strategy_registry=strategy_registry)
+
+        profiles = pkg.data["strategy_profiles"]
+        brs = profiles["BRS_R9"]
+        assert brs["entry_types"] == ["S1_PULLBACK", "S2_BREAKDOWN"]
+        assert brs["regime_model"] == "5_state_bear"
+        assert brs["analysis_focus"] == ["regime_identification_accuracy"]
+
+        downturn = profiles["DOWNTURN"]
+        assert downturn["sub_engines"] == ["REVERSAL", "BREAKDOWN", "FADE"]
+        assert downturn["key_metadata_fields"] == ["engine_tag", "composite_regime_at_entry"]
 
 
 class TestContextPriority:

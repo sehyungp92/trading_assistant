@@ -47,6 +47,9 @@ class StrategyEngine:
             "opening_range_breakout": {"decay_threshold": 0.80},
             "vwap_pullback": {"decay_threshold": 0.80},
             "flow_following": {"decay_threshold": 0.80},
+            "bear_regime_swing": {"decay_threshold": 0.50},
+            "multi_engine_bear": {"decay_threshold": 0.55},
+            "mean_reversion_pullback": {"decay_threshold": 0.80},
         },
         "exit_timing": {
             "trend_follow": {"efficiency_threshold": 0.20},
@@ -56,6 +59,9 @@ class StrategyEngine:
             "opening_range_breakout": {"efficiency_threshold": 0.45},
             "vwap_pullback": {"efficiency_threshold": 0.45},
             "flow_following": {"efficiency_threshold": 0.40},
+            "bear_regime_swing": {"efficiency_threshold": 0.25},
+            "multi_engine_bear": {"efficiency_threshold": 0.35},
+            "mean_reversion_pullback": {"efficiency_threshold": 0.45},
         },
     }
 
@@ -76,6 +82,9 @@ class StrategyEngine:
         "position_sizing": "position_sizing",
         "filter_interactions": "filter_threshold",
         "microstructure": "signal",
+        "regime_config_effectiveness": "regime_gate",
+        "regime_transition_cost": "regime_gate",
+        "stress_entry_pattern": "regime_gate",
     }
 
     # Keywords indicating direction of change
@@ -503,10 +512,11 @@ class StrategyEngine:
         # Determine archetype relevance note
         high_relevance_archetypes = {
             "intraday_momentum", "opening_range_breakout", "vwap_pullback",
-            "flow_following",
+            "flow_following", "multi_engine_bear",
         }
         low_relevance_archetypes = {
             "trend_follow", "divergence_swing", "pullback",
+            "bear_regime_swing",
         }
         if arch_str in high_relevance_archetypes:
             archetype_note = "HIGH RELEVANCE — intraday strategy, time-of-day is a primary performance lever"
@@ -1000,6 +1010,232 @@ class StrategyEngine:
 
         return suggestions
 
+    # ── Macro regime detectors ──────────────────────────────────────
+
+    def detect_regime_config_effectiveness(
+        self,
+        bot_id: str,
+        macro_regime: str,
+        regime_unit_risk_mult: float,
+        regime_pnl: float,
+        regime_win_rate: float,
+        regime_trade_count: int,
+        min_trades: int = 10,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Compare applied regime config against actual performance.
+
+        If losses persist despite reduced sizing, config isn't aggressive enough.
+        If strong win rate with heavy reduction, config may be too conservative.
+        """
+        suggestions: list[StrategySuggestion] = []
+        if regime_trade_count < min_trades:
+            return suggestions
+
+        strategy_id = self._resolve_strategy_id(bot_id)
+
+        # Losing despite reduction → not aggressive enough
+        if regime_pnl < 0 and regime_unit_risk_mult < 1.0:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                strategy_id=strategy_id,
+                tier=SuggestionTier.STRATEGY_VARIANT,
+                title=f"Regime sizing too lenient in {macro_regime}",
+                description=(
+                    f"In macro regime {macro_regime} with {regime_unit_risk_mult}x sizing, "
+                    f"PnL was {regime_pnl:.1f} over {regime_trade_count} trades "
+                    f"(win rate {regime_win_rate:.1%}). Consider reducing "
+                    f"regime_unit_risk_mult further."
+                ),
+                confidence=0.5,
+                current_value=str(regime_unit_risk_mult),
+                suggested_value=str(round(max(0.1, regime_unit_risk_mult - 0.15), 2)),
+                evidence=[
+                    f"regime={macro_regime}",
+                    f"pnl={regime_pnl:.1f}",
+                    f"win_rate={regime_win_rate:.2f}",
+                    f"mult={regime_unit_risk_mult}",
+                    f"trades={regime_trade_count}",
+                ],
+                detection_context=DetectionContext(
+                    detector_name="regime_config_effectiveness",
+                    bot_id=bot_id,
+                    threshold_name="regime_unit_risk_mult",
+                    threshold_value=regime_unit_risk_mult,
+                    observed_value=regime_pnl,
+                ),
+            ))
+
+        # Winning strongly despite heavy reduction → too conservative
+        if regime_win_rate > 0.55 and regime_pnl > 0 and regime_unit_risk_mult < 0.7:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                strategy_id=strategy_id,
+                tier=SuggestionTier.STRATEGY_VARIANT,
+                title=f"Regime sizing too conservative in {macro_regime}",
+                description=(
+                    f"In macro regime {macro_regime} with {regime_unit_risk_mult}x sizing, "
+                    f"win rate was {regime_win_rate:.1%} with positive PnL ({regime_pnl:.1f}). "
+                    f"Drawdown protection may be leaving returns on the table."
+                ),
+                confidence=0.4,
+                current_value=str(regime_unit_risk_mult),
+                suggested_value=str(round(min(1.0, regime_unit_risk_mult + 0.1), 2)),
+                evidence=[
+                    f"regime={macro_regime}",
+                    f"win_rate={regime_win_rate:.2f}",
+                    f"pnl={regime_pnl:.1f}",
+                    f"mult={regime_unit_risk_mult}",
+                ],
+                detection_context=DetectionContext(
+                    detector_name="regime_config_effectiveness",
+                    bot_id=bot_id,
+                    threshold_name="regime_unit_risk_mult",
+                    threshold_value=regime_unit_risk_mult,
+                    observed_value=regime_win_rate,
+                ),
+            ))
+
+        return suggestions
+
+    def detect_regime_transition_cost(
+        self,
+        transition_events: list[dict],
+        daily_pnl_by_date: dict[str, float],
+        window_days: int = 5,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Measure P&L around regime transitions.
+
+        Args:
+            transition_events: list of dicts with from_regime, to_regime, date.
+            daily_pnl_by_date: {YYYY-MM-DD: total_pnl} for all bots combined.
+            window_days: days around transition to measure.
+        """
+        from datetime import datetime, timedelta
+
+        suggestions: list[StrategySuggestion] = []
+        if not transition_events or not daily_pnl_by_date:
+            return suggestions
+
+        for evt in transition_events:
+            trans_date = evt.get("date", "")
+            if not trans_date:
+                continue
+            try:
+                dt = datetime.strptime(trans_date, "%Y-%m-%d")
+            except ValueError:
+                continue
+
+            window_pnl = 0.0
+            days_found = 0
+            for offset in range(-window_days, window_days + 1):
+                d = (dt + timedelta(days=offset)).strftime("%Y-%m-%d")
+                if d in daily_pnl_by_date:
+                    window_pnl += daily_pnl_by_date[d]
+                    days_found += 1
+
+            if days_found < 3:
+                continue
+
+            from_r = evt.get("from_regime", "?")
+            to_r = evt.get("to_regime", "?")
+
+            if window_pnl < 0:
+                desc = (
+                    f"Regime transition {from_r}→{to_r} on {trans_date} "
+                    f"had negative P&L ({window_pnl:.1f}) in ±{window_days}d window. "
+                    f"Review applied_regime_config changes and whether sizing/disables "
+                    f"responded correctly to the transition."
+                )
+
+                suggestions.append(StrategySuggestion(
+                    bot_id="portfolio",
+                    strategy_id="",
+                    tier=SuggestionTier.STRATEGY_VARIANT,
+                    title=f"Costly regime transition {from_r}→{to_r}",
+                    description=desc,
+                    confidence=0.45,
+                    evidence=[
+                        f"transition={from_r}→{to_r}",
+                        f"date={trans_date}",
+                        f"window_pnl={window_pnl:.1f}",
+                        f"days_with_data={days_found}/{window_days * 2 + 1}",
+                    ],
+                    detection_context=DetectionContext(
+                        detector_name="regime_transition_cost",
+                        bot_id="portfolio",
+                        threshold_name="window_pnl",
+                        threshold_value=0.0,
+                        observed_value=window_pnl,
+                    ),
+                ))
+
+        return suggestions
+
+    def detect_stress_entry_pattern(
+        self,
+        bot_id: str,
+        trades_by_stress: dict[str, dict],
+        min_trades_per_bucket: int = 5,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Aggregate trade outcomes by stress_level_at_entry buckets.
+
+        Args:
+            trades_by_stress: {bucket_name: {trade_count, win_rate, avg_pnl, expectancy}}
+                Buckets: "low" (<0.3), "mid" (0.3-0.7), "high" (>0.7).
+        """
+        suggestions: list[StrategySuggestion] = []
+        high = trades_by_stress.get("high", {})
+        low = trades_by_stress.get("low", {})
+
+        high_count = high.get("trade_count", 0)
+        low_count = low.get("trade_count", 0)
+
+        if high_count < min_trades_per_bucket or low_count < min_trades_per_bucket:
+            return suggestions
+
+        high_wr = high.get("win_rate", 0.0)
+        low_wr = low.get("win_rate", 0.0)
+        high_exp = high.get("expectancy", 0.0)
+
+        strategy_id = self._resolve_strategy_id(bot_id)
+
+        # High-stress entries significantly worse than low-stress
+        # NOTE: stress_level has 41% FPR (observational only per reliability guide).
+        # Report as diagnostic finding, not as basis for config mutations.
+        if low_wr - high_wr > 0.15 and high_exp < 0:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                strategy_id=strategy_id,
+                tier=SuggestionTier.STRATEGY_VARIANT,
+                title="High-stress entries underperform (diagnostic)",
+                description=(
+                    f"Trades entered during high stress (>0.7) have "
+                    f"{high_wr:.1%} win rate vs {low_wr:.1%} for low stress (<0.3), "
+                    f"with negative expectancy ({high_exp:.2f}). "
+                    f"Caveat: stress_level has 41% false positive rate and cannot "
+                    f"reliably discriminate stress from normal volatility. "
+                    f"Investigate whether the underperformance correlates with "
+                    f"macro regime (G/R/S/D) instead — regime is high-confidence."
+                ),
+                confidence=0.35,
+                evidence=[
+                    f"high_stress_wr={high_wr:.2f}",
+                    f"low_stress_wr={low_wr:.2f}",
+                    f"high_stress_exp={high_exp:.2f}",
+                    f"high_trades={high_count}",
+                    f"low_trades={low_count}",
+                ],
+                detection_context=DetectionContext(
+                    detector_name="stress_entry_pattern",
+                    bot_id=bot_id,
+                    threshold_name="stress_win_rate_gap",
+                    threshold_value=0.15,
+                    observed_value=round(low_wr - high_wr, 3),
+                ),
+            ))
+
+        return suggestions
+
     def _infer_direction(self, suggestion: StrategySuggestion) -> int:
         """Infer change direction: +1 (increase), -1 (decrease), 0 (unknown).
 
@@ -1085,6 +1321,10 @@ class StrategyEngine:
         factor_rolling: dict[str, list[dict]] | None = None,
         filter_interactions: dict[str, list] | None = None,
         orderbook_stats: dict[str, dict] | None = None,
+        macro_regime_data: dict | None = None,
+        regime_transition_events: list[dict] | None = None,
+        daily_pnl_by_date: dict[str, float] | None = None,
+        stress_entry_stats: dict[str, dict[str, dict]] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -1162,6 +1402,51 @@ class StrategyEngine:
             for bot_id, ob_data in orderbook_stats.items():
                 all_suggestions.extend(
                     self.detect_microstructure_issues(bot_id, ob_data)
+                )
+
+        # Macro regime detectors
+        if macro_regime_data:
+            macro_regime = macro_regime_data.get("macro_regime", "")
+            per_bot_configs = macro_regime_data.get("per_bot_configs", {})
+            for bot_id, config in per_bot_configs.items():
+                mult = config.get("regime_unit_risk_mult", 1.0)
+                if mult < 1.0 and macro_regime:
+                    # Per-bot config may carry regime-isolated metrics; fall
+                    # back to blended weekly summary (acceptable since macro
+                    # regimes persist for years — single-regime weeks are the
+                    # common case).
+                    r_pnl = config.get("regime_pnl")
+                    r_wr = config.get("regime_win_rate")
+                    r_tc = config.get("regime_trade_count")
+                    summary = bot_summaries.get(bot_id)
+                    if r_pnl is None and summary and summary.total_trades > 0:
+                        r_pnl = summary.net_pnl
+                        r_wr = summary.win_rate
+                        r_tc = summary.total_trades
+                    if r_pnl is not None and r_tc:
+                        all_suggestions.extend(
+                            self.detect_regime_config_effectiveness(
+                                bot_id=bot_id,
+                                macro_regime=macro_regime,
+                                regime_unit_risk_mult=mult,
+                                regime_pnl=r_pnl,
+                                regime_win_rate=r_wr,
+                                regime_trade_count=r_tc,
+                            )
+                        )
+
+        if regime_transition_events:
+            all_suggestions.extend(
+                self.detect_regime_transition_cost(
+                    transition_events=regime_transition_events,
+                    daily_pnl_by_date=daily_pnl_by_date or {},
+                )
+            )
+
+        if stress_entry_stats:
+            for bot_id, stress_data in stress_entry_stats.items():
+                all_suggestions.extend(
+                    self.detect_stress_entry_pattern(bot_id, stress_data)
                 )
 
         # Apply per-detector confidence calibration from outcome data

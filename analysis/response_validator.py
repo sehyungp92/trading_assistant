@@ -68,12 +68,14 @@ class ResponseValidator:
         hypothesis_track_record: dict | None = None,
         prediction_accuracy: dict | None = None,
         recalibrations: list[dict] | None = None,
+        current_macro_regime: str = "",
     ) -> None:
         self._rejected = rejected_suggestions or []
         self._forecast_meta = forecast_meta or {}
         self._scorecard = category_scorecard or CategoryScorecard()
         self._hypothesis_track_record = hypothesis_track_record or {}
         self._prediction_accuracy = prediction_accuracy or {}
+        self._current_macro_regime = current_macro_regime
         # Build recalibration index: (bot_id, category) → mean revised_confidence
         self._recalib_by_key: dict[tuple[str, str], float] = {}
         if recalibrations:
@@ -256,6 +258,16 @@ class ResponseValidator:
             score = self._scorecard.get_score(suggestion.bot_id, suggestion.category)
             if score and score.confidence_multiplier < 1.0:
                 confidence *= score.confidence_multiplier
+
+        # Apply macro regime confidence adjustment
+        if self._current_macro_regime:
+            from skills.suggestion_scorer import SuggestionScorer
+            regime_conf = SuggestionScorer.apply_regime_confidence_adjustment(
+                confidence=confidence,
+                category=suggestion.category,
+                current_macro_regime=self._current_macro_regime,
+            )
+            confidence = regime_conf
 
         confidence = max(0.0, min(1.0, round(confidence, 3)))
 

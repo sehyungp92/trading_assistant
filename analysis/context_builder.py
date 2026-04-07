@@ -478,6 +478,16 @@ class ContextBuilder:
             pass
         return {}
 
+    def load_regime_stratified_scores(self) -> dict | None:
+        """Load category win rates stratified by macro regime."""
+        try:
+            from skills.suggestion_scorer import SuggestionScorer
+            scorer = SuggestionScorer(self._memory_dir / "findings")
+            scores = scorer.compute_regime_stratified_scores()
+            return scores if scores else None
+        except Exception:
+            return None
+
     def load_search_signal_summary(self) -> dict:
         """Load search signal approve/discard summary from search_signals.jsonl."""
         path = self._memory_dir / "findings" / "search_signals.jsonl"
@@ -1076,6 +1086,65 @@ class ContextBuilder:
 
         return "SELF-ASSESSMENT (auto-synthesized from learning data):\n\n" + "\n\n".join(signals)
 
+    def load_macro_regime_context(self) -> dict:
+        """Load latest macro regime state from curated portfolio data.
+
+        Looks for macro_regime_analysis.json in the most recent curated portfolio dir.
+        """
+        if not self._curated_dir:
+            return {}
+        try:
+            # Find most recent date dir with portfolio data
+            curated = Path(self._curated_dir)
+            if not curated.exists():
+                return {}
+            date_dirs = sorted(
+                [d for d in curated.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                reverse=True,
+            )
+            for date_dir in date_dirs[:7]:  # check last 7 days
+                regime_file = date_dir / "portfolio" / "macro_regime_analysis.json"
+                if regime_file.exists():
+                    data = json.loads(regime_file.read_text(encoding="utf-8"))
+                    if data:
+                        return data
+        except Exception:
+            pass
+        return {}
+
+    def load_regime_config_history(self) -> list[dict]:
+        """Load rolling regime config from recent curated bot dirs.
+
+        Collects applied_regime_config.json from the last 30 days of curated data.
+        """
+        if not self._curated_dir:
+            return []
+        try:
+            curated = Path(self._curated_dir)
+            if not curated.exists():
+                return []
+            date_dirs = sorted(
+                [d for d in curated.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                reverse=True,
+            )
+            history: list[dict] = []
+            for date_dir in date_dirs[:30]:
+                for bot_dir in date_dir.iterdir():
+                    if not bot_dir.is_dir() or bot_dir.name == "portfolio":
+                        continue
+                    config_file = bot_dir / "applied_regime_config.json"
+                    if config_file.exists():
+                        data = json.loads(config_file.read_text(encoding="utf-8"))
+                        if data:
+                            history.append({
+                                "date": date_dir.name,
+                                "bot_id": bot_dir.name,
+                                **data,
+                            })
+            return history
+        except Exception:
+            return []
+
     # Priority order for context items (highest value first).
     # Items not in this list get lowest priority.
     _CONTEXT_PRIORITY: list[str] = [
@@ -1083,6 +1152,7 @@ class ContextBuilder:
         "ground_truth_trend",
         "portfolio_outcomes",
         "portfolio_rolling_metrics",
+        "macro_regime_context",
         "self_assessment",
         "convergence_report",
         "strategy_profiles",
@@ -1094,6 +1164,7 @@ class ContextBuilder:
         "active_suggestions",
         "rejected_suggestions",
         "category_scorecard",
+        "regime_stratified_scores",
         "prediction_accuracy_by_metric",
         "outcome_measurements",
         "forecast_meta_analysis",
@@ -1101,6 +1172,7 @@ class ContextBuilder:
         "validation_patterns",
         "active_experiments",
         "backtest_reliability",
+        "regime_config_history",
         "transfer_track_record",
         "cycle_effectiveness_trend",
         "suggestion_quality_trend",
@@ -1170,6 +1242,9 @@ class ContextBuilder:
         category_scorecard = self.load_category_scorecard()
         if category_scorecard:
             data["category_scorecard"] = category_scorecard
+        regime_stratified_scores = self.load_regime_stratified_scores()
+        if regime_stratified_scores:
+            data["regime_stratified_scores"] = regime_stratified_scores
         prediction_accuracy = self.load_prediction_accuracy()
         if prediction_accuracy:
             data["prediction_accuracy_by_metric"] = prediction_accuracy
@@ -1254,6 +1329,12 @@ class ContextBuilder:
         portfolio_metrics = self.load_portfolio_metrics()
         if portfolio_metrics:
             data["portfolio_rolling_metrics"] = portfolio_metrics
+        macro_regime = self.load_macro_regime_context()
+        if macro_regime:
+            data["macro_regime_context"] = macro_regime
+        regime_config_history = self.load_regime_config_history()
+        if regime_config_history:
+            data["regime_config_history"] = regime_config_history
         if session_store and agent_type:
             session_history = self.load_session_history(session_store, agent_type)
             if session_history:
@@ -1262,7 +1343,7 @@ class ContextBuilder:
         # Inject strategy registry data if available
         if strategy_registry and getattr(strategy_registry, "strategies", None):
             data["strategy_profiles"] = {
-                sid: profile.model_dump(mode="json")
+                sid: profile.model_dump(mode="json", exclude_unset=True)
                 for sid, profile in strategy_registry.strategies.items()
             }
             if strategy_registry.coordination.signals or strategy_registry.coordination.cooldown_pairs:

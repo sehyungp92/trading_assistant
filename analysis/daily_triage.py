@@ -104,6 +104,12 @@ class DailyTriage:
                 events.append(filter_event)
                 relevant_keys.update(filter_event.relevant_data_keys)
 
+        # Check 6: Macro regime shift (portfolio-level, outside per-bot loop)
+        macro_event = self._check_macro_regime_shift()
+        if macro_event:
+            events.append(macro_event)
+            relevant_keys.update(macro_event.relevant_data_keys)
+
         routine = (
             f"Daily summary for {self._date}:\n"
             + "\n".join(bot_summaries)
@@ -266,6 +272,56 @@ class DailyTriage:
                     )
         return worst
 
+    def _check_macro_regime_shift(self) -> SignificantEvent | None:
+        """Detect macro regime (G/R/S/D) change vs trailing days."""
+        today = self._load_json_portfolio("macro_regime_analysis.json")
+        if not today or not isinstance(today, dict):
+            return None
+        today_regime = today.get("macro_regime", "")
+        if not today_regime:
+            return None
+
+        date_obj = datetime.strptime(self._date, "%Y-%m-%d")
+        prev_regimes = []
+        for d in range(1, self._trailing_days + 1):
+            prev_date = (date_obj - timedelta(days=d)).strftime("%Y-%m-%d")
+            prev = self._load_json_portfolio_for_date(prev_date, "macro_regime_analysis.json")
+            if prev and isinstance(prev, dict):
+                r = prev.get("macro_regime", "")
+                if r:
+                    prev_regimes.append(r)
+
+        if not prev_regimes:
+            return None
+
+        most_common = Counter(prev_regimes).most_common(1)[0][0]
+        if most_common != today_regime:
+            # Severity based on regime destination (high-confidence signal),
+            # not stress_level (41% FPR, observational only per reliability guide)
+            severity = "high" if today_regime in ("S", "D") else "medium"
+            return SignificantEvent(
+                event_type="macro_regime_shift",
+                bot_id="portfolio",
+                severity=severity,
+                description=f"Macro regime shift: {most_common} → {today_regime}",
+                relevant_data_keys=["macro_regime_analysis.json", "applied_regime_config.json"],
+            )
+        return None
+
+    def _load_json_portfolio(self, filename: str) -> dict | list | None:
+        """Load a JSON file from the portfolio curated directory for today."""
+        return self._load_json_portfolio_for_date(self._date, filename)
+
+    def _load_json_portfolio_for_date(self, date_str: str, filename: str) -> dict | list | None:
+        """Load a JSON file from the portfolio curated directory for a specific date."""
+        path = self._curated_dir / date_str / "portfolio" / filename
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
     def _generate_focus_questions(self, events: list[SignificantEvent]) -> list[str]:
         """Generate 3-5 focused analytical questions from significant events."""
         questions: list[str] = []
@@ -273,6 +329,7 @@ class DailyTriage:
         # Group events by type for more specific questions
         pnl_anomalies = [e for e in events if e.event_type == "pnl_anomaly"]
         regime_shifts = [e for e in events if e.event_type == "regime_shift"]
+        macro_shifts = [e for e in events if e.event_type == "macro_regime_shift"]
         outcome_conflicts = [e for e in events if e.event_type == "outcome_conflict"]
         filter_anomalies = [e for e in events if e.event_type == "pattern_break"]
         drawdown_spikes = [e for e in events if e.event_type == "drawdown_spike"]
@@ -287,6 +344,14 @@ class DailyTriage:
             questions.append(
                 f"[{e.bot_id}] {e.description}. How should the bot's strategy adapt? "
                 f"Review filter behavior and win rates by regime to determine if parameter adjustments are warranted."
+            )
+
+        for e in macro_shifts[:1]:
+            new_regime = e.description.split("\u2192")[-1].split("(")[0].strip()
+            questions.append(
+                f"Macro regime shifted to {new_regime}. "
+                f"Review applied_regime_config for each bot: are sizing multipliers and strategy disables correct for the new regime? "
+                f"Check if any trades entered during the transition were adversely affected."
             )
 
         for e in outcome_conflicts[:1]:

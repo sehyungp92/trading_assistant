@@ -176,6 +176,22 @@ If search_reports data is present, the autonomous inner loop has tested paramete
 neighborhoods this week. Reference these results when evaluating parameter-level
 suggestions — avoid re-proposing what the inner loop already explored.
 
+## MACRO REGIME ANALYSIS
+If macro_regime_context data is present in the base package:
+- Report current macro regime (G=Recovery, R=Reflation, S=Infl Hedge, D=Defensive),
+  confidence, and stress level
+- Break down weekly performance by macro regime: P&L, win rate, expectancy per regime
+- Cross-reference macro_regime_sensitivity from strategy profiles:
+  e.g., DOWNTURN should be "disabled" in G/R but "full" in S/D
+- Evaluate regime config effectiveness: is regime_unit_risk_mult appropriate?
+  If losses persist despite reduced sizing → recommend more aggressive reduction
+  If winning strongly with heavy reduction → may be too conservative
+- If a regime transition occurred this week, measure transition cost (P&L in ±5d window)
+- Note: stress_level is observational only (41% FPR). If reporting stress-stratified
+  outcomes, caveat that the signal cannot reliably discriminate stress from normal volatility
+- Reference regime_config_history for trend analysis: has config been stable or shifting?
+- Evaluate whether current regime config values are appropriate and propose adjustments
+
 ## INTER-STRATEGY COORDINATION
 If coordination_rules data is present:
 - Evaluate whether coordination signals fired correctly (e.g., ATRSS entry → AKC_HELIX
@@ -193,6 +209,12 @@ If strategy_profiles and archetype_expectations data are present:
 - Flag strategies performing below archetype floor in their PREFERRED regime as problematic
 - Strategies underperforming in ADVERSE regimes is EXPECTED — do not propose changes
 - Use portfolio_risk_config to validate that suggestions stay within risk bounds
+- For strategies with `sub_engines` in their profile, compare performance across engines
+  to identify which engines perform best in each regime/vol state combination.
+- For strategies with `entry_types`, compare entry type win rates and payoff ratios.
+- Reference the strategy's `analysis_focus` list for priority analytical dimensions.
+- For mean_reversion_pullback archetype: high win rate + low payoff is expected —
+  flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
 
 ## SELF-ASSESSMENT
 If self_assessment data is present, READ IT CAREFULLY. This summarizes your known

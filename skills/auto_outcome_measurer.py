@@ -107,6 +107,31 @@ class AutoOutcomeMeasurer:
             suggestion_id, bot_id, implemented_date, after_days
         )
 
+        # Macro regime stability check
+        macro_regime_at_impl = ""
+        macro_regime_stable = True
+        try:
+            impl_regime_path = (
+                self._curated_dir / implemented_date / "portfolio" / "macro_regime_analysis.json"
+            )
+            if impl_regime_path.exists():
+                regime_data = json.loads(impl_regime_path.read_text(encoding="utf-8"))
+                macro_regime_at_impl = regime_data.get("macro_regime", "")
+
+            if macro_regime_at_impl:
+                # Check if macro regime changed during measurement window
+                end_date_str = after_end.strftime("%Y-%m-%d")
+                end_regime_path = (
+                    self._curated_dir / end_date_str / "portfolio" / "macro_regime_analysis.json"
+                )
+                if end_regime_path.exists():
+                    end_data = json.loads(end_regime_path.read_text(encoding="utf-8"))
+                    end_regime = end_data.get("macro_regime", "")
+                    if end_regime and end_regime != macro_regime_at_impl:
+                        macro_regime_stable = False
+        except Exception:
+            pass
+
         # Quality assessment
         quality = compute_measurement_quality(
             regime_matched=regime_matched,
@@ -115,6 +140,7 @@ class AutoOutcomeMeasurer:
             volatility_ratio=vol_ratio,
             concurrent_changes=concurrent,
             window_days=after_days,
+            macro_regime_stable=macro_regime_stable,
         )
 
         # Effect significance
@@ -152,6 +178,8 @@ class AutoOutcomeMeasurer:
             effect_size=round(effect, 4),
             noise_estimate=round(noise, 4),
             significance_score=round(sig, 4),
+            macro_regime_at_implementation=macro_regime_at_impl,
+            macro_regime_stable=macro_regime_stable,
         )
 
         # Evaluate targeted metric improvement

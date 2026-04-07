@@ -34,6 +34,7 @@ _CURATED_FILES = [
     "indicator_snapshots.json",
     "orderbook_stats.json",
     "parameter_changes.json",
+    "applied_regime_config.json",
 ]
 
 # Portfolio-level curated files (loaded from curated/{date}/portfolio/)
@@ -43,6 +44,7 @@ _PORTFOLIO_CURATED_FILES = [
     "concurrent_position_analysis.json",
     "sector_exposure.json",
     "portfolio_rolling_metrics.json",
+    "macro_regime_analysis.json",
 ]
 
 # Focused instructions that require causal reasoning, not checklist narration.
@@ -121,6 +123,23 @@ If strategy_profiles data is present:
   signals fire correctly? Did cooldown pairs prevent whipsaws?
 - Check portfolio_risk_config bounds before suggesting parameter changes — never suggest
   exceeding heat_cap_R or daily_stop_R limits
+- For strategies with `sub_engines` in their profile, compare performance across engines
+  to identify which engines perform best in each regime/vol state combination.
+- For strategies with `entry_types`, compare entry type win rates and payoff ratios.
+- Reference the strategy's `analysis_focus` list for priority analytical dimensions.
+- For mean_reversion_pullback archetype: high win rate + low payoff is expected —
+  flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
+
+## MACRO REGIME CONTEXT
+If macro_regime_analysis data is present (in portfolio curated files):
+- Current macro regime (G=Recovery, R=Reflation, S=Infl Hedge, D=Defensive)
+  drives portfolio-wide sizing and strategy enable/disable decisions
+- Check applied_regime_config per bot: active sizing multiplier, directional caps, disabled strategies
+- Cross-reference today's performance with macro regime expectations:
+  strategies with macro_regime_sensitivity "disabled" in current regime should have zero trades
+- Note: stress_level is observational only (41% false positive rate) — record it for diagnostics but do not use it to gate decisions or flag entries
+- If regime changed from yesterday: flag as transition event, assess transition cost
+- Note: macro regime (G/R/S/D) is distinct from per-trade market_regime (trending_up, ranging, etc.)
 
 ## CONVERGENCE STATUS (learning loop health)
 If `convergence_report` is present, it shows whether the learning system is

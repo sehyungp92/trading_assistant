@@ -17,6 +17,9 @@ class StrategyArchetype(str, Enum):
     BOX_BREAKOUT = "box_breakout"
     VWAP_PULLBACK = "vwap_pullback"
     FLOW_FOLLOWING = "flow_following"
+    BEAR_REGIME_SWING = "bear_regime_swing"
+    MULTI_ENGINE_BEAR = "multi_engine_bear"
+    MEAN_REVERSION_PULLBACK = "mean_reversion_pullback"
 
 
 class HoldingPeriod(str, Enum):
@@ -97,6 +100,12 @@ class StrategyProfile(BaseModel):
     holding_period: HoldingPeriod | str = ""
     risk: StrategyRisk = StrategyRisk()
     allocation: StrategyAllocation = StrategyAllocation()
+    entry_types: list[str] = []
+    sub_engines: list[str] = []
+    regime_model: str = ""
+    key_metadata_fields: list[str] = []
+    analysis_focus: list[str] = []
+    macro_regime_sensitivity: dict[str, str] = {}  # G/R/S/D → full/reduced/minimal/disabled
 
 
 class StrategyRegistry(BaseModel):

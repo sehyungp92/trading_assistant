@@ -54,6 +54,10 @@ class OutcomeMeasurement(BaseModel):
     # Confounders
     concurrent_changes: list[str] = []
 
+    # Macro regime context
+    macro_regime_at_implementation: str = ""  # G/R/S/D at implementation time
+    macro_regime_stable: bool = True  # False if macro regime changed during measurement
+
     # Quality assessment
     measurement_quality: MeasurementQuality = MeasurementQuality.HIGH
 
@@ -106,12 +110,15 @@ def compute_measurement_quality(
     volatility_ratio: float,
     concurrent_changes: list[str],
     window_days: int = 7,
+    macro_regime_stable: bool = True,
 ) -> MeasurementQuality:
     """Determine measurement quality from regime/sample/confounder data.
 
     Args:
         window_days: Measurement window size. Larger windows require more
             trades for INSUFFICIENT threshold: 7d→3, 14d→5, 30d→10.
+        macro_regime_stable: False if macro regime (G/R/S/D) changed during
+            measurement window — lowers quality due to regime drift.
     """
     # Scale trade count minimums with window size
     if window_days >= 30:
@@ -136,6 +143,8 @@ def compute_measurement_quality(
     if len(concurrent_changes) >= 1:
         issues += 1
     if before_trade_count < 10 or after_trade_count < 10:
+        issues += 1
+    if not macro_regime_stable:
         issues += 1
 
     if issues == 0:

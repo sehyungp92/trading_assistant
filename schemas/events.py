@@ -141,6 +141,10 @@ class TradeEvent(BaseModel):
     passed_filters: list[str] | None = None
     filter_decisions: list[dict] | None = None
 
+    # Macro regime context (from portfolio-level HMM classifier)
+    macro_regime: str = ""  # G/R/S/D active at trade time
+    stress_level_at_entry: float = 0.0  # P(stress) at trade time
+
 
 class MissedOpportunityEvent(BaseModel):
     event_metadata: Optional[EventMetadata] = None
@@ -194,3 +198,19 @@ class DailySnapshot(BaseModel):
     per_strategy_summary: dict = {}
     overlay_state_summary: dict | None = None
     experiment_breakdown: dict | None = None  # 1.4: swing_trader per-experiment A/B stats
+
+    # Macro regime context (from portfolio-level HMM classifier)
+    regime_context: dict | None = None  # RegimeContext snapshot (macro_regime, confidence, stress, etc.)
+    applied_regime_config: dict | None = None  # Active regime-adjusted portfolio config
+
+
+class RegimeTransitionEvent(BaseModel):
+    """Emitted when the macro regime classifier changes state (G/R/S/D)."""
+
+    bot_id: str
+    event_metadata: Optional[EventMetadata] = None
+    from_regime: str  # e.g. "G"
+    to_regime: str  # e.g. "S"
+    regime_confidence: float = 0.0  # confidence in new regime
+    stress_level: float = 0.0  # stress at transition (observational, 41% FPR)
+    timestamp: Optional[datetime] = None

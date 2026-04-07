@@ -162,6 +162,75 @@ class SuggestionScorer:
 
         return CategoryScorecard(scores=scores)
 
+    def compute_regime_stratified_scores(self) -> dict[str, dict[str, float]]:
+        """Compute win rates stratified by macro regime at implementation time.
+
+        Returns: {macro_regime: {category: win_rate}} for regimes with >=3 outcomes.
+        """
+        outcomes = self._load_outcomes()
+        suggestions = self._load_suggestions()
+        if not outcomes:
+            return {}
+
+        id_to_cat: dict[str, str] = {}
+        for s in suggestions:
+            sid = s.get("suggestion_id", "")
+            category = s.get("category", "")
+            if not category:
+                tier = s.get("tier", "")
+                category = _TIER_TO_CATEGORY.get(tier, tier)
+            if sid and category:
+                id_to_cat[sid] = category
+
+        # Group by (macro_regime, category)
+        regime_groups: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+        for o in outcomes:
+            quality = o.get("measurement_quality", "high")
+            if quality not in _HIGH_QUALITY:
+                continue
+            macro = o.get("macro_regime_at_implementation", "")
+            if not macro:
+                continue
+            sid = o.get("suggestion_id", "")
+            cat = id_to_cat.get(sid, "")
+            if cat:
+                regime_groups[macro][cat].append(o)
+
+        result: dict[str, dict[str, float]] = {}
+        for regime, cat_outcomes in regime_groups.items():
+            cat_scores: dict[str, float] = {}
+            for cat, outcomes_list in cat_outcomes.items():
+                if len(outcomes_list) < 3:
+                    continue
+                positive = sum(1 for o in outcomes_list if is_positive_outcome(o))
+                cat_scores[cat] = round(positive / len(outcomes_list), 3)
+            if cat_scores:
+                result[regime] = cat_scores
+        return result
+
+    @staticmethod
+    def apply_regime_confidence_adjustment(
+        confidence: float,
+        category: str,
+        current_macro_regime: str,
+    ) -> float:
+        """Adjust suggestion confidence based on current macro regime.
+
+        In S/D regimes: boost defensive suggestions (reduce sizing, tighter caps),
+        reduce aggressive ones (relax filters, wider caps).
+        """
+        if not current_macro_regime or current_macro_regime not in ("S", "D"):
+            return confidence
+
+        defensive_categories = {"stop_loss", "position_sizing", "regime_gate"}
+        aggressive_categories = {"filter_threshold", "signal"}
+
+        if category in defensive_categories:
+            return round(min(1.0, confidence * 1.15), 3)
+        elif category in aggressive_categories:
+            return round(confidence * 0.85, 3)
+        return confidence
+
     def compute_category_value_map(self) -> dict:
         """Per-(bot_id, category): avg_composite_delta, suggestion_count, value_per_suggestion.
 

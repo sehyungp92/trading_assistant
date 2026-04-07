@@ -1896,6 +1896,11 @@ class Handlers:
             hypothesis_tr = ctx.load_hypothesis_track_record()
             prediction_accuracy = ctx.load_prediction_accuracy()
             recalibrations = ctx.load_recalibrations()
+
+            # Load current macro regime for confidence adjustment
+            macro_regime_ctx = ctx.load_macro_regime_context()
+            current_macro_regime = macro_regime_ctx.get("macro_regime", "") if macro_regime_ctx else ""
+
             validator = ResponseValidator(
                 rejected_suggestions=rejected,
                 forecast_meta=forecast_meta,
@@ -1903,6 +1908,7 @@ class Handlers:
                 hypothesis_track_record=hypothesis_tr,
                 prediction_accuracy=prediction_accuracy,
                 recalibrations=recalibrations,
+                current_macro_regime=current_macro_regime,
             )
             validation = validator.validate(parsed)
 
@@ -3089,6 +3095,22 @@ class Handlers:
             ),
             "orderbook_stats": self._aggregate_orderbook_stats(week_start, week_end, bot_ids),
         }
+
+        # Load macro regime data from most recent portfolio curated file
+        macro_regime_data = None
+        end_dt = datetime.strptime(week_end, "%Y-%m-%d")
+        for i in range(7):
+            date_str = (end_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+            mr_path = self._curated_dir / date_str / "portfolio" / "macro_regime_analysis.json"
+            if mr_path.exists():
+                try:
+                    macro_regime_data = json.loads(mr_path.read_text(encoding="utf-8"))
+                    if macro_regime_data:
+                        break
+                except (json.JSONDecodeError, OSError):
+                    pass
+        evidence["macro_regime_data"] = macro_regime_data
+
         return {key: value for key, value in evidence.items() if value}
 
     def _aggregate_weekly_filter_summaries(
@@ -3681,21 +3703,24 @@ class Handlers:
             from skills.build_daily_metrics import (
                 build_concurrent_position_analysis,
                 build_family_snapshots,
+                build_macro_regime_analysis,
                 build_portfolio_rules_summary,
                 build_sector_exposure,
             )
             from skills.compute_portfolio_risk import PortfolioRiskComputer
             from skills.portfolio_metrics_tracker import PortfolioMetricsTracker
 
-            # Collect all trade records and portfolio_rule events across bots
+            # Collect all trade records, portfolio_rule events, and daily snapshots across bots
             all_trade_records: list[dict] = []
             all_rule_events: list[dict] = []
+            all_daily_snapshots: list[dict] = []
             for bot_id in target_bots:
                 bot_raw = self._raw_data_dir / date / bot_id
                 if not bot_raw.exists():
                     continue
                 all_trade_records.extend(self._load_raw_json_records(bot_raw, "trade"))
                 all_rule_events.extend(self._load_raw_json_records(bot_raw, "portfolio_rule"))
+                all_daily_snapshots.extend(self._load_raw_json_records(bot_raw, "daily_snapshot"))
 
             # Load BotDailySummary from just-written per-bot summary.json files
             bot_summaries: list[BotDailySummary] = []
@@ -3735,6 +3760,17 @@ class Handlers:
                 (portfolio_dir / "sector_exposure.json").write_text(
                     json.dumps(sector_exp, indent=2, default=str), encoding="utf-8",
                 )
+
+                # 4b. macro_regime_analysis.json
+                # Unwrap payload if snapshots have event wrapper
+                unwrapped_snapshots = [
+                    s.get("payload", s) for s in all_daily_snapshots
+                ]
+                macro_regime = build_macro_regime_analysis(unwrapped_snapshots, date)
+                if macro_regime:
+                    (portfolio_dir / "macro_regime_analysis.json").write_text(
+                        json.dumps(macro_regime, indent=2, default=str), encoding="utf-8",
+                    )
 
                 # 5. portfolio_rolling_metrics.json (reads family_snapshots.json)
                 try:

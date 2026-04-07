@@ -875,6 +875,12 @@ class DailyMetricsBuilder:
                 self.build_parameter_change_log(parameter_change_events),
             )
 
+        # Write applied regime config from snapshot (per-bot, varies by family)
+        if daily_snapshot:
+            applied_config = daily_snapshot.get("applied_regime_config")
+            if applied_config:
+                self._write_json(output_dir / "applied_regime_config.json", applied_config)
+
         return output_dir
 
     def _write_json(self, path: Path, data: dict | list) -> None:
@@ -1199,3 +1205,46 @@ def build_sector_exposure(trade_events: list[dict]) -> dict:
             "short_exposure": round(data["short_exposure"], 2),
         }
     return {"sectors": result, "sector_count": len(result)}
+
+
+def build_macro_regime_analysis(daily_snapshots: list[dict], date: str) -> dict:
+    """Extract portfolio-level macro regime analysis from DailySnapshot data.
+
+    Picks regime_context from any snapshot (portfolio-wide, same for all bots),
+    and aggregates applied_regime_config per bot.
+
+    Args:
+        daily_snapshots: list of raw DailySnapshot dicts (one per bot).
+        date: YYYY-MM-DD date string.
+
+    Returns:
+        Dict with regime state + per-bot applied configs, or empty dict if
+        no regime data present.
+    """
+    regime_context = None
+    per_bot_configs: dict[str, dict] = {}
+
+    for snap in daily_snapshots:
+        # Pick regime_context from first bot that has it (same portfolio-wide)
+        if regime_context is None and snap.get("regime_context"):
+            regime_context = snap["regime_context"]
+
+        bot_id = snap.get("bot_id", "")
+        applied = snap.get("applied_regime_config")
+        if bot_id and applied:
+            per_bot_configs[bot_id] = applied
+
+    if not regime_context:
+        return {}
+
+    return {
+        "date": date,
+        "macro_regime": regime_context.get("macro_regime", ""),
+        "regime_confidence": regime_context.get("regime_confidence", 0.0),
+        "stress_level": regime_context.get("stress_level", 0.0),
+        "stress_onset": regime_context.get("stress_onset", False),
+        "shift_velocity": regime_context.get("shift_velocity", 0.0),
+        "suggested_leverage_mult": regime_context.get("suggested_leverage_mult", 1.0),
+        "computed_at": regime_context.get("computed_at", ""),
+        "per_bot_configs": per_bot_configs,
+    }
