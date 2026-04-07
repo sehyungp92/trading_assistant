@@ -248,6 +248,44 @@ class TestGroundTruthComputer:
         assert snap.sharpe_ratio_30d != 0.0  # varied returns → nonzero sharpe
         assert snap.win_rate > 0.0
 
+    def test_expected_total_r_populated(self, curated_dir: Path):
+        """expected_total_r is annualized net PnL."""
+        for i in range(15):
+            date = f"2026-02-{i+1:02d}"
+            _write_daily_summary(curated_dir, date, "bot1", net_pnl=100.0)
+        computer = GroundTruthComputer(curated_dir)
+        snap = computer.compute_snapshot("bot1", "2026-02-15")
+        # 15 days * 100 = 1500 total → annualized = 1500 * 365 / 30 = 18250
+        assert snap.expected_total_r > 0
+        assert abs(snap.expected_total_r - 18250.0) < 1.0
+
+    def test_expectancy_populated(self, curated_dir: Path):
+        """Expectancy is computed from aggregated curated data."""
+        for i in range(15):
+            date = f"2026-02-{i+1:02d}"
+            _write_daily_summary(
+                curated_dir, date, "bot1",
+                total_trades=10, winning_trades=6,
+                avg_win=25.0, avg_loss=-15.0,
+                win_count=6, loss_count=4,
+            )
+        computer = GroundTruthComputer(curated_dir)
+        snap = computer.compute_snapshot("bot1", "2026-02-15")
+        # win_rate=0.6, avg_win/avg_loss=25/15≈1.667, expectancy≈1.0
+        assert abs(snap.expectancy - 1.0) < 0.01
+
+    def test_ground_truth_snapshot_new_fields_serialized(self):
+        """GroundTruthSnapshot includes expected_total_r and expectancy."""
+        s = GroundTruthSnapshot(
+            snapshot_date="2026-01-01", bot_id="bot1",
+            expected_total_r=18250.0, expectancy=1.0,
+        )
+        assert s.expected_total_r == 18250.0
+        assert s.expectancy == 1.0
+        data = s.model_dump()
+        assert "expected_total_r" in data
+        assert "expectancy" in data
+
 
 # ── LearningLedger ──
 

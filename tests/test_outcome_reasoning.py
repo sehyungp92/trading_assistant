@@ -45,7 +45,7 @@ def _make_memory_dir(tmp_path):
     """Create a minimal memory dir for ContextBuilder/assembler."""
     memory_dir = tmp_path / "memory"
     (memory_dir / "policies" / "v1").mkdir(parents=True)
-    (memory_dir / "policies" / "v1" / "agents.md").write_text("Agent")
+    (memory_dir / "policies" / "v1" / "agent.md").write_text("Agent")
     (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("Rules")
     (memory_dir / "policies" / "v1" / "soul.md").write_text("Soul")
     (memory_dir / "findings").mkdir(parents=True)

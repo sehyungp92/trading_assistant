@@ -140,7 +140,7 @@ class TestFullWFOPipeline:
         memory_dir = tmp_path / "memory"
         policy_dir = memory_dir / "policies" / "v1"
         policy_dir.mkdir(parents=True)
-        (policy_dir / "agents.md").write_text("You analyze WFO results.")
+        (policy_dir / "agent.md").write_text("You analyze WFO results.")
         (policy_dir / "trading_rules.md").write_text("Max 15% drawdown.")
         (policy_dir / "soul.md").write_text("Conservative risk tolerance.")
 

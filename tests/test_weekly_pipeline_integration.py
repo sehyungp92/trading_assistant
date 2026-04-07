@@ -66,7 +66,7 @@ def _setup_memory(memory_dir: Path) -> None:
     """Create memory policies and corrections."""
     policy_dir = memory_dir / "policies" / "v1"
     policy_dir.mkdir(parents=True)
-    (policy_dir / "agents.md").write_text("You are the trading assistant.")
+    (policy_dir / "agent.md").write_text("You are the trading assistant.")
     (policy_dir / "trading_rules.md").write_text("Max drawdown 15%.")
     (policy_dir / "soul.md").write_text("Conservative.")
     findings_dir = memory_dir / "findings"

@@ -260,19 +260,31 @@ class ParameterSearcher:
         metrics: SimulationMetrics,
         baseline: SimulationMetrics,
     ) -> float:
-        """Internal ranking score: 0.4*calmar + 0.3*profit_factor - 0.3*drawdown.
+        """Aligned with ground truth (excl. process_quality, renormalized to 90%).
 
-        Aligned with soul.md priorities and ground truth formula.
+        expected_r≈33.3%, calmar≈22.2%, pf≈16.7%, expectancy≈16.7%, inv_dd≈11.1%
         """
+        # Baseline guards — avoid division by zero and perverse sign flips
+        b_er = baseline.net_pnl if baseline.net_pnl > 0 else 1.0
         b_calmar = baseline.calmar_ratio if baseline.calmar_ratio != 0 else 1.0
         b_pf = baseline.profit_factor if baseline.profit_factor != 0 else 1.0
+        b_exp = baseline.expectancy if baseline.expectancy != 0 else 1.0
         b_dd = abs(baseline.max_drawdown_pct) if baseline.max_drawdown_pct != 0 else 1.0
 
+        # net_pnl sign guard: if baseline is non-positive, treat ratio as neutral
+        er_imp = metrics.net_pnl / b_er if baseline.net_pnl > 0 else 1.0
         calmar_imp = metrics.calmar_ratio / b_calmar
         pf_imp = metrics.profit_factor / b_pf
+        exp_imp = metrics.expectancy / b_exp if baseline.expectancy != 0 else 1.0
         dd_inc = abs(metrics.max_drawdown_pct) / b_dd - 1.0
 
-        return 0.4 * calmar_imp + 0.3 * pf_imp - 0.3 * max(0, dd_inc)
+        return (
+            0.333 * er_imp
+            + 0.222 * calmar_imp
+            + 0.167 * pf_imp
+            + 0.167 * exp_imp
+            - 0.111 * max(0, dd_inc)
+        )
 
     @staticmethod
     def _route(

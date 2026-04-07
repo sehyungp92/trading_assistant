@@ -104,7 +104,7 @@ class TestDailyPipelineIntegration:
         # Set up memory dir
         policies_dir = memory_dir / "policies" / "v1"
         policies_dir.mkdir(parents=True)
-        (policies_dir / "agents.md").write_text("You are a trading analyst.")
+        (policies_dir / "agent.md").write_text("You are a trading analyst.")
         (policies_dir / "trading_rules.md").write_text("Max 3 suggestions.")
         (policies_dir / "soul.md").write_text("Be helpful.")
         findings_dir = memory_dir / "findings"

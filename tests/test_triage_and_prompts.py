@@ -81,7 +81,7 @@ def _setup_memory(tmp_path: Path) -> Path:
     """Create a minimal memory directory with policies and findings."""
     memory_dir = tmp_path / "memory"
     (memory_dir / "policies" / "v1").mkdir(parents=True)
-    (memory_dir / "policies" / "v1" / "agents.md").write_text(
+    (memory_dir / "policies" / "v1" / "agent.md").write_text(
         "You are a trading assistant agent."
     )
     (memory_dir / "policies" / "v1" / "trading_rules.md").write_text(

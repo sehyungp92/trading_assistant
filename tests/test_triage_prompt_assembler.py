@@ -79,7 +79,7 @@ class TestTriagePromptAssembler:
     def test_loads_policies_for_system_prompt(self, tmp_path: Path):
         policy_dir = tmp_path / "policies" / "v1"
         policy_dir.mkdir(parents=True)
-        (policy_dir / "agents.md").write_text("Be helpful.")
+        (policy_dir / "agent.md").write_text("Be helpful.")
 
         asm = TriagePromptAssembler(memory_dir=tmp_path)
         ctx = TriageContext(

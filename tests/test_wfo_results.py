@@ -65,6 +65,28 @@ class TestSimulationMetrics:
         assert m.total_trades == 0
         assert m.gross_pnl == 0.0
         assert m.sharpe_ratio == 0.0
+        assert m.avg_win == 0.0
+        assert m.avg_loss == 0.0
+        assert m.expectancy == 0.0
+
+    def test_expectancy_computed(self):
+        m = SimulationMetrics(
+            total_trades=100, win_count=60, loss_count=40,
+            avg_win=25.0, avg_loss=15.0,
+        )
+        # win_rate=0.6, avg_win/avg_loss=25/15≈1.6667, expectancy=0.6*1.6667=1.0
+        assert abs(m.expectancy - 1.0) < 0.01
+
+    def test_expectancy_zero_when_no_loss(self):
+        m = SimulationMetrics(
+            total_trades=10, win_count=10, loss_count=0,
+            avg_win=25.0, avg_loss=0.0,
+        )
+        assert m.expectancy == 0.0
+
+    def test_expectancy_zero_when_no_trades(self):
+        m = SimulationMetrics()
+        assert m.expectancy == 0.0
 
 
 class TestFoldResult:
@@ -93,8 +115,8 @@ class TestFoldResult:
         r = FoldResult(
             fold=fold,
             best_params={"rsi": 30.0},
-            is_metrics=SimulationMetrics(sharpe_ratio=2.0),
-            oos_metrics=SimulationMetrics(sharpe_ratio=0.5),
+            is_metrics=SimulationMetrics(calmar_ratio=2.0),
+            oos_metrics=SimulationMetrics(calmar_ratio=0.5),
         )
         assert r.oos_degradation_pct == 0.75  # (2.0 - 0.5) / 2.0
 

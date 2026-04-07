@@ -36,6 +36,8 @@ class SimulationMetrics(BaseModel):
     profit_factor: float = 0.0
     total_fees: float = 0.0
     total_slippage: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
     trades_by_regime: dict[str, int] = {}
     pnl_by_regime: dict[str, float] = {}
     daily_pnl: dict[str, float] = {}  # date → PnL for equity curve
@@ -46,6 +48,14 @@ class SimulationMetrics(BaseModel):
         if self.total_trades == 0:
             return 0.0
         return self.win_count / self.total_trades
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def expectancy(self) -> float:
+        """win_rate × (avg_win / avg_loss) — the expectancy equation."""
+        if self.avg_loss == 0 or self.total_trades == 0:
+            return 0.0
+        return self.win_rate * (self.avg_win / self.avg_loss)
 
 
 class FoldResult(BaseModel):
@@ -60,8 +70,8 @@ class FoldResult(BaseModel):
     @property
     def oos_degradation_pct(self) -> float:
         """How much the objective metric dropped from IS to OOS. 0.0 = no drop, 1.0 = total loss."""
-        is_val = self.is_metrics.sharpe_ratio
-        oos_val = self.oos_metrics.sharpe_ratio
+        is_val = self.is_metrics.calmar_ratio
+        oos_val = self.oos_metrics.calmar_ratio
         if is_val == 0:
             return 0.0
         return (is_val - oos_val) / is_val

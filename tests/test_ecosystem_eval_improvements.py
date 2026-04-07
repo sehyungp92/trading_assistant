@@ -779,7 +779,7 @@ class TestContextBuilderPatternLibrary:
         # Create policies dir so system prompt doesn't fail
         policies = mem_dir / "policies" / "v1"
         policies.mkdir(parents=True)
-        (policies / "agents.md").write_text("# Agents")
+        (policies / "agent.md").write_text("# Agents")
         (policies / "trading_rules.md").write_text("# Rules")
         (policies / "soul.md").write_text("# Soul")
 

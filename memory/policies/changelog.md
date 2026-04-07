@@ -4,6 +4,6 @@
 - Initial policy set created
 - soul.md: identity, values, risk tolerance
 - trading_rules.md: analysis constraints
-- agents.md: agent system prompts
+- agent.md: agent system prompts
 - notification_rules.md: channel and timing rules
 - permission_gates.md: three-tier access control

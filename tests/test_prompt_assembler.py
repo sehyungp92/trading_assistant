@@ -50,7 +50,7 @@ def memory_dir(tmp_path: Path) -> Path:
     mem = tmp_path / "memory"
     policies = mem / "policies" / "v1"
     policies.mkdir(parents=True)
-    (policies / "agents.md").write_text("You are a trading analyst.")
+    (policies / "agent.md").write_text("You are a trading analyst.")
     (policies / "trading_rules.md").write_text("Max 3 suggestions.")
     (policies / "soul.md").write_text("Be helpful.")
 

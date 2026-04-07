@@ -231,7 +231,7 @@ class TestAllocationIntegration:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test")
 
         # Assemble prompt
         from analysis.weekly_prompt_assembler import WeeklyPromptAssembler

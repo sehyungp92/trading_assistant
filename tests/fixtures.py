@@ -49,7 +49,7 @@ def memory_dir(tmp_path: Path) -> Path:
 def memory_dir_with_policies(memory_dir: Path) -> Path:
     """memory_dir with standard policy files pre-populated."""
     policies = memory_dir / "policies" / "v1"
-    (policies / "agents.md").write_text("Agent policy")
+    (policies / "agent.md").write_text("Agent policy")
     (policies / "trading_rules.md").write_text("Rules")
     (policies / "soul.md").write_text("Soul")
     return memory_dir

@@ -19,6 +19,8 @@ class GroundTruthSnapshot(BaseModel):
     profit_factor: float = 0.0
     max_drawdown_pct: float = 0.0
     avg_process_quality: float = 0.0  # 0-100
+    expected_total_r: float = 0.0  # annualized net PnL
+    expectancy: float = 0.0  # win_rate × (avg_win / avg_loss)
     composite_score: float = 0.5  # single number, deterministic
     trade_count: int = 0
     computed_at: datetime = Field(

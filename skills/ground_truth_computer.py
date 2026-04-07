@@ -1,8 +1,10 @@
 # skills/ground_truth_computer.py
 """Ground truth computer — deterministic evaluation function.
 
-Like autoresearch's evaluate_bpb(), this function is NEVER modified once deployed.
-Computes a composite performance score from daily curated summaries.
+Computes a composite performance score from daily curated summaries using a
+6-component z-score-normalized formula aligned with soul.md priorities:
+  expected_total_r (30%), calmar (20%), profit_factor (15%),
+  expectancy (15%), inverse_drawdown (10%), process_quality (10%).
 """
 from __future__ import annotations
 
@@ -18,14 +20,18 @@ class GroundTruthComputer:
     """Computes immutable ground truth performance snapshots."""
 
     # Composite formula weights — aligned with soul.md priorities
-    # Calmar (30%): preferred risk-adjusted metric; net profit / max drawdown
-    # Profit factor (25%): gross_wins / gross_losses quality ratio
-    # Inverse drawdown (25%): hard constraint emphasis
-    # Process quality (20%): process over outcomes; anti-gaming safeguard
-    _W_CALMAR = 0.30
-    _W_PROFIT_FACTOR = 0.25
-    _W_INV_DRAWDOWN = 0.25
-    _W_PROCESS = 0.20
+    # Expected total return (30%): annualized net PnL — primary optimization target
+    # Calmar (20%): preferred risk-adjusted metric; net profit / max drawdown
+    # Profit factor (15%): gross_wins / gross_losses quality ratio
+    # Expectancy (15%): win_rate × (avg_win / avg_loss) — the expectancy equation
+    # Inverse drawdown (10%): hard constraint emphasis
+    # Process quality (10%): process over outcomes; anti-gaming safeguard
+    _W_EXPECTED_R = 0.30
+    _W_CALMAR = 0.20
+    _W_PROFIT_FACTOR = 0.15
+    _W_EXPECTANCY = 0.15
+    _W_INV_DRAWDOWN = 0.10
+    _W_PROCESS = 0.10
     _Z_CLIP = 3.0
     _PF_CAP = 10.0  # cap extreme profit factors for z-score stability
     _MIN_TRADES = 10
@@ -79,9 +85,12 @@ class GroundTruthComputer:
         profit_factor = self._compute_profit_factor(dailies)
         max_dd = self._compute_max_drawdown(dailies)
         avg_pq = self._compute_avg_process_quality(dailies)
+        expected_r = self._compute_expected_total_r(dailies, period_days)
+        expectancy = self._compute_expectancy(dailies)
 
         composite = self._compute_composite(
-            calmar, profit_factor, max_dd, avg_pq, history,
+            expected_r, calmar, profit_factor, expectancy, max_dd, avg_pq,
+            history,
         )
 
         return GroundTruthSnapshot(
@@ -95,6 +104,8 @@ class GroundTruthComputer:
             profit_factor=round(profit_factor, 4),
             max_drawdown_pct=round(max_dd, 4),
             avg_process_quality=round(avg_pq, 2),
+            expected_total_r=round(expected_r, 4),
+            expectancy=round(expectancy, 4),
             composite_score=round(composite, 4),
             trade_count=trade_count,
         )
@@ -175,8 +186,14 @@ class GroundTruthComputer:
             return 0.0  # no drawdown = no Calmar (not inf)
         return (total_pnl * 365 / max(period_days, 1)) / (max_dd * 100)
 
-    def _compute_profit_factor(self, dailies: list[dict]) -> float:
-        """Aggregate profit factor = gross_wins / gross_losses."""
+    @staticmethod
+    def _aggregate_win_loss(dailies: list[dict]) -> tuple[int, int, float, float]:
+        """Aggregate win/loss counts and gross amounts from daily summaries.
+
+        Returns (total_wins, total_losses, gross_wins, gross_losses).
+        """
+        total_wins = 0
+        total_losses = 0
         gross_wins = 0.0
         gross_losses = 0.0
         for d in dailies:
@@ -184,8 +201,15 @@ class GroundTruthComputer:
             avg_loss = abs(d.get("avg_loss", 0.0))
             wins = d.get("win_count", 0) or d.get("winning_trades", 0)
             losses = d.get("loss_count", 0) or d.get("losing_trades", 0)
+            total_wins += wins
+            total_losses += losses
             gross_wins += avg_win * wins
             gross_losses += avg_loss * losses
+        return total_wins, total_losses, gross_wins, gross_losses
+
+    def _compute_profit_factor(self, dailies: list[dict]) -> float:
+        """Aggregate profit factor = gross_wins / gross_losses."""
+        _, _, gross_wins, gross_losses = self._aggregate_win_loss(dailies)
         if gross_losses <= 0:
             return self._PF_CAP if gross_wins > 0 else 1.0
         return min(self._PF_CAP, gross_wins / gross_losses)
@@ -204,35 +228,60 @@ class GroundTruthComputer:
             return 50.0  # neutral default
         return sum(scores) / len(scores)
 
+    @staticmethod
+    def _compute_expected_total_r(dailies: list[dict], period_days: int) -> float:
+        """Annualized net PnL: pnl_total * 365 / period_days."""
+        pnl_total = sum(d.get("net_pnl", 0.0) for d in dailies)
+        return pnl_total * 365 / max(period_days, 1)
+
+    def _compute_expectancy(self, dailies: list[dict]) -> float:
+        """Aggregated win_rate × (avg_win / avg_loss) from curated daily data."""
+        total_wins, total_losses, gross_wins, gross_losses = self._aggregate_win_loss(dailies)
+        total_trades = total_wins + total_losses
+        if total_trades == 0 or total_losses == 0 or gross_losses == 0:
+            return 0.0
+        win_rate = total_wins / total_trades
+        agg_avg_win = gross_wins / total_wins if total_wins > 0 else 0.0
+        agg_avg_loss = gross_losses / total_losses
+        return win_rate * (agg_avg_win / agg_avg_loss)
+
     def _compute_composite(
         self,
+        expected_r: float,
         calmar: float,
         profit_factor: float,
+        expectancy: float,
         max_dd: float,
         avg_pq: float,
         history: list[dict],
     ) -> float:
         """Deterministic composite score from z-score normalized metrics.
 
-        Formula: 0.3 * z_calmar + 0.25 * z_profit_factor + 0.25 * z_inv_drawdown + 0.2 * z_process_quality
+        Formula: 0.30*z_expected_r + 0.20*z_calmar + 0.15*z_pf + 0.15*z_expectancy
+                 + 0.10*z_inv_dd + 0.10*z_process_quality
         Z-scores normalized against bot's own 90-day history, clipped to [-3, 3].
-        Aligned with soul.md priorities: Calmar (#2), drawdown (#3), profit factor (#4).
         """
         # Compute historical baselines for z-scoring
+        hist_expected_rs = self._rolling_expected_rs(history)
         hist_calmars = self._rolling_calmars(history)
         hist_profit_factors = self._rolling_profit_factors(history)
+        hist_expectancies = self._rolling_expectancies(history)
         hist_drawdowns = self._rolling_drawdowns(history)
         hist_pq = self._rolling_process_qualities(history)
 
+        z_expected_r = self._z_score(expected_r, hist_expected_rs)
         z_calmar = self._z_score(calmar, hist_calmars)
         z_pf = self._z_score(profit_factor, hist_profit_factors)
+        z_expectancy = self._z_score(expectancy, hist_expectancies)
         # Invert drawdown (lower is better)
         z_inv_dd = self._z_score(-max_dd, [-dd for dd in hist_drawdowns])
         z_pq = self._z_score(avg_pq, hist_pq)
 
         composite = (
-            self._W_CALMAR * z_calmar
+            self._W_EXPECTED_R * z_expected_r
+            + self._W_CALMAR * z_calmar
             + self._W_PROFIT_FACTOR * z_pf
+            + self._W_EXPECTANCY * z_expectancy
             + self._W_INV_DRAWDOWN * z_inv_dd
             + self._W_PROCESS * z_pq
         )
@@ -275,6 +324,29 @@ class GroundTruthComputer:
                 pf = self._compute_profit_factor([d])
                 pfs.append(pf)
         return pfs if pfs else [1.0]
+
+    def _rolling_expected_rs(self, dailies: list[dict]) -> list[float]:
+        """Rolling 7-day annualized net PnL for z-score baseline."""
+        sorted_dailies = sorted(dailies, key=lambda d: d.get("date", ""))
+        if len(sorted_dailies) < 5:
+            return [0.0]
+        window = 7
+        ers: list[float] = []
+        for i in range(len(sorted_dailies) - window + 1):
+            w = sorted_dailies[i:i + window]
+            er = self._compute_expected_total_r(w, window)
+            ers.append(er)
+        return ers if ers else [0.0]
+
+    def _rolling_expectancies(self, dailies: list[dict]) -> list[float]:
+        """Per-day expectancy values for z-score baseline."""
+        exps: list[float] = []
+        for d in dailies:
+            total = d.get("total_trades", 0)
+            if total > 0:
+                exp = self._compute_expectancy([d])
+                exps.append(exp)
+        return exps if exps else [0.0]
 
     @staticmethod
     def _rolling_drawdowns(dailies: list[dict]) -> list[float]:

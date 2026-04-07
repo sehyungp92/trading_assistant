@@ -235,7 +235,7 @@ def make_handlers(
     policies_dir.mkdir(parents=True, exist_ok=True)
 
     if create_policy_files:
-        (policies_dir / "agents.md").write_text("Agent policy")
+        (policies_dir / "agent.md").write_text("Agent policy")
         (policies_dir / "trading_rules.md").write_text("Rules")
         (policies_dir / "soul.md").write_text("Soul")
 

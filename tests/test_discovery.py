@@ -142,7 +142,7 @@ class TestDiscoveryPromptAssembler:
 
         memory_dir = tmp_path / "memory"
         (memory_dir / "policies" / "v1").mkdir(parents=True)
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("Agent")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("Agent")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("Rules")
         (memory_dir / "policies" / "v1" / "soul.md").write_text("Soul")
         (memory_dir / "findings").mkdir(parents=True)
@@ -449,7 +449,7 @@ class TestContextBuilderDiscoveries:
 
         memory_dir = tmp_path / "memory"
         (memory_dir / "policies" / "v1").mkdir(parents=True)
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("Agent")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("Agent")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("Rules")
         (memory_dir / "policies" / "v1" / "soul.md").write_text("Soul")
         (memory_dir / "findings").mkdir(parents=True)

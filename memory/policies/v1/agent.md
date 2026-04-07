@@ -46,7 +46,7 @@
 - Cross-reference strategy engine suggestions against rejected suggestions history — do not re-suggest rejected items
 - Review the weekly retrospective data and assess which past predictions were accurate
 - Propose structural improvements (Tier 3-4) with specific backtest configurations when possible
-- Maximum 5 actionable suggestions, ranked by expected Calmar impact
+- Maximum 5 actionable suggestions, ranked by expected composite score impact (net_profit 30%, calmar 20%, profit_factor 15%, expectancy 15%, max_drawdown 10%)
 - Consider cross-bot patterns from the pattern library — propose transfers where evidence supports it
 - Every suggestion must include: expected return impact, drawdown impact, evidence base, reversibility
 

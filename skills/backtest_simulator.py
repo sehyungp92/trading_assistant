@@ -88,6 +88,8 @@ class BacktestSimulator:
         total_wins = sum(wins) if wins else 0.0
         total_losses = abs(sum(losses)) if losses else 0.0
         pf = total_wins / total_losses if total_losses > 0 else (float("inf") if total_wins > 0 else 0.0)
+        avg_win = statistics.mean(wins) if wins else 0.0
+        avg_loss = abs(statistics.mean(losses)) if losses else 0.0
 
         return SimulationMetrics(
             total_trades=len(pnl_series),
@@ -102,6 +104,8 @@ class BacktestSimulator:
             profit_factor=pf,
             total_fees=total_fees,
             total_slippage=total_slippage,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
             trades_by_regime=dict(regime_trades),
             pnl_by_regime=dict(regime_pnl),
         )

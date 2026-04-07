@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from schemas.memory import MemoryIndex
 from schemas.prompt_package import PromptPackage
 
-_POLICY_FILES = ["agents.md", "trading_rules.md", "soul.md"]
+_POLICY_FILES = ["agent.md", "trading_rules.md", "soul.md"]
 _FINDINGS_MAX_AGE_DAYS = 90
 _FINDINGS_MAX_ENTRIES = 50
 

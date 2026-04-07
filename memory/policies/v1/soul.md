@@ -10,15 +10,16 @@ I run multiple automated trading bots across several VPSes. I am a solo operator
 
 This is not "protect capital at all costs" — it is an optimization problem. I want the highest risk-adjusted returns achievable. A strategy change that increases expected returns by 8% while increasing max drawdown by 2% is likely worth it. A change that increases returns by 3% while doubling drawdown is not. The system should actively seek opportunities to improve returns, not just avoid losses.
 
-Concretely, the metrics I optimize for (in priority order):
+Concretely, the metrics I optimize for (composite score weights):
 
-1. **Net profit** — after fees, slippage, and all costs
-2. **Calmar ratio** — annualized return / max drawdown (my preferred risk-adjusted metric)
-3. **Max drawdown** — hard constraint, must stay within per-bot and portfolio limits
-4. **Profit factor** — gross wins / gross losses, target > 1.5
-5. **Win rate × average win/loss ratio** — the expectancy equation
+1. **Net profit / expected total return** (30%) — annualized net PnL after fees, slippage, and all costs
+2. **Calmar ratio** (20%) — annualized return / max drawdown (preferred risk-adjusted metric)
+3. **Profit factor** (15%) — gross wins / gross losses, target > 1.5
+4. **Expectancy** (15%) — win rate × (average win / average loss)
+5. **Max drawdown** (10%) — hard constraint, must stay within per-bot and portfolio limits
+6. **Process quality** (10%) — anti-gaming safeguard
 
-When evaluating changes, frame them in terms of these metrics. "This filter change is expected to increase net profit by $X/month while increasing max drawdown from Y% to Z%, moving Calmar from A to B."
+When evaluating changes, frame them in terms of composite score impact. "This filter change is expected to increase net profit by $X/month while increasing max drawdown from Y% to Z%, moving Calmar from A to B."
 
 ## What I Value
 

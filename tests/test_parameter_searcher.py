@@ -416,27 +416,49 @@ class TestSchemas:
 # ─── Composite Score Tests ───────────────────────────────────────────
 
 class TestCompositeScore:
-    def test_identical_metrics_score_near_one(self):
-        """Same metrics as baseline → composite ~0.7 (0.4 + 0.3 - 0.0)."""
+    def test_identical_metrics_score_near_expected(self):
+        """Same metrics as baseline → composite ≈ 0.889 (all ratios = 1.0, no dd increase)."""
         metrics = SimulationMetrics(
             total_trades=50,
             win_count=25,
             loss_count=25,
+            net_pnl=100.0,
             calmar_ratio=1.5,
             profit_factor=2.0,
             max_drawdown_pct=5.0,
+            avg_win=20.0,
+            avg_loss=10.0,
         )
         score = ParameterSearcher._composite_score(metrics, metrics)
-        assert abs(score - 0.7) < 0.01  # 0.4*1 + 0.3*1 - 0.3*0
+        # 0.333*1 + 0.222*1 + 0.167*1 + 0.167*1 - 0.111*0 = 0.889
+        assert abs(score - 0.889) < 0.01
 
     def test_better_calmar_increases_score(self):
         baseline = SimulationMetrics(
             total_trades=50, win_count=25, loss_count=25,
-            calmar_ratio=1.5, profit_factor=2.0, max_drawdown_pct=5.0,
+            net_pnl=100.0, calmar_ratio=1.5, profit_factor=2.0,
+            max_drawdown_pct=5.0, avg_win=20.0, avg_loss=10.0,
         )
         better = SimulationMetrics(
             total_trades=50, win_count=25, loss_count=25,
-            calmar_ratio=3.0, profit_factor=2.0, max_drawdown_pct=5.0,
+            net_pnl=100.0, calmar_ratio=3.0, profit_factor=2.0,
+            max_drawdown_pct=5.0, avg_win=20.0, avg_loss=10.0,
         )
         score = ParameterSearcher._composite_score(better, baseline)
-        assert score > 0.7
+        assert score > 0.889
+
+    def test_negative_baseline_net_pnl_uses_neutral(self):
+        """When baseline net_pnl <= 0, er_imp should be neutral (1.0)."""
+        baseline = SimulationMetrics(
+            total_trades=50, win_count=25, loss_count=25,
+            net_pnl=-50.0, calmar_ratio=1.5, profit_factor=2.0,
+            max_drawdown_pct=5.0, avg_win=20.0, avg_loss=10.0,
+        )
+        candidate = SimulationMetrics(
+            total_trades=50, win_count=25, loss_count=25,
+            net_pnl=100.0, calmar_ratio=1.5, profit_factor=2.0,
+            max_drawdown_pct=5.0, avg_win=20.0, avg_loss=10.0,
+        )
+        score = ParameterSearcher._composite_score(candidate, baseline)
+        # er_imp = 1.0 (neutral due to negative baseline), others = 1.0
+        assert abs(score - 0.889) < 0.01

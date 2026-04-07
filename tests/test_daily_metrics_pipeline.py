@@ -647,7 +647,7 @@ class TestOverlayStatePipeline:
         memory_dir = tmp_path / "memory"
         policies_dir = memory_dir / "policies" / "v1"
         policies_dir.mkdir(parents=True)
-        for f in ["soul.md", "trading_rules.md", "agents.md"]:
+        for f in ["soul.md", "trading_rules.md", "agent.md"]:
             (policies_dir / f).write_text("# test")
         findings_dir = memory_dir / "findings"
         findings_dir.mkdir(parents=True)
@@ -759,7 +759,7 @@ class TestExperimentBreakdownPipeline:
         memory_dir = tmp_path / "memory"
         policies_dir = memory_dir / "policies" / "v1"
         policies_dir.mkdir(parents=True)
-        for f in ["soul.md", "trading_rules.md", "agents.md"]:
+        for f in ["soul.md", "trading_rules.md", "agent.md"]:
             (policies_dir / f).write_text("# test")
         (memory_dir / "findings").mkdir(parents=True)
 
@@ -897,7 +897,7 @@ class TestSignalHealthPipeline:
         memory_dir = tmp_path / "memory"
         policies_dir = memory_dir / "policies" / "v1"
         policies_dir.mkdir(parents=True)
-        for f in ["soul.md", "trading_rules.md", "agents.md"]:
+        for f in ["soul.md", "trading_rules.md", "agent.md"]:
             (policies_dir / f).write_text("# test")
         (memory_dir / "findings").mkdir(parents=True)
 

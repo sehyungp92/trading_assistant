@@ -94,7 +94,7 @@ def memory_dir(tmp_path):
     policies = mem / "policies" / "v1"
     policies.mkdir(parents=True)
     findings.mkdir(parents=True)
-    (policies / "agents.md").write_text("# Agents\nYou are an agent.")
+    (policies / "agent.md").write_text("# Agents\nYou are an agent.")
     (policies / "trading_rules.md").write_text("# Trading Rules\nBe careful.")
     (policies / "soul.md").write_text("# Soul\nQuantify everything.")
     return mem

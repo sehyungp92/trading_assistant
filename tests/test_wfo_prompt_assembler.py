@@ -10,7 +10,7 @@ class TestWFOPromptAssembler:
     def test_assembles_package(self, tmp_path: Path):
         policy_dir = tmp_path / "memory" / "policies" / "v1"
         policy_dir.mkdir(parents=True)
-        (policy_dir / "agents.md").write_text("You are the WFO analyst.")
+        (policy_dir / "agent.md").write_text("You are the WFO analyst.")
         (policy_dir / "trading_rules.md").write_text("Max 15% drawdown.")
         (policy_dir / "soul.md").write_text("Conservative risk tolerance.")
 

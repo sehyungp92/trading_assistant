@@ -209,7 +209,7 @@ class TestWeeklyPromptAssemblerAllocation:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test")
 
         assembler = WeeklyPromptAssembler(
             week_start="2026-02-24",
@@ -230,7 +230,7 @@ class TestWeeklyPromptAssemblerAllocation:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test")
 
         assembler = WeeklyPromptAssembler(
             week_start="2026-02-24",
@@ -255,7 +255,7 @@ class TestWeeklyPromptAssemblerAllocation:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test")
 
         assembler = WeeklyPromptAssembler(
             week_start="2026-02-24",

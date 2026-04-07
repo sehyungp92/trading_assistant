@@ -386,7 +386,7 @@ class TestBuildReportWithMacroRegime:
 def memory_dir(tmp_path: Path) -> Path:
     policy_dir = tmp_path / "policies" / "v1"
     policy_dir.mkdir(parents=True)
-    (policy_dir / "agents.md").write_text("Agent system prompt.")
+    (policy_dir / "agent.md").write_text("Agent system prompt.")
     (policy_dir / "trading_rules.md").write_text("Rules.")
     (policy_dir / "soul.md").write_text("Soul.")
     (tmp_path / "findings").mkdir()
@@ -733,7 +733,7 @@ class TestGap1DailyPipelineMacroRegime:
         memory_dir = tmp_path / "memory"
         for d in [raw_dir, curated_dir, memory_dir / "policies" / "v1", memory_dir / "findings"]:
             d.mkdir(parents=True, exist_ok=True)
-        (memory_dir / "policies" / "v1" / "agents.md").write_text(".")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text(".")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text(".")
         (memory_dir / "policies" / "v1" / "soul.md").write_text(".")
 

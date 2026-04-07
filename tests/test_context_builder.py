@@ -30,7 +30,7 @@ def memory_dir(tmp_path: Path) -> Path:
     """Create a minimal memory directory with policies and corrections."""
     policy_dir = tmp_path / "policies" / "v1"
     policy_dir.mkdir(parents=True)
-    (policy_dir / "agents.md").write_text("You are a trading assistant.")
+    (policy_dir / "agent.md").write_text("You are a trading assistant.")
     (policy_dir / "trading_rules.md").write_text("Never risk more than 2%.")
     (policy_dir / "soul.md").write_text("Be cautious and precise.")
 
@@ -136,7 +136,7 @@ class TestContextBuilder:
     def test_build_system_prompt_loads_all_policies(self, memory_dir: Path):
         ctx = ContextBuilder(memory_dir)
         prompt = ctx.build_system_prompt()
-        assert "--- agents.md ---" in prompt
+        assert "--- agent.md ---" in prompt
         assert "trading assistant" in prompt
         assert "--- trading_rules.md ---" in prompt
         assert "--- soul.md ---" in prompt
@@ -144,10 +144,10 @@ class TestContextBuilder:
     def test_build_system_prompt_skips_missing_files(self, tmp_path: Path):
         policy_dir = tmp_path / "policies" / "v1"
         policy_dir.mkdir(parents=True)
-        (policy_dir / "agents.md").write_text("Agent only.")
+        (policy_dir / "agent.md").write_text("Agent only.")
         ctx = ContextBuilder(tmp_path)
         prompt = ctx.build_system_prompt()
-        assert "--- agents.md ---" in prompt
+        assert "--- agent.md ---" in prompt
         assert "trading_rules.md" not in prompt
 
     def test_load_corrections(self, memory_dir: Path):
@@ -166,7 +166,7 @@ class TestContextBuilder:
         ctx = ContextBuilder(memory_dir)
         files = ctx.list_policy_files()
         assert len(files) == 3
-        assert any("agents.md" in f for f in files)
+        assert any("agent.md" in f for f in files)
 
     def test_runtime_metadata(self, memory_dir: Path):
         ctx = ContextBuilder(memory_dir)
@@ -437,7 +437,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -452,7 +452,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -466,7 +466,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -480,7 +480,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -494,7 +494,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=None)
@@ -508,7 +508,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=StrategyRegistry())
@@ -521,7 +521,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -536,7 +536,7 @@ class TestBasePackageInjection:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         ctx = ContextBuilder(memory_dir)
         pkg = ctx.base_package(strategy_registry=strategy_registry)
@@ -569,7 +569,7 @@ class TestAssemblerPassthrough:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         assembler = DailyPromptAssembler(
             date="2026-03-01",
@@ -586,7 +586,7 @@ class TestAssemblerPassthrough:
         (memory_dir / "policies" / "v1").mkdir(parents=True)
         (memory_dir / "policies" / "v1" / "soul.md").write_text("test", encoding="utf-8")
         (memory_dir / "policies" / "v1" / "trading_rules.md").write_text("test", encoding="utf-8")
-        (memory_dir / "policies" / "v1" / "agents.md").write_text("test", encoding="utf-8")
+        (memory_dir / "policies" / "v1" / "agent.md").write_text("test", encoding="utf-8")
 
         assembler = WeeklyPromptAssembler(
             week_start="2026-03-01",

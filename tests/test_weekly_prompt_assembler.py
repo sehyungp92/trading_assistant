@@ -51,7 +51,7 @@ def setup_dirs(tmp_path: Path):
     # Memory policies
     policy_dir = memory / "policies" / "v1"
     policy_dir.mkdir(parents=True)
-    (policy_dir / "agents.md").write_text("You are the trading assistant.")
+    (policy_dir / "agent.md").write_text("You are the trading assistant.")
     (policy_dir / "trading_rules.md").write_text("Max drawdown 15%.")
     (policy_dir / "soul.md").write_text("Conservative approach.")
 
