@@ -45,7 +45,8 @@ class TestCodexInstructionsFlag:
         assert "--instructions" in spec.args
         idx = spec.args.index("--instructions")
         assert spec.args[idx + 1] == "You are a trading analyst."
-        assert spec.args[-1] == "Analyze today's performance."
+        # build_full_prompt merges task_prompt + data file manifest
+        assert spec.args[-1].startswith("Analyze today's performance.")
 
     def test_no_instructions_flag_when_system_prompt_empty(self, builder: InvocationBuilder):
         pkg = PromptPackage(task_prompt="Just do the task.", system_prompt="", data={})

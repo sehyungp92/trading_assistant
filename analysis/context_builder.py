@@ -79,6 +79,24 @@ def _apply_temporal_window(
     return result[:max_entries]
 
 
+_DEFAULT_CONTEXT_BUDGET_ITEMS = 15
+_EXPANDED_CONTEXT_BUDGET_ITEMS = 25
+
+
+def _estimate_tokens(value: object) -> int:
+    """Estimate token count for a data value.
+
+    Uses a ~4 chars/token heuristic for JSON-serialized data, which is
+    conservative for structured data (actual ratio is closer to 3.5 for
+    English prose, 4-5 for JSON with keys).
+    """
+    try:
+        text = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    return max(1, len(text) // 4)
+
+
 class ContextBuilder:
     """Loads shared context (policies, corrections, metadata) used by all assemblers."""
 
@@ -269,6 +287,8 @@ class ContextBuilder:
         """
         try:
             sessions = session_store.get_recent_sessions(agent_type, days=days)
+            if not isinstance(sessions, list):
+                return ""
         except Exception:
             return ""
         if not sessions:
@@ -1214,12 +1234,122 @@ class ContextBuilder:
         "session_history",
     ]
 
+    # Workflow-specific priority overrides.  Keys not listed here fall back
+    # to _CONTEXT_PRIORITY.  Each list is ordered highest-to-lowest priority.
+    _WORKFLOW_PRIORITIES: dict[str, list[str]] = {
+        "weekly_analysis": [
+            # Trend and meta-analysis dominate weekly review
+            "ground_truth_trend",
+            "convergence_report",
+            "self_assessment",
+            "last_week_synthesis",
+            "outcome_measurements",
+            "forecast_meta_analysis",
+            "category_scorecard",
+            "regime_stratified_scores",
+            "suggestion_quality_trend",
+            "cycle_effectiveness_trend",
+            "hypothesis_track_record",
+            "transfer_track_record",
+            "prediction_accuracy_by_metric",
+            "active_suggestions",
+            "rejected_suggestions",
+            "correction_patterns",
+            "validation_patterns",
+            "portfolio_outcomes",
+            "portfolio_rolling_metrics",
+            "macro_regime_context",
+            "strategy_profiles",
+            "archetype_expectations",
+            "coordination_rules",
+            "portfolio_risk_config",
+            "outcome_reasonings",
+            "recalibrations",
+            "discoveries",
+            "strategy_ideas",
+            "active_experiments",
+            "experiment_track_record",
+            "backtest_reliability",
+            "search_reports",
+            "optimization_allocation",
+            "search_signal_summary",
+            "consolidated_patterns",
+            "pattern_library",
+            "spurious_outcomes",
+            "regime_config_history",
+            "threshold_profile",
+            "failure_log",
+            "reliability_summary",
+            "instrumentation_readiness",
+            "allocation_history",
+            "session_history",
+        ],
+        "wfo": [
+            # WFO cares about optimization, backtest reliability, parameters
+            "backtest_reliability",
+            "regime_config_history",
+            "search_reports",
+            "search_signal_summary",
+            "optimization_allocation",
+            "active_experiments",
+            "experiment_track_record",
+            "ground_truth_trend",
+            "strategy_profiles",
+            "archetype_expectations",
+            "threshold_profile",
+            "convergence_report",
+            "self_assessment",
+            "category_scorecard",
+        ],
+        "discovery_analysis": [
+            # Discovery focuses on novel patterns and gaps in coverage
+            "discoveries",
+            "strategy_ideas",
+            "pattern_library",
+            "ground_truth_trend",
+            "outcome_reasonings",
+            "consolidated_patterns",
+            "hypothesis_track_record",
+            "correction_patterns",
+            "convergence_report",
+            "strategy_profiles",
+            "archetype_expectations",
+            "macro_regime_context",
+            "self_assessment",
+        ],
+        "outcome_reasoning": [
+            # Reasoning about why suggestions worked/failed
+            "outcome_measurements",
+            "category_scorecard",
+            "regime_stratified_scores",
+            "active_suggestions",
+            "ground_truth_trend",
+            "correction_patterns",
+            "hypothesis_track_record",
+            "transfer_track_record",
+            "forecast_meta_analysis",
+            "prediction_accuracy_by_metric",
+            "self_assessment",
+            "convergence_report",
+            "strategy_profiles",
+        ],
+        "triage": [
+            # Bug triage needs minimal learning context
+            "ground_truth_trend",
+            "convergence_report",
+            "self_assessment",
+            "strategy_profiles",
+            "session_history",
+        ],
+    }
+
     def base_package(
         self,
         session_store=None,
         agent_type: str = "",
         bot_configs: dict | None = None,
-        context_budget_items: int = 15,
+        context_budget_items: int = _DEFAULT_CONTEXT_BUDGET_ITEMS,
+        context_budget_tokens: int = 0,
         strategy_registry=None,
     ) -> PromptPackage:
         """Build a PromptPackage pre-filled with system prompt, corrections, and metadata.
@@ -1228,6 +1358,10 @@ class ContextBuilder:
             session_store: Optional SessionStore for loading session history.
             agent_type: Agent type for session history filtering.
             bot_configs: Optional ``{bot_id: BotConfig}`` for timezone metadata.
+            context_budget_items: Max items when token budget is not set.
+            context_budget_tokens: When >0, use token-aware budgeting instead
+                of item count.  Items are added in priority order until the
+                budget is exhausted.
         """
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
@@ -1380,59 +1514,98 @@ class ContextBuilder:
             if strategy_registry.portfolio.heat_cap_R > 0:
                 data["portfolio_risk_config"] = strategy_registry.portfolio.model_dump(mode="json")
 
-        # Apply context budget — adaptive: expand default budget up to 25 when
-        # many items have data, but never exceed an explicitly set budget.
-        # The default of 15 auto-expands; explicit low values are respected.
-        total_available = len(data)
-        if context_budget_items == 15:
-            # Default budget — allow adaptive expansion
-            effective_budget = max(context_budget_items, min(total_available, 25))
-        else:
-            effective_budget = context_budget_items
+        # Select workflow-aware priority list (falls back to default)
+        active_priority = self._WORKFLOW_PRIORITIES.get(
+            agent_type, self._CONTEXT_PRIORITY,
+        )
 
+        # Build priority-ordered key list
+        priority_order = {k: i for i, k in enumerate(active_priority)}
+        priority_set = set(active_priority)
+        sorted_prioritized = sorted(
+            (k for k in data if k in priority_set),
+            key=lambda k: priority_order.get(k, 999),
+        )
+        unprioritized = [k for k in data if k not in priority_set]
+        all_keys_ordered = sorted_prioritized + unprioritized
+
+        total_available = len(data)
         omitted_keys: list[str] = []
-        if total_available > effective_budget:
-            priority_set = set(self._CONTEXT_PRIORITY)
-            # Split into prioritized and unprioritized
-            prioritized = {
-                k: v for k, v in data.items() if k in priority_set
-            }
-            unprioritized = {
-                k: v for k, v in data.items() if k not in priority_set
-            }
-            # Sort prioritized by their order in _CONTEXT_PRIORITY
-            priority_order = {
-                k: i for i, k in enumerate(self._CONTEXT_PRIORITY)
-            }
-            sorted_keys = sorted(
-                prioritized.keys(),
-                key=lambda k: priority_order.get(k, 999),
-            )
-            # Take top N from prioritized, fill remainder with unprioritized
-            budget_keys = sorted_keys[:effective_budget]
-            remaining = effective_budget - len(budget_keys)
-            if remaining > 0:
-                budget_keys.extend(list(unprioritized.keys())[:remaining])
-            dropped = set(data.keys()) - set(budget_keys)
-            omitted_keys = sorted(dropped)
-            if dropped:
+        token_estimates: dict[str, int] = {}
+
+        if context_budget_tokens > 0:
+            # Token-aware budgeting: add items in priority order, skipping
+            # items that don't fit but continuing to try smaller ones.
+            budget_keys: list[str] = []
+            tokens_used = 0
+            for key in all_keys_ordered:
+                est = _estimate_tokens(data[key])
+                token_estimates[key] = est
+                if tokens_used + est <= context_budget_tokens:
+                    budget_keys.append(key)
+                    tokens_used += est
+                else:
+                    omitted_keys.append(key)
+                    continue  # skip this item but keep trying smaller ones
+            if omitted_keys:
                 logger.warning(
-                    "Context budget: dropped %d low-priority items: %s",
-                    len(dropped), omitted_keys,
+                    "Token budget (%s): %d/%d tokens used, dropped %d items: %s",
+                    agent_type or "default", tokens_used, context_budget_tokens,
+                    len(omitted_keys), omitted_keys,
                 )
             data = {k: data[k] for k in budget_keys if k in data}
+        else:
+            # Item-count budgeting (legacy) — adaptive expansion
+            if context_budget_items == _DEFAULT_CONTEXT_BUDGET_ITEMS:
+                effective_budget = max(context_budget_items, min(total_available, _EXPANDED_CONTEXT_BUDGET_ITEMS))
+            else:
+                effective_budget = context_budget_items
+
+            if total_available > effective_budget:
+                budget_keys = all_keys_ordered[:effective_budget]
+                dropped = set(data.keys()) - set(budget_keys)
+                omitted_keys = sorted(dropped)
+                if dropped:
+                    logger.warning(
+                        "Context budget (%s): dropped %d low-priority items: %s",
+                        agent_type or "default", len(dropped), omitted_keys,
+                    )
+                data = {k: data[k] for k in budget_keys if k in data}
+
+            # Compute token estimates for manifest (informational)
+            for key in data:
+                token_estimates[key] = _estimate_tokens(data[key])
 
         metadata = self.runtime_metadata(bot_configs=bot_configs)
         metadata["_context_budget_manifest"] = {
+            "workflow": agent_type or "default",
+            "budget_mode": "tokens" if context_budget_tokens > 0 else "items",
             "included": sorted(data.keys()),
             "omitted": omitted_keys,
             "total_available": total_available,
+            "token_estimates": token_estimates,
         }
+
+        # Load ranked learning cards (if card store exists)
+        learning_cards_text = ""
+        try:
+            from skills.learning_card_store import LearningCardStore
+            card_store = LearningCardStore(self._findings_dir)
+            ranked = card_store.ranked_for_prompt(
+                limit=10, bot_id="", workflow=agent_type,
+            )
+            if ranked:
+                card_store.load().record_retrieval([c.card_id for c in ranked])
+                card_store.save()
+                learning_cards_text = "\n\n".join(c.to_prompt_text() for c in ranked)
+                metadata["_learning_card_ids"] = [c.card_id for c in ranked]
+        except Exception:
+            logger.debug("Learning card loading skipped (store not available)")
 
         return PromptPackage(
             system_prompt=self.build_system_prompt(),
             corrections=self.load_corrections(),
             context_files=self.list_policy_files(),
-            metadata=metadata,
+            metadata={**metadata, "_learning_cards_text": learning_cards_text},
             data=data,
         )

@@ -260,7 +260,7 @@ class TestFullYAMLFile:
         assert full_registry.archetype_for_strategy("BRS_R9") == StrategyArchetype.BEAR_REGIME_SWING
 
     def test_downturn_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
-        assert full_registry.archetype_for_strategy("DOWNTURN") == StrategyArchetype.MULTI_ENGINE_BEAR
+        assert full_registry.archetype_for_strategy("DownturnDominator_v1") == StrategyArchetype.MULTI_ENGINE_BEAR
 
     def test_iaric_archetype_updated(self, full_registry: StrategyRegistry) -> None:
         assert full_registry.archetype_for_strategy("IARIC_v1") == StrategyArchetype.MEAN_REVERSION_PULLBACK
@@ -277,7 +277,7 @@ class TestFullYAMLFile:
         assert brs.regime_model == "5_state_bear"
         assert len(brs.analysis_focus) == 4
 
-        downturn = full_registry.strategies["DOWNTURN"]
+        downturn = full_registry.strategies["DownturnDominator_v1"]
         assert downturn.sub_engines == ["REVERSAL", "BREAKDOWN", "FADE"]
         assert downturn.regime_model == "composite_with_vol_state"
         assert len(downturn.key_metadata_fields) == 6
@@ -295,7 +295,7 @@ class TestFullYAMLFile:
     def test_downturn_cooldown_pair(self, full_registry: StrategyRegistry) -> None:
         downturn_pairs = [
             p for p in full_registry.coordination.cooldown_pairs
-            if "DOWNTURN" in p.strategies
+            if "DownturnDominator_v1" in p.strategies
         ]
         assert len(downturn_pairs) == 1
         assert downturn_pairs[0].minutes == 60

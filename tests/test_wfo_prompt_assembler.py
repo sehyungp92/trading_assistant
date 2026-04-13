@@ -39,7 +39,7 @@ class TestWFOPromptAssembler:
         )
         package = assembler.assemble()
         assert package.system_prompt is not None
-        assert package.data == {}
+        assert "wfo_report" not in package.data
 
     def test_includes_wfo_skill_context(self, tmp_path: Path):
         skill_dir = tmp_path / "memory" / "skills"

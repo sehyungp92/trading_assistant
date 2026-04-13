@@ -164,13 +164,13 @@ class TestStrategyProfileMacroSensitivity:
         strategies = data.get("strategies", {})
 
         # US strategies should have macro regime sensitivity
-        for sid in ["IARIC_v1", "ALCB_v1", "US_ORB_v1", "DOWNTURN", "VdubusNQ_v4", "ATRSS", "BRS_R9"]:
+        for sid in ["IARIC_v1", "ALCB_v1", "US_ORB_v1", "DownturnDominator_v1", "VdubusNQ_v4", "ATRSS", "BRS_R9"]:
             if sid in strategies:
                 sens = strategies[sid].get("macro_regime_sensitivity", {})
                 assert len(sens) > 0, f"{sid} missing macro_regime_sensitivity"
 
-        # DOWNTURN should be disabled in G/R
-        downturn = strategies.get("DOWNTURN", {})
+        # DownturnDominator_v1 should be disabled in G/R
+        downturn = strategies.get("DownturnDominator_v1", {})
         sens = downturn.get("macro_regime_sensitivity", {})
         assert sens.get("G") == "disabled"
         assert sens.get("R") == "disabled"

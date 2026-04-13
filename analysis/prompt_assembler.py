@@ -258,15 +258,21 @@ class DailyPromptAssembler:
         self.strategy_registry = strategy_registry
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
-    def assemble(self, triage_report=None) -> PromptPackage:
+    def assemble(self, triage_report=None, session_store=None) -> PromptPackage:
         """Build the complete prompt package.
 
         Args:
             triage_report: Optional TriageReport from DailyTriage. When provided,
                 instructions are focused on the triage's significant events and
                 questions. When None, uses fallback instructions.
+            session_store: Optional SessionStore for loading session history.
         """
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs, strategy_registry=self.strategy_registry)
+        pkg = self._ctx.base_package(
+            session_store=session_store,
+            agent_type="daily_analysis",
+            bot_configs=self.bot_configs,
+            strategy_registry=self.strategy_registry,
+        )
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_structured_data(triage_report))
         pkg.instructions = self._build_instructions(triage_report)

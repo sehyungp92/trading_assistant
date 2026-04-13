@@ -1083,7 +1083,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         curated_dir=curated_dir,
                         bot_configs=config.bot_configs,
                     )
-                    reasoning_pkg = assembler.assemble(recent_outcomes)
+                    reasoning_pkg = assembler.assemble(
+                        recent_outcomes,
+                        session_store=agent_runner.session_store,
+                    )
                     reasoning_result = await agent_runner.invoke(
                         agent_type="outcome_reasoning",
                         prompt_package=reasoning_pkg,

@@ -157,9 +157,13 @@ class DiscoveryPromptAssembler:
         self.bot_configs = bot_configs
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
-    def assemble(self) -> PromptPackage:
+    def assemble(self, session_store=None) -> PromptPackage:
         """Build the complete prompt package for discovery analysis."""
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
+        pkg = self._ctx.base_package(
+            session_store=session_store,
+            agent_type="discovery_analysis",
+            bot_configs=self.bot_configs,
+        )
         pkg.task_prompt = self._build_task_prompt()
         pkg.instructions = _DISCOVERY_INSTRUCTIONS
         pkg.data.update(self._load_discovery_context())

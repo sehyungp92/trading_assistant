@@ -253,7 +253,10 @@ class Handlers:
                 bot_configs=self._bot_configs,
                 strategy_registry=self._strategy_registry,
             )
-            package = assembler.assemble(triage_report=triage_report)
+            package = assembler.assemble(
+                triage_report=triage_report,
+                session_store=self._agent_runner.session_store,
+            )
 
             # Include event counts in prompt metadata
             if event_counts:
@@ -640,7 +643,10 @@ class Handlers:
                 bot_configs=self._bot_configs,
                 strategy_registry=self._strategy_registry,
             )
-            package = assembler.assemble(triage_report=weekly_triage_report)
+            package = assembler.assemble(
+                triage_report=weekly_triage_report,
+                session_store=self._agent_runner.session_store,
+            )
 
             # Inject simulation results into prompt data
             if simulation_results:
@@ -1049,7 +1055,7 @@ class Handlers:
                 memory_dir=self._memory_dir,
                 wfo_output_dir=output_dir,
             )
-            package = assembler.assemble()
+            package = assembler.assemble(session_store=self._agent_runner.session_store)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "agent_invocation", "handler": "wfo",
@@ -1200,6 +1206,7 @@ class Handlers:
                 assembler = TriagePromptAssembler(memory_dir=self._memory_dir)
                 package = assembler.assemble(
                     context, triage_result.severity, triage_result.complexity,
+                    session_store=self._agent_runner.session_store,
                 )
 
                 result = await self._agent_runner.invoke(
@@ -1333,7 +1340,7 @@ class Handlers:
                 memory_dir=self._memory_dir,
                 bot_configs=self._bot_configs,
             )
-            package = assembler.assemble()
+            package = assembler.assemble(session_store=self._agent_runner.session_store)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "discovery_analysis",

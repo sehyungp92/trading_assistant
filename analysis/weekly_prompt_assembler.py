@@ -182,7 +182,7 @@ If macro_regime_context data is present in the base package:
   confidence, and stress level
 - Break down weekly performance by macro regime: P&L, win rate, expectancy per regime
 - Cross-reference macro_regime_sensitivity from strategy profiles:
-  e.g., DOWNTURN should be "disabled" in G/R but "full" in S/D
+  e.g., DownturnDominator_v1 should be "disabled" in G/R but "full" in S/D
 - Evaluate regime config effectiveness: is regime_unit_risk_mult appropriate?
   If losses persist despite reduced sizing → recommend more aggressive reduction
   If winning strongly with heavy reduction → may be too conservative
@@ -289,15 +289,21 @@ class WeeklyPromptAssembler:
         self.strategy_registry = strategy_registry
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
-    def assemble(self, triage_report=None) -> PromptPackage:
+    def assemble(self, triage_report=None, session_store=None) -> PromptPackage:
         """Build the complete weekly prompt package.
 
         Args:
             triage_report: Optional WeeklyTriageReport from WeeklyTriage. When
                 provided, instructions are focused on computed summaries and
                 targeted questions. When None, uses fallback instructions.
+            session_store: Optional SessionStore for loading session history.
         """
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs, strategy_registry=self.strategy_registry)
+        pkg = self._ctx.base_package(
+            session_store=session_store,
+            agent_type="weekly_analysis",
+            bot_configs=self.bot_configs,
+            strategy_registry=self.strategy_registry,
+        )
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_data())
         pkg.instructions = self._build_instructions(triage_report)

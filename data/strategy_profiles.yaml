@@ -249,7 +249,7 @@ strategies:
       base_risk_pct: 0.020
     macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
 
-  DOWNTURN:
+  DownturnDominator_v1:
     display_name: "Downturn Multi-Engine Bear"
     bot_id: momentum_nq_01
     family: momentum
@@ -372,7 +372,7 @@ coordination:
       minutes: 120
       session_only: true
       session_window: ["09:45", "11:30"]
-    - strategies: [DOWNTURN, AKC_Helix_v40]
+    - strategies: [DownturnDominator_v1, AKC_Helix_v40]
       minutes: 60
       session_only: true
       session_window: ["09:45", "16:00"]

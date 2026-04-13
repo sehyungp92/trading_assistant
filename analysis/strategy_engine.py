@@ -1030,6 +1030,7 @@ class StrategyEngine:
         regime_win_rate: float,
         regime_trade_count: int,
         min_trades: int = 10,
+        strategy_id: str = "",
     ) -> list[StrategySuggestion]:
         """Tier 3: Compare applied regime config against actual performance.
 
@@ -1040,7 +1041,7 @@ class StrategyEngine:
         if regime_trade_count < min_trades:
             return suggestions
 
-        strategy_id = self._resolve_strategy_id(bot_id)
+        strategy_id = strategy_id or self._resolve_strategy_id(bot_id)
 
         # Losing despite reduction → not aggressive enough
         if regime_pnl < 0 and regime_unit_risk_mult < 1.0:
@@ -1185,6 +1186,7 @@ class StrategyEngine:
         bot_id: str,
         trades_by_stress: dict[str, dict],
         min_trades_per_bucket: int = 5,
+        strategy_id: str = "",
     ) -> list[StrategySuggestion]:
         """Tier 3: Aggregate trade outcomes by stress_level_at_entry buckets.
 
@@ -1206,7 +1208,7 @@ class StrategyEngine:
         low_wr = low.get("win_rate", 0.0)
         high_exp = high.get("expectancy", 0.0)
 
-        strategy_id = self._resolve_strategy_id(bot_id)
+        strategy_id = strategy_id or self._resolve_strategy_id(bot_id)
 
         # High-stress entries significantly worse than low-stress
         # NOTE: stress_level has 41% FPR (observational only per reliability guide).

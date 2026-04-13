@@ -74,13 +74,18 @@ class OutcomeReasoningAssembler:
         self.bot_configs = bot_configs
         self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
 
-    def assemble(self, outcomes: list[dict]) -> PromptPackage:
+    def assemble(self, outcomes: list[dict], session_store=None) -> PromptPackage:
         """Build prompt package for reasoning about measured outcomes.
 
         Args:
             outcomes: List of OutcomeMeasurement dicts to reason about.
+            session_store: Optional SessionStore for loading session history.
         """
-        pkg = self._ctx.base_package(bot_configs=self.bot_configs)
+        pkg = self._ctx.base_package(
+            session_store=session_store,
+            agent_type="outcome_reasoning",
+            bot_configs=self.bot_configs,
+        )
         pkg.task_prompt = self._build_task_prompt(outcomes)
         pkg.instructions = self._build_instructions(outcomes)
         pkg.data["outcomes_for_reasoning"] = outcomes

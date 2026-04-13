@@ -139,7 +139,7 @@ def _make_registry_for_engine() -> StrategyRegistry:
                 bot_id="bear_bot", family="swing",
                 archetype="bear_regime_swing", asset_class="mixed",
             ),
-            "DOWNTURN": StrategyProfile(
+            "DownturnDominator_v1": StrategyProfile(
                 bot_id="downturn_bot", family="momentum",
                 archetype="multi_engine_bear", asset_class="futures",
             ),
@@ -321,7 +321,7 @@ class TestMultiEngineBearArchetype:
         )
         result = engine.detect_alpha_decay(
             "downturn_bot", rolling_sharpe_30d=0.55, rolling_sharpe_60d=0.8,
-            rolling_sharpe_90d=1.0, strategy_id="DOWNTURN",
+            rolling_sharpe_90d=1.0, strategy_id="DownturnDominator_v1",
         )
         assert len(result) == 0
 
@@ -335,7 +335,7 @@ class TestMultiEngineBearArchetype:
         # 0.30 < 0.35 threshold → fires
         result = engine.detect_exit_timing_issues(
             "downturn_bot", avg_exit_efficiency=0.30, premature_exit_pct=0.3,
-            strategy_id="DOWNTURN",
+            strategy_id="DownturnDominator_v1",
         )
         assert len(result) == 1
 
@@ -348,7 +348,7 @@ class TestMultiEngineBearArchetype:
         )
         bucket = MagicMock(hour=10, trade_count=20, pnl=-100, win_rate=0.2)
         result = engine.detect_time_of_day_patterns(
-            "downturn_bot", [bucket], strategy_id="DOWNTURN",
+            "downturn_bot", [bucket], strategy_id="DownturnDominator_v1",
         )
         assert len(result) == 1
         assert "HIGH RELEVANCE" in result[0].archetype_note

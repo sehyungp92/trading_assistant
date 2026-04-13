@@ -76,6 +76,7 @@ class AgentRunner:
         openrouter_api_key: str = "",
         event_stream: EventStream | None = None,
         cost_tracker: CostTracker | None = None,
+        run_index: object | None = None,
     ) -> None:
         self._runs_dir = Path(runs_dir)
         self._session_store = session_store
@@ -90,6 +91,7 @@ class AgentRunner:
         self._enforce_skills = enforce_skills
         self._event_stream = event_stream
         self._cost_tracker = cost_tracker
+        self._run_index = run_index
 
         # Delegate: provider auth and command resolution
         self._auth_checker = ProviderAuthChecker(
@@ -131,6 +133,11 @@ class AgentRunner:
         # Cooldown tracker for provider fallback
         self._cooldown_tracker = ProviderCooldownTracker()
 
+
+    @property
+    def session_store(self) -> SessionStore:
+        """Expose session store for assemblers that need session history."""
+        return self._session_store
 
     # -- Preferences --
 
@@ -270,6 +277,31 @@ class AgentRunner:
         )
         self._record_cost(result, agent_type, run_id)
         return result
+
+    def _index_run(
+        self,
+        run_id: str,
+        agent_type: str,
+        run_dir: Path,
+        result: AgentResult,
+        invocation: InvocationSpec,
+    ) -> None:
+        """Index the completed run in RunIndex (best-effort)."""
+        if self._run_index is None:
+            return
+        try:
+            self._run_index.index_run(
+                run_id=run_id,
+                agent_type=agent_type,
+                run_dir=run_dir,
+                provider=invocation.provider.value,
+                model=invocation.effective_model,
+                success=result.success,
+                duration_ms=result.duration_ms,
+                cost_usd=result.cost_usd,
+            )
+        except Exception:
+            logger.debug("Failed to index run %s", run_id)
 
     def _record_cost(self, result: AgentResult, agent_type: str, run_id: str) -> None:
         if self._cost_tracker is None:
@@ -479,6 +511,14 @@ class AgentRunner:
             },
         )
 
+        self._index_run(
+            run_id=run_id,
+            agent_type=agent_type,
+            run_dir=run_dir,
+            result=result,
+            invocation=invocation,
+        )
+
         self._broadcast_runtime_event(
             "agent_invocation_completed",
             {
@@ -527,6 +567,14 @@ class AgentRunner:
 
         if package.system_prompt:
             (run_dir / "system_prompt.md").write_text(package.system_prompt, encoding="utf-8")
+
+        if package.corrections:
+            (run_dir / "corrections.json").write_text(
+                json.dumps(package.corrections, indent=2, default=str), encoding="utf-8"
+            )
+
+        if package.skill_context:
+            (run_dir / "skill_context.md").write_text(package.skill_context, encoding="utf-8")
 
     # -- Async subprocess lifecycle --
 

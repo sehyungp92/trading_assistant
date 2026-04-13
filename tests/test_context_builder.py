@@ -77,7 +77,7 @@ def strategy_registry() -> StrategyRegistry:
                 regime_model="5_state_bear",
                 analysis_focus=["regime_identification_accuracy"],
             ),
-            "DOWNTURN": StrategyProfile(
+            "DownturnDominator_v1": StrategyProfile(
                 display_name="Downturn Multi-Engine Bear",
                 bot_id="momentum_nq_01",
                 family="momentum",
@@ -547,7 +547,7 @@ class TestBasePackageInjection:
         assert brs["regime_model"] == "5_state_bear"
         assert brs["analysis_focus"] == ["regime_identification_accuracy"]
 
-        downturn = profiles["DOWNTURN"]
+        downturn = profiles["DownturnDominator_v1"]
         assert downturn["sub_engines"] == ["REVERSAL", "BREAKDOWN", "FADE"]
         assert downturn["key_metadata_fields"] == ["engine_tag", "composite_regime_at_entry"]
 

@@ -9,6 +9,7 @@ import pytest
 
 from orchestrator.agent_runner import AgentRunner
 from orchestrator.invocation_builder import (
+    InvocationBuilder,
     _ANTHROPIC_ENV_KEYS_TO_CLEAR,
     _CODEX_RUNTIME,
     _CODEX_SANDBOX,
@@ -129,17 +130,14 @@ class TestBuildCodexInvocation:
         assert _CODEX_SANDBOX in spec.args
         assert "--model" in spec.args
 
-    def test_codex_prompt_includes_system(self, runner: AgentRunner, sample_package: PromptPackage):
-        merged = runner._invocation_builder.merge_codex_prompt(sample_package)
-        assert "System instructions:" in merged
-        assert sample_package.system_prompt in merged
-        assert sample_package.task_prompt in merged
+    def test_codex_full_prompt_includes_task(self, runner: AgentRunner, sample_package: PromptPackage):
+        result = InvocationBuilder.build_full_prompt(sample_package)
+        assert sample_package.task_prompt in result
 
-    def test_codex_prompt_without_system(self, runner: AgentRunner):
+    def test_codex_full_prompt_task_only_when_no_extras(self, runner: AgentRunner):
         pkg = PromptPackage(task_prompt="test task", system_prompt="", data={})
-        merged = runner._invocation_builder.merge_codex_prompt(pkg)
-        assert "System instructions:" not in merged
-        assert merged == "test task"
+        result = InvocationBuilder.build_full_prompt(pkg)
+        assert result == "test task"
 
     def test_codex_model_forwarded(self, runner: AgentRunner, sample_package: PromptPackage):
         selection = AgentSelection(provider=AgentProvider.CODEX_PRO, model="gpt-5.4")

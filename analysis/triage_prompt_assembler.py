@@ -37,11 +37,12 @@ class TriagePromptAssembler:
         context: TriageContext,
         severity: BugSeverity,
         complexity: BugComplexity,
+        session_store=None,
     ) -> PromptPackage:
         """Build the complete prompt package."""
-        pkg = self._ctx.base_package()
+        pkg = self._ctx.base_package(session_store=session_store, agent_type="triage")
         pkg.task_prompt = self._build_task_prompt(severity, complexity)
-        pkg.data = {"context": self._build_context(context)}
+        pkg.data.update({"context": self._build_context(context)})
         pkg.instructions = _TRIAGE_INSTRUCTIONS
         return pkg
 

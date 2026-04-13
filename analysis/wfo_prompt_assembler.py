@@ -39,11 +39,11 @@ class WFOPromptAssembler:
         self.wfo_output_dir = wfo_output_dir
         self._ctx = ContextBuilder(memory_dir)
 
-    def assemble(self) -> PromptPackage:
+    def assemble(self, session_store=None) -> PromptPackage:
         """Build the complete WFO prompt package."""
-        pkg = self._ctx.base_package()
+        pkg = self._ctx.base_package(session_store=session_store, agent_type="wfo")
         pkg.task_prompt = self._build_task_prompt()
-        pkg.data = self._load_data()
+        pkg.data.update(self._load_data())
         pkg.instructions = _WFO_INSTRUCTIONS.format(bot_id=self.bot_id)
         pkg.skill_context = self._load_skill_context()
         pkg.context_files.extend(self._list_data_files())
