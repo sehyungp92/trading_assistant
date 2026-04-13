@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from schemas.detection_context import DetectionContext, ThresholdProfile, ThresholdRecord
+from skills._outcome_utils import is_positive_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class ThresholdLearner:
                 suggestion_id = data.get("suggestion_id", "")
                 if suggestion_id not in suggestions_by_id:
                     continue
-                is_positive = data.get("pnl_delta_7d", 0.0) > 0
+                is_positive = is_positive_outcome(data)
                 results.append((suggestions_by_id[suggestion_id], is_positive))
             except (json.JSONDecodeError, Exception):
                 continue

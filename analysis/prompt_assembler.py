@@ -34,7 +34,15 @@ _CURATED_FILES = [
     "indicator_snapshots.json",
     "orderbook_stats.json",
     "parameter_changes.json",
+    "order_lifecycle.json",
+    "process_quality.json",
     "applied_regime_config.json",
+    "stop_adjustment_analysis.json",
+    "execution_latency.json",
+    "sizing_analysis.json",
+    "param_outcome_correlation.json",
+    "portfolio_context.json",
+    "market_conditions.json",
 ]
 
 # Portfolio-level curated files (loaded from curated/{date}/portfolio/)
@@ -154,6 +162,29 @@ If `discoveries` is present in your data, these are patterns found by a separate
 discovery agent scanning raw JSONL data. Reference relevant discoveries when they
 corroborate or contradict your analysis. Flag if a discovery seems invalidated by
 recent data.
+
+## EXECUTION & SIZING CONTEXT
+If execution_latency data is present:
+- Identify execution pipeline bottleneck stages
+- Correlate latency with slippage — is latency causing worse fills?
+- Focus on systematic patterns, not individual outliers
+
+If sizing_analysis data is present:
+- Compare sizing model effectiveness across conditions
+- Check if risk utilization aligns with signal conviction (strong signals should have larger positions)
+
+If param_outcome_correlation data is present:
+- Reference specific parameter ranges correlated with better outcomes
+- Cross-reference with parameter_changes for recent drift into/away from optimal ranges
+- Require 20+ trades per bucket — do NOT draw conclusions from small samples
+
+If portfolio_context data is present:
+- Flag entries during high exposure or with many correlated positions
+- Check if crowded entries systematically underperform
+
+If market_conditions data is present:
+- Identify specific condition combinations (beyond regime label) that predict outcomes
+- Cross-reference with regime analysis for consistency
 
 ## SELF-ASSESSMENT
 If self_assessment data is present, READ IT CAREFULLY. This summarizes your known

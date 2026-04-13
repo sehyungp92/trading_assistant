@@ -268,7 +268,7 @@ class RetrospectiveBuilder:
                 continue
             try:
                 o = json.loads(line)
-                measured = o.get("measured_at", "") or o.get("timestamp", "")
+                measured = o.get("measurement_date", "") or o.get("measured_at", "") or o.get("timestamp", "")
                 if measured and week_start <= measured[:10] <= week_end:
                     outcomes.append(o)
             except json.JSONDecodeError:

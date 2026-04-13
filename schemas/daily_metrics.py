@@ -50,6 +50,7 @@ class BotDailySummary(BaseModel):
     error_count: int = 0
     uptime_pct: float = 100.0
     avg_process_quality: float = 100.0
+    calmar_rolling_30d: float = 0.0
     per_strategy_summary: dict[str, PerStrategySummary] = {}
 
     @computed_field  # type: ignore[prop-decorator]

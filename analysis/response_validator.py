@@ -22,6 +22,12 @@ class BlockedSuggestion:
 
 
 @dataclass
+class BlockedStructuralProposal:
+    proposal: StructuralProposal
+    reason: str
+
+
+@dataclass
 class BlockedPortfolioProposal:
     proposal: object  # PortfolioProposal
     reason: str
@@ -33,7 +39,7 @@ class ValidationResult:
     blocked_suggestions: list[BlockedSuggestion] = field(default_factory=list)
     approved_predictions: list[AgentPrediction] = field(default_factory=list)
     approved_structural_proposals: list[StructuralProposal] = field(default_factory=list)
-    blocked_structural_proposals: list[StructuralProposal] = field(default_factory=list)
+    blocked_structural_proposals: list[BlockedStructuralProposal] = field(default_factory=list)
     approved_portfolio_proposals: list = field(default_factory=list)
     blocked_portfolio_proposals: list[BlockedPortfolioProposal] = field(default_factory=list)
     validator_notes: str = ""
@@ -51,6 +57,22 @@ def _jaccard_similarity(a: str, b: str) -> float:
 
 
 class ResponseValidator:
+    # Recognized metric names for acceptance criteria validation (Gate 4).
+    # Aligned with _METRIC_FIELD_MAP in app.py and GroundTruthSnapshot fields.
+    _RECOGNIZED_METRICS: frozenset[str] = frozenset({
+        "sharpe", "sharpe_ratio", "sharpe_ratio_30d",
+        "win_rate",
+        "drawdown", "max_drawdown", "max_drawdown_pct",
+        "process_quality", "avg_process_quality",
+        "composite", "composite_score",
+        "pnl", "pnl_total", "net_pnl", "expected_r", "expected_total_r",
+        "calmar", "calmar_ratio", "calmar_ratio_30d",
+        "profit_factor",
+        "expectancy",
+        "trade_count",
+    })
+    _RECOGNIZED_DIRECTIONS: frozenset[str] = frozenset({"improve", "not_degrade"})
+
     # Portfolio guardrail constants
     _MAX_ALLOC_CHANGE_PCT = 0.15  # 15% max per family per cycle
     _MIN_ALLOC_FLOOR = 0.05  # 5% minimum per family
@@ -183,9 +205,9 @@ class ResponseValidator:
             )
 
         if blocked_proposals:
-            notes_lines.append(f"\n**{len(blocked_proposals)} structural proposal(s) blocked (missing acceptance criteria):**")
-            for p in blocked_proposals:
-                notes_lines.append(f"- \"{p.title}\"")
+            notes_lines.append(f"\n**{len(blocked_proposals)} structural proposal(s) blocked:**")
+            for bp in blocked_proposals:
+                notes_lines.append(f"- \"{bp.proposal.title}\" — {bp.reason}")
 
         if blocked_portfolio:
             notes_lines.append(f"\n**{len(blocked_portfolio)} portfolio proposal(s) blocked:**")
@@ -312,17 +334,24 @@ class ResponseValidator:
     def _validate_structural_proposals(
         self,
         proposals: list[StructuralProposal],
-    ) -> tuple[list[StructuralProposal], list[StructuralProposal]]:
-        """Validate structural proposals have acceptance criteria.
+    ) -> tuple[list[StructuralProposal], list[BlockedStructuralProposal]]:
+        """Validate structural proposals with parity gates matching parameter validation.
 
-        Also blocks proposals linked to hypotheses with non-positive effectiveness.
+        Gates applied (mirrors parameter suggestion validation):
+        1. Hypothesis track record — block if effectiveness <= 0 or retired
+        2. Category track record — block if win_rate < 0.3 with sufficient data
+        3. Simplicity criterion — block marginal track record suggestions
+        4. Acceptance criteria presence — must have at least one metric-bearing criterion
+        5. Low-confidence block — block structural proposals below 0.4 confidence
+        6. Calibration adjustment — adjust confidence based on empirical data
+
         Returns (approved, blocked).
         """
         approved: list[StructuralProposal] = []
-        blocked_list: list[StructuralProposal] = []
+        blocked_list: list[BlockedStructuralProposal] = []
 
         for proposal in proposals:
-            # Check hypothesis track record
+            # Gate 1: Hypothesis track record
             hyp_id = proposal.hypothesis_id
             if hyp_id and self._hypothesis_track_record:
                 hyp_data = self._hypothesis_track_record.get(hyp_id)
@@ -330,26 +359,189 @@ class ResponseValidator:
                     effectiveness = hyp_data.get("effectiveness", 0.0)
                     status = hyp_data.get("status", "")
                     if effectiveness <= 0 or status == "retired":
-                        blocked_list.append(proposal)
+                        reason = (
+                            f"Hypothesis {hyp_id} has "
+                            f"effectiveness={effectiveness:.3f}, status={status}"
+                        )
+                        blocked_list.append(BlockedStructuralProposal(
+                            proposal=proposal, reason=reason,
+                        ))
                         logger.info(
-                            "Blocked structural proposal '%s': hypothesis %s has "
-                            "effectiveness=%.3f, status=%s",
-                            proposal.title, hyp_id, effectiveness, status,
+                            "Blocked structural proposal '%s': %s",
+                            proposal.title, reason,
                         )
                         continue
 
-            # Must have at least one criterion with a 'metric' field
+            # Gate 2: Category track record (parity with parameter suggestions)
+            bot_id = getattr(proposal, "bot_id", "") or ""
+            category = self._infer_structural_category(proposal)
+            if bot_id and category:
+                score = self._scorecard.get_score(bot_id, category)
+                if score and score.sample_size >= 5 and score.win_rate < 0.3:
+                    reason = (
+                        f"Poor category track record: {category} "
+                        f"win_rate={score.win_rate:.0%} (n={score.sample_size})"
+                    )
+                    blocked_list.append(BlockedStructuralProposal(
+                        proposal=proposal, reason=reason,
+                    ))
+                    logger.info(
+                        "Blocked structural proposal '%s': %s",
+                        proposal.title, reason,
+                    )
+                    continue
+
+                # Gate 3: Simplicity criterion — marginal track record
+                if (
+                    score
+                    and score.sample_size >= 3
+                    and score.win_rate < 0.5
+                    and score.avg_pnl_delta < 0.001
+                ):
+                    reason = (
+                        f"Marginal track record in {category} "
+                        f"(win_rate={score.win_rate:.0%}, avg_pnl={score.avg_pnl_delta:.4f})"
+                    )
+                    blocked_list.append(BlockedStructuralProposal(
+                        proposal=proposal, reason=reason,
+                    ))
+                    logger.info(
+                        "Blocked structural proposal '%s': %s",
+                        proposal.title, reason,
+                    )
+                    continue
+
+            # Gate 4: Must have at least one well-formed criterion with recognized
+            # metric name and valid direction. Rejects malformed criteria like
+            # {"metric": "foo"} that would pass a presence-only check.
             criteria = proposal.acceptance_criteria
-            has_valid_criteria = any(
-                isinstance(c, dict) and c.get("metric")
-                for c in criteria
-            )
-            if not has_valid_criteria:
-                blocked_list.append(proposal)
-            else:
-                approved.append(proposal)
+            well_formed_count = 0
+            gate4_issues: list[str] = []
+            for c in criteria:
+                if not isinstance(c, dict):
+                    continue
+                metric = c.get("metric", "")
+                if not metric:
+                    continue
+                if metric not in self._RECOGNIZED_METRICS:
+                    gate4_issues.append(f"unrecognized metric '{metric}'")
+                    continue
+                direction = c.get("direction", "")
+                if direction and direction not in self._RECOGNIZED_DIRECTIONS:
+                    gate4_issues.append(
+                        f"invalid direction '{direction}' for {metric}"
+                    )
+                    continue
+                well_formed_count += 1
+            if well_formed_count == 0:
+                detail = "; ".join(gate4_issues) if gate4_issues else "no metric field"
+                blocked_list.append(BlockedStructuralProposal(
+                    proposal=proposal,
+                    reason=f"No valid acceptance criteria ({detail})",
+                ))
+                continue
+
+            # Gate 5: Low-confidence structural proposals blocked
+            confidence = getattr(proposal, "confidence", 0.5) or 0.5
+            if confidence < 0.4:
+                reason = f"Low confidence: {confidence:.2f} < 0.4"
+                blocked_list.append(BlockedStructuralProposal(
+                    proposal=proposal, reason=reason,
+                ))
+                logger.info(
+                    "Blocked structural proposal '%s': %s",
+                    proposal.title, reason,
+                )
+                continue
+
+            # Gate 6: Calibration adjustment on confidence
+            if bot_id and category:
+                adjusted_confidence = self._calibrate_structural_confidence(
+                    confidence, bot_id, category,
+                )
+                if hasattr(proposal, "model_copy"):
+                    proposal = proposal.model_copy(
+                        update={"confidence": adjusted_confidence},
+                    )
+
+            approved.append(proposal)
 
         return approved, blocked_list
+
+    def _infer_structural_category(self, proposal: StructuralProposal) -> str:
+        """Infer suggestion category from structural proposal metadata.
+
+        Checks acceptance_criteria metrics and proposal title/description
+        to map to the category scorecard taxonomy.
+        """
+        # Check acceptance criteria for metric hints
+        for c in proposal.acceptance_criteria:
+            if isinstance(c, dict):
+                metric = c.get("metric", "")
+                if metric in ("pnl", "expected_r", "net_pnl"):
+                    return "signal"
+                if metric in ("calmar", "sharpe", "drawdown", "max_drawdown"):
+                    return "stop_loss"
+                if metric in ("win_rate", "profit_factor"):
+                    return "signal"
+                if metric in ("process_quality",):
+                    return "structural"
+
+        # Fall back to title keyword matching
+        title_lower = (getattr(proposal, "title", "") or "").lower()
+        if any(kw in title_lower for kw in ("stop", "drawdown", "risk")):
+            return "stop_loss"
+        if any(kw in title_lower for kw in ("filter", "threshold")):
+            return "filter_threshold"
+        if any(kw in title_lower for kw in ("regime", "gate")):
+            return "regime_gate"
+        if any(kw in title_lower for kw in ("exit", "trailing", "take profit")):
+            return "exit_timing"
+        if any(kw in title_lower for kw in ("position", "sizing")):
+            return "position_sizing"
+
+        return "structural"
+
+    def _calibrate_structural_confidence(
+        self,
+        confidence: float,
+        bot_id: str,
+        category: str,
+    ) -> float:
+        """Apply calibration adjustments to structural proposal confidence.
+
+        Uses the same recalibration and empirical bucket logic as parameter
+        suggestions for parity.
+        """
+        # Causal recalibration if available
+        recalib_conf = self._recalib_by_key.get((bot_id, category))
+        if recalib_conf is not None:
+            confidence = confidence * 0.6 + recalib_conf * 0.4
+
+        # Empirical bucket adjustment
+        bucket_adjusted = self._bucket_adjust_confidence(confidence)
+        if bucket_adjusted is not None:
+            confidence = bucket_adjusted
+        else:
+            rolling_acc = self._forecast_meta.get("rolling_accuracy_4w", 0)
+            if rolling_acc and rolling_acc < 0.5:
+                confidence *= rolling_acc
+
+        # Category factor
+        score = self._scorecard.get_score(bot_id, category)
+        if score and score.confidence_multiplier < 1.0:
+            confidence *= score.confidence_multiplier
+
+        # Macro regime adjustment
+        if self._current_macro_regime:
+            from skills.suggestion_scorer import SuggestionScorer
+            confidence = SuggestionScorer.apply_regime_confidence_adjustment(
+                confidence=confidence,
+                category=category,
+                current_macro_regime=self._current_macro_regime,
+            )
+
+        return max(0.0, min(1.0, round(confidence, 3)))
 
     def _bucket_adjust_confidence(self, confidence: float) -> float | None:
         """Adjust confidence using empirical calibration buckets.

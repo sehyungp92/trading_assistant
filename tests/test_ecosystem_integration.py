@@ -201,7 +201,7 @@ class TestExitSimulationIntegration:
         # Exit efficiency detects premature exit
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         eff = builder.exit_efficiency(trades)
-        assert eff.premature_exit_pct > 0
+        assert eff["premature_exit_pct"] > 0
 
         # Exit simulator confirms time-based would be better
         sim = ExitStrategySimulator()

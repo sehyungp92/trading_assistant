@@ -8,7 +8,8 @@ Output directory: data/curated/<date>/<bot_id>/
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+import statistics
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from schemas.events import TradeEvent, MissedOpportunityEvent
@@ -32,6 +33,79 @@ class DailyMetricsBuilder:
         self.date = date
         self.bot_id = bot_id
         self.bot_timezone = bot_timezone
+
+    @staticmethod
+    def _unwrap_event_payload(event: dict) -> dict | None:
+        payload = event.get("payload", event)
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _safe_float(value: object) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _first_float(self, payload: dict, *keys: str) -> float | None:
+        for key in keys:
+            value = self._safe_float(payload.get(key))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _string_list(value: object) -> list[str]:
+        if value in (None, ""):
+            return []
+        if isinstance(value, (str, int, float)):
+            return [str(value)]
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        return [str(item) for item in value if isinstance(item, (str, int, float))]
+
+    @staticmethod
+    def _event_timestamp(event: dict, payload: dict) -> str:
+        metadata = payload.get("event_metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        for candidate in (
+            payload.get("timestamp"),
+            payload.get("exchange_timestamp"),
+            metadata.get("exchange_timestamp"),
+            metadata.get("local_timestamp"),
+            event.get("timestamp"),
+            event.get("exchange_timestamp"),
+        ):
+            if candidate not in (None, ""):
+                return str(candidate)
+        return ""
+
+    @staticmethod
+    def _normalize_order_status(value: object) -> str:
+        raw = str(value or "UNKNOWN").strip()
+        if not raw:
+            return "UNKNOWN"
+        normalized = raw.replace("-", "_").replace(" ", "_").upper()
+        status_map = {
+            "FILL": "FILLED",
+            "FILLED": "FILLED",
+            "PARTIAL": "PARTIAL_FILL",
+            "PARTIAL_FILL": "PARTIAL_FILL",
+            "PARTIAL_FILLED": "PARTIAL_FILL",
+            "PARTIALLY_FILLED": "PARTIAL_FILL",
+            "CANCELED": "CANCELLED",
+            "CANCELLED": "CANCELLED",
+            "API_CANCELLED": "CANCELLED",
+            "APICANCELLED": "CANCELLED",
+        }
+        return status_map.get(normalized, normalized)
 
     def build_summary(
         self,
@@ -111,6 +185,9 @@ class DailyMetricsBuilder:
         )
         summary.sortino_rolling_30d = float(
             daily_snapshot.get("sortino_rolling_30d", summary.sortino_rolling_30d) or 0.0
+        )
+        summary.calmar_rolling_30d = float(
+            daily_snapshot.get("calmar_rolling_30d", summary.calmar_rolling_30d) or 0.0
         )
         summary.exposure_pct = float(daily_snapshot.get("exposure_pct", summary.exposure_pct) or 0.0)
         summary.error_count = int(daily_snapshot.get("error_count", summary.error_count) or 0)
@@ -300,7 +377,7 @@ class DailyMetricsBuilder:
             factors=factors,
         )
 
-    def exit_efficiency(self, trades: list[TradeEvent]) -> ExitEfficiencyStats:
+    def exit_efficiency(self, trades: list[TradeEvent]) -> dict:
         """Measure how well exits capture available price moves.
 
         For each trade with post-exit price data, compute:
@@ -312,10 +389,24 @@ class DailyMetricsBuilder:
         premature_count = 0
         reason_effs: dict[str, list[float]] = defaultdict(list)
         regime_effs: dict[str, list[float]] = defaultdict(list)
+        move_1h_pcts: list[float] = []
+        move_4h_pcts: list[float] = []
+        premature_details: list[tuple[float, dict]] = []  # (continuation_amt, info)
 
         for t in trades:
             if t.post_exit_1h_price is None and t.post_exit_4h_price is None:
                 continue
+
+            # Collect move percentages (prefer direct field, fall back to price computation)
+            if t.post_exit_1h_move_pct is not None:
+                move_1h_pcts.append(t.post_exit_1h_move_pct)
+            elif t.post_exit_1h_price is not None and t.exit_price:
+                move_1h_pcts.append((t.post_exit_1h_price - t.exit_price) / t.exit_price * 100)
+
+            if t.post_exit_4h_move_pct is not None:
+                move_4h_pcts.append(t.post_exit_4h_move_pct)
+            elif t.post_exit_4h_price is not None and t.exit_price:
+                move_4h_pcts.append((t.post_exit_4h_price - t.exit_price) / t.exit_price * 100)
 
             # Compute continuation amounts
             cont_1h = (t.post_exit_1h_price - t.exit_price) if t.post_exit_1h_price is not None else None
@@ -335,6 +426,13 @@ class DailyMetricsBuilder:
             )
             if best_continuation > 0:
                 premature_count += 1
+                move_pct = (best_continuation / t.exit_price * 100) if t.exit_price else 0.0
+                premature_details.append((best_continuation, {
+                    "trade_id": t.trade_id,
+                    "pair": t.pair,
+                    "exit_reason": t.exit_reason or "unknown",
+                    "move_pct": round(move_pct, 4),
+                }))
 
             # Compute exit efficiency = actual_capture / max_available_move
             # actual_capture is the trade's PnL (unsigned magnitude)
@@ -365,7 +463,7 @@ class DailyMetricsBuilder:
             r: sum(vals) / len(vals) for r, vals in regime_effs.items()
         }
 
-        return ExitEfficiencyStats(
+        stats = ExitEfficiencyStats(
             bot_id=self.bot_id,
             date=self.date,
             avg_efficiency=avg_eff,
@@ -374,6 +472,20 @@ class DailyMetricsBuilder:
             by_regime=by_regime,
             total_trades_with_data=total_with_data,
         )
+        result = stats.model_dump(mode="json")
+
+        # Enhanced output: post-exit move percentages
+        if move_1h_pcts:
+            result["avg_1h_move_pct"] = round(sum(move_1h_pcts) / len(move_1h_pcts), 4)
+        if move_4h_pcts:
+            result["avg_4h_move_pct"] = round(sum(move_4h_pcts) / len(move_4h_pcts), 4)
+
+        # Worst premature exits (top 5 by continuation amount)
+        premature_details.sort(key=lambda x: x[0], reverse=True)
+        if premature_details:
+            result["worst_premature_exits"] = [d for _, d in premature_details[:5]]
+
+        return result
 
     def build_per_strategy_from_snapshot(
         self, daily_snapshot: dict,
@@ -703,12 +815,9 @@ class DailyMetricsBuilder:
         by_strategy: dict[str, list[dict]] = {}
 
         for evt in param_events:
-            payload = evt.get("payload", evt)
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except Exception:
-                    continue
+            payload = self._unwrap_event_payload(evt)
+            if payload is None:
+                continue
 
             change = {
                 "strategy_id": payload.get("strategy_id", ""),
@@ -716,7 +825,7 @@ class DailyMetricsBuilder:
                 "old_value": payload.get("old_value"),
                 "new_value": payload.get("new_value"),
                 "reason": payload.get("reason", ""),
-                "timestamp": payload.get("timestamp", evt.get("timestamp", "")),
+                "timestamp": self._event_timestamp(evt, payload),
             }
             changes.append(change)
             sid = change["strategy_id"] or "unknown"
@@ -733,6 +842,589 @@ class DailyMetricsBuilder:
             },
         }
 
+    def build_order_lifecycle_summary(self, order_events: list[dict]) -> dict:
+        """Summarize order lifecycle events for daily execution review."""
+        status_counts: Counter[str] = Counter()
+        reject_reasons: Counter[str] = Counter()
+        rejects: list[dict] = []
+        cancels: list[dict] = []
+        partial_fills: list[dict] = []
+        slippage_samples: list[float] = []
+        latency_samples: list[float] = []
+        order_ids: set[str] = set()
+        processed_events = 0
+        by_strategy: dict[str, dict] = {}
+
+        for event in order_events:
+            payload = self._unwrap_event_payload(event)
+            if payload is None:
+                continue
+
+            processed_events += 1
+            status = self._normalize_order_status(payload.get("status"))
+            status_counts[status] += 1
+
+            order_id = str(
+                payload.get("order_id")
+                or payload.get("oms_order_id")
+                or payload.get("client_order_id")
+                or ""
+            )
+            if order_id:
+                order_ids.add(order_id)
+
+            strategy = str(
+                payload.get("strategy_type")
+                or payload.get("strategy_id")
+                or payload.get("strategy")
+                or "unknown"
+            )
+            bucket = by_strategy.setdefault(strategy, {
+                "event_count": 0,
+                "status_counts": {},
+                "reject_count": 0,
+                "cancel_count": 0,
+                "partial_fill_count": 0,
+                "fill_count": 0,
+            })
+            bucket["event_count"] += 1
+            bucket["status_counts"][status] = bucket["status_counts"].get(status, 0) + 1
+
+            requested_qty = self._first_float(payload, "requested_qty", "qty", "quantity")
+            filled_qty = self._first_float(payload, "filled_qty", "fill_qty", "qty_filled", "executed_qty")
+            if filled_qty is None and status in {"FILLED", "PARTIAL_FILL"}:
+                filled_qty = self._first_float(payload, "qty", "quantity")
+
+            requested_price = self._first_float(payload, "requested_price", "limit_price")
+            fill_price = self._first_float(payload, "fill_price", "avg_fill_price")
+            if fill_price is None and status in {"FILLED", "PARTIAL_FILL"}:
+                fill_price = self._first_float(payload, "price")
+
+            slippage_bps = self._first_float(payload, "slippage_bps")
+            if slippage_bps is None and requested_price not in (None, 0.0) and fill_price is not None:
+                slippage_bps = abs(fill_price - requested_price) / requested_price * 10_000
+            if status in {"FILLED", "PARTIAL_FILL"} and slippage_bps is not None:
+                slippage_samples.append(slippage_bps)
+
+            latency_ms = self._first_float(payload, "latency_ms")
+            if latency_ms is not None:
+                latency_samples.append(latency_ms)
+
+            event_timestamp = self._event_timestamp(event, payload)
+            evidence = {
+                "order_id": order_id,
+                "pair": str(payload.get("pair") or payload.get("symbol") or payload.get("contract") or ""),
+                "side": str(payload.get("side") or ""),
+                "order_type": str(payload.get("order_type") or ""),
+                "status": status,
+                "requested_qty": requested_qty or 0.0,
+                "filled_qty": filled_qty or 0.0,
+                "requested_price": requested_price,
+                "fill_price": fill_price,
+                "slippage_bps": round(slippage_bps, 3) if slippage_bps is not None else None,
+                "latency_ms": round(latency_ms, 3) if latency_ms is not None else None,
+                "timestamp": event_timestamp,
+                "related_trade_id": str(payload.get("related_trade_id") or payload.get("trade_id") or ""),
+                "strategy_type": strategy,
+            }
+
+            if status == "REJECTED":
+                reason = str(payload.get("reject_reason") or payload.get("rejection_reason") or "").strip()
+                if reason:
+                    reject_reasons[reason] += 1
+                rejects.append({**evidence, "reject_reason": reason})
+                bucket["reject_count"] += 1
+            elif status == "CANCELLED":
+                cancels.append(evidence)
+                bucket["cancel_count"] += 1
+            elif status == "PARTIAL_FILL":
+                partial_fills.append(evidence)
+                bucket["partial_fill_count"] += 1
+            elif status == "FILLED":
+                bucket["fill_count"] += 1
+
+        avg_fill_slippage_bps = statistics.mean(slippage_samples) if slippage_samples else 0.0
+        avg_latency_ms = statistics.mean(latency_samples) if latency_samples else 0.0
+        normalized_by_strategy = {
+            strategy: {
+                **bucket,
+                "status_counts": dict(sorted(bucket["status_counts"].items())),
+            }
+            for strategy, bucket in sorted(by_strategy.items())
+        }
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "total_events": processed_events,
+            "distinct_orders": len(order_ids),
+            "status_counts": dict(sorted(status_counts.items())),
+            "reject_count": len(rejects),
+            "cancel_count": len(cancels),
+            "partial_fill_count": len(partial_fills),
+            "fill_count": status_counts.get("FILLED", 0),
+            "avg_fill_slippage_bps": round(avg_fill_slippage_bps, 3),
+            "max_fill_slippage_bps": round(max(slippage_samples), 3) if slippage_samples else 0.0,
+            "avg_latency_ms": round(avg_latency_ms, 3),
+            "top_reject_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(
+                    reject_reasons.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:5]
+            ],
+            "by_strategy": normalized_by_strategy,
+            "rejects": rejects,
+            "cancels": cancels,
+            "partial_fills": partial_fills,
+        }
+
+    def build_process_quality_summary(self, process_quality_events: list[dict]) -> dict:
+        """Summarize standalone process-quality score records."""
+        scores: list[float] = []
+        classification_counts: Counter[str] = Counter()
+        root_cause_counts: Counter[str] = Counter()
+        worst_scores: list[dict] = []
+
+        for event in process_quality_events:
+            payload = self._unwrap_event_payload(event)
+            if payload is None:
+                continue
+
+            score = self._safe_float(payload.get("process_quality_score"))
+            if score is None:
+                score = self._safe_float(payload.get("score"))
+            if score is None:
+                continue
+
+            scores.append(score)
+            classification = str(payload.get("classification") or "unknown").strip().lower() or "unknown"
+            classification_counts[classification] += 1
+            root_causes = list(dict.fromkeys(self._string_list(payload.get("root_causes"))))
+            root_cause_counts.update(root_causes)
+            worst_scores.append({
+                "trade_id": str(payload.get("trade_id", "")),
+                "process_quality_score": round(score, 3),
+                "classification": classification,
+                "root_causes": root_causes,
+                "negative_factors": list(dict.fromkeys(self._string_list(payload.get("negative_factors")))),
+                "evidence_refs": list(dict.fromkeys(self._string_list(payload.get("evidence_refs")))),
+            })
+
+        worst_scores.sort(key=lambda item: (item["process_quality_score"], item["trade_id"]))
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "total_scores": len(scores),
+            "avg_score": round(statistics.mean(scores), 3) if scores else 0.0,
+            "min_score": round(min(scores), 3) if scores else 0.0,
+            "max_score": round(max(scores), 3) if scores else 0.0,
+            "low_score_count": sum(1 for score in scores if score < 60),
+            "classification_counts": dict(sorted(classification_counts.items())),
+            "root_cause_counts": dict(sorted(root_cause_counts.items())),
+            "worst_scores": worst_scores[:5],
+        }
+
+    def build_stop_adjustment_analysis(self, events: list[dict]) -> dict:
+        """Aggregate stop adjustment events by type and trigger.
+
+        Returns a summary dict with counts and avg/max tightening per
+        adjustment_type, plus trigger frequency counts.
+        """
+        by_type: dict[str, list[float]] = defaultdict(list)
+        trigger_counts: dict[str, int] = Counter()
+        all_distances: list[float] = []
+
+        for evt in events:
+            payload = self._unwrap_event_payload(evt)
+            if payload is None:
+                continue
+            old_stop = self._safe_float(payload.get("old_stop"))
+            new_stop = self._safe_float(payload.get("new_stop"))
+            adj_type = payload.get("adjustment_type", "unknown")
+            trigger = payload.get("trigger", "unknown")
+
+            if old_stop is not None and new_stop is not None and old_stop != 0:
+                distance = abs(new_stop - old_stop) / abs(old_stop)
+            elif old_stop is not None and new_stop is not None:
+                distance = abs(new_stop - old_stop)
+            else:
+                distance = 0.0
+
+            by_type[adj_type].append(distance)
+            trigger_counts[trigger] += 1
+            all_distances.append(distance)
+
+        by_adjustment_type = {}
+        for adj_type, distances in sorted(by_type.items()):
+            by_adjustment_type[adj_type] = {
+                "count": len(distances),
+                "avg_tightening": round(statistics.mean(distances), 6) if distances else 0.0,
+                "max_tightening": round(max(distances), 6) if distances else 0.0,
+            }
+
+        return {
+            "bot_id": self.bot_id,
+            "date": self.date,
+            "total_adjustments": len(all_distances),
+            "avg_tightening_distance": round(statistics.mean(all_distances), 6) if all_distances else 0.0,
+            "by_adjustment_type": by_adjustment_type,
+            "by_trigger": dict(sorted(trigger_counts.items(), key=lambda x: x[1], reverse=True)),
+        }
+
+    def build_execution_latency_analysis(self, trades: list[TradeEvent]) -> dict:
+        """Analyze execution pipeline timing from enriched trade events.
+
+        Computes per-stage latency stats and identifies bottlenecks.
+        """
+        # Normalize swing bot key names to canonical names
+        _KEY_MAP = {
+            "signal_generated_at": "signal_detected_at",
+            "oms_received_at": "intent_created_at",
+            "fill_confirmed_at": "fill_received_at",
+        }
+        _STAGES = [
+            ("signal_detected_at", "intent_created_at", "signal_to_intent"),
+            ("intent_created_at", "risk_checked_at", "intent_to_risk_check"),
+            ("risk_checked_at", "order_submitted_at", "risk_check_to_order"),
+            ("order_submitted_at", "fill_received_at", "order_to_fill"),
+        ]
+
+        stage_durations: dict[str, list[float]] = defaultdict(list)
+        total_durations: list[float] = []
+        regime_totals: dict[str, list[float]] = defaultdict(list)
+        latency_slippage_pairs: list[tuple[float, float]] = []
+
+        trades_with_data = 0
+        for t in trades:
+            if not t.execution_timestamps:
+                continue
+            ts = {_KEY_MAP.get(k, k): v for k, v in t.execution_timestamps.items()}
+            trades_with_data += 1
+
+            total_ms = 0.0
+            for start_key, end_key, stage_name in _STAGES:
+                start_val = ts.get(start_key)
+                end_val = ts.get(end_key)
+                if start_val is not None and end_val is not None:
+                    try:
+                        dur = float(end_val) - float(start_val)
+                        stage_durations[stage_name].append(dur)
+                        total_ms += dur
+                    except (TypeError, ValueError):
+                        pass
+
+            if total_ms > 0:
+                total_durations.append(total_ms)
+                regime = t.market_regime or "unknown"
+                regime_totals[regime].append(total_ms)
+                if t.entry_slippage_bps:
+                    latency_slippage_pairs.append((total_ms, t.entry_slippage_bps))
+
+        if trades_with_data == 0:
+            return {"coverage": 0, "total_with_data": 0}
+
+        stages_summary: dict[str, dict] = {}
+        bottleneck_stage = ""
+        bottleneck_p95 = 0.0
+        for stage_name in ["signal_to_intent", "intent_to_risk_check", "risk_check_to_order", "order_to_fill"]:
+            vals = stage_durations.get(stage_name, [])
+            if not vals:
+                continue
+            sorted_vals = sorted(vals)
+            p95_idx = max(0, int(len(sorted_vals) * 0.95) - 1)
+            p95 = sorted_vals[p95_idx]
+            stages_summary[stage_name] = {
+                "mean_ms": round(statistics.mean(vals), 2),
+                "median_ms": round(statistics.median(vals), 2),
+                "p95_ms": round(p95, 2),
+            }
+            if p95 > bottleneck_p95:
+                bottleneck_p95 = p95
+                bottleneck_stage = stage_name
+
+        by_regime = {}
+        for regime, vals in regime_totals.items():
+            by_regime[regime] = {
+                "trade_count": len(vals),
+                "mean_total_ms": round(statistics.mean(vals), 2),
+            }
+
+        # Pearson correlation between latency and slippage
+        latency_slippage_correlation: float | None = None
+        if len(latency_slippage_pairs) >= 5:
+            lats = [p[0] for p in latency_slippage_pairs]
+            slips = [p[1] for p in latency_slippage_pairs]
+            try:
+                latency_slippage_correlation = round(self._pearson(lats, slips), 4)
+            except Exception:
+                pass
+
+        return {
+            "coverage": round(trades_with_data / max(len(trades), 1), 4),
+            "total_with_data": trades_with_data,
+            "stages": stages_summary,
+            "bottleneck_stage": bottleneck_stage,
+            "by_regime": by_regime,
+            "latency_slippage_correlation": latency_slippage_correlation,
+        }
+
+    def build_sizing_analysis(self, trades: list[TradeEvent]) -> dict:
+        """Analyze position sizing methodology effectiveness."""
+        model_stats: dict[str, dict] = defaultdict(lambda: {
+            "trades": [], "pnl_vals": [], "risk_pcts": [], "risk_effs": [],
+        })
+
+        trades_with_data = 0
+        for t in trades:
+            if not t.sizing_inputs:
+                continue
+            trades_with_data += 1
+            model = t.sizing_inputs.get("sizing_model", "unknown")
+            model_stats[model]["trades"].append(t)
+            model_stats[model]["pnl_vals"].append(t.pnl)
+            risk_pct = t.sizing_inputs.get("target_risk_pct")
+            if risk_pct is not None:
+                model_stats[model]["risk_pcts"].append(float(risk_pct))
+            unit_risk = t.sizing_inputs.get("unit_risk_usd", 0)
+            if unit_risk and float(unit_risk) != 0:
+                model_stats[model]["risk_effs"].append(t.pnl / float(unit_risk))
+
+        if trades_with_data == 0:
+            return {"coverage": 0, "total_with_data": 0}
+
+        by_model: dict[str, dict] = {}
+        all_risk_effs: list[float] = []
+        for model, data in sorted(model_stats.items()):
+            tc = len(data["trades"])
+            wins = sum(1 for t in data["trades"] if t.pnl > 0)
+            by_model[model] = {
+                "trade_count": tc,
+                "win_rate": round(wins / tc, 4) if tc else 0.0,
+                "avg_pnl": round(statistics.mean(data["pnl_vals"]), 4) if data["pnl_vals"] else 0.0,
+                "avg_target_risk_pct": round(statistics.mean(data["risk_pcts"]), 4) if data["risk_pcts"] else None,
+                "avg_risk_efficiency": round(statistics.mean(data["risk_effs"]), 4) if data["risk_effs"] else None,
+            }
+            all_risk_effs.extend(data["risk_effs"])
+
+        return {
+            "coverage": round(trades_with_data / max(len(trades), 1), 4),
+            "total_with_data": trades_with_data,
+            "by_sizing_model": by_model,
+            "overall_risk_efficiency": round(statistics.mean(all_risk_effs), 4) if all_risk_effs else None,
+        }
+
+    def build_param_outcome_correlation(self, trades: list[TradeEvent]) -> dict:
+        """Identify strategy parameters most correlated with trade outcomes."""
+        trades_with_data = 0
+        all_params: dict[str, list[tuple[float, float]]] = defaultdict(list)  # param_name -> [(value, pnl)]
+
+        for t in trades:
+            if not t.strategy_params_at_entry:
+                continue
+            trades_with_data += 1
+            for key, val in t.strategy_params_at_entry.items():
+                try:
+                    all_params[key].append((float(val), t.pnl))
+                except (TypeError, ValueError):
+                    pass  # skip non-numeric params
+
+        if trades_with_data == 0:
+            return {"coverage": 0, "total_with_data": 0, "param_count": 0}
+
+        # Discard params with single unique value (no variation)
+        varied_params = {
+            k: v for k, v in all_params.items()
+            if len(set(p[0] for p in v)) > 1 and len(v) >= 3
+        }
+
+        correlations: list[dict] = []
+        for param_name, pairs in varied_params.items():
+            sorted_pairs = sorted(pairs, key=lambda x: x[0])
+            n = len(sorted_pairs)
+            third = max(1, n // 3)
+            buckets = [
+                sorted_pairs[:third],
+                sorted_pairs[third:2 * third],
+                sorted_pairs[2 * third:],
+            ]
+            bucket_stats = []
+            for i, bucket in enumerate(buckets):
+                if not bucket:
+                    continue
+                vals = [p[0] for p in bucket]
+                pnls = [p[1] for p in bucket]
+                wins = sum(1 for p in pnls if p > 0)
+                bucket_stats.append({
+                    "range": f"{min(vals):.4g}-{max(vals):.4g}",
+                    "trade_count": len(bucket),
+                    "win_rate": round(wins / len(bucket), 4),
+                    "avg_pnl": round(statistics.mean(pnls), 4),
+                })
+
+            if len(bucket_stats) >= 2:
+                win_rates = [b["win_rate"] for b in bucket_stats]
+                spread = max(win_rates) - min(win_rates)
+                correlations.append({
+                    "param_name": param_name,
+                    "buckets": bucket_stats,
+                    "spread": round(spread, 4),
+                })
+
+        correlations.sort(key=lambda x: x["spread"], reverse=True)
+
+        return {
+            "coverage": round(trades_with_data / max(len(trades), 1), 4),
+            "total_with_data": trades_with_data,
+            "param_count": len(varied_params),
+            "top_correlations": correlations[:10],
+        }
+
+    def build_portfolio_context_analysis(self, trades: list[TradeEvent]) -> dict:
+        """Analyze portfolio state at entry — exposure levels and crowding effects."""
+        trades_with_data = 0
+        exposure_pnl: list[tuple[float, float, bool]] = []  # (exposure, pnl, is_crowded)
+
+        for t in trades:
+            if not t.portfolio_state_at_entry:
+                continue
+            trades_with_data += 1
+            exposure = float(t.portfolio_state_at_entry.get("exposure", 0))
+            correlated = t.portfolio_state_at_entry.get("correlated_positions", [])
+            is_crowded = len(correlated) > 2 if isinstance(correlated, list) else False
+            exposure_pnl.append((exposure, t.pnl, is_crowded))
+
+        if trades_with_data == 0:
+            return {"coverage": 0, "total_with_data": 0}
+
+        # Bucket by exposure tertile
+        sorted_by_exp = sorted(exposure_pnl, key=lambda x: x[0])
+        n = len(sorted_by_exp)
+        third = max(1, n // 3)
+        level_names = ["low", "medium", "high"]
+        bucket_slices = [sorted_by_exp[:third], sorted_by_exp[third:2*third], sorted_by_exp[2*third:]]
+
+        by_exposure_level: dict[str, dict] = {}
+        for name, bucket in zip(level_names, bucket_slices):
+            if not bucket:
+                continue
+            pnls = [b[1] for b in bucket]
+            wins = sum(1 for p in pnls if p > 0)
+            by_exposure_level[name] = {
+                "trade_count": len(bucket),
+                "win_rate": round(wins / len(bucket), 4),
+                "avg_pnl": round(statistics.mean(pnls), 4),
+            }
+
+        crowded = [e for e in exposure_pnl if e[2]]
+        uncrowded = [e for e in exposure_pnl if not e[2]]
+        crowded_wr = round(sum(1 for c in crowded if c[1] > 0) / len(crowded), 4) if crowded else None
+        uncrowded_wr = round(sum(1 for c in uncrowded if c[1] > 0) / len(uncrowded), 4) if uncrowded else None
+
+        return {
+            "coverage": round(trades_with_data / max(len(trades), 1), 4),
+            "total_with_data": trades_with_data,
+            "by_exposure_level": by_exposure_level,
+            "crowding_count": len(crowded),
+            "crowded_win_rate": crowded_wr,
+            "uncrowded_win_rate": uncrowded_wr,
+        }
+
+    def build_market_condition_summary(self, trades: list[TradeEvent]) -> dict:
+        """Summarize market conditions at entry, grouped by regime."""
+        trades_with_data = 0
+        regime_conditions: dict[str, list[dict]] = defaultdict(list)
+        all_condition_pnl: dict[str, list[tuple[float, float]]] = defaultdict(list)
+
+        for t in trades:
+            conditions = dict(t.market_conditions_at_entry) if t.market_conditions_at_entry else {}
+            # Supplement with inline fields if not already in the dict
+            for field, key in [
+                (t.atr_at_entry, "atr_at_entry"),
+                (t.volume_24h, "volume_24h"),
+                (t.spread_at_entry, "spread_at_entry"),
+                (t.funding_rate, "funding_rate"),
+            ]:
+                if key not in conditions and field:
+                    conditions[key] = field
+
+            if not conditions:
+                continue
+            trades_with_data += 1
+            regime = t.market_regime or "unknown"
+            regime_conditions[regime].append(conditions)
+
+            for key, val in conditions.items():
+                try:
+                    all_condition_pnl[key].append((float(val), t.pnl))
+                except (TypeError, ValueError):
+                    pass
+
+        if trades_with_data == 0:
+            return {"coverage": 0, "total_with_data": 0}
+
+        by_regime: dict[str, dict] = {}
+        for regime, cond_list in sorted(regime_conditions.items()):
+            # Average all numeric keys across the regime
+            all_keys: set[str] = set()
+            for c in cond_list:
+                all_keys.update(c.keys())
+            avg_conditions: dict[str, float] = {}
+            for key in sorted(all_keys):
+                vals = []
+                for c in cond_list:
+                    try:
+                        vals.append(float(c[key]))
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if vals:
+                    avg_conditions[key] = round(statistics.mean(vals), 6)
+            by_regime[regime] = {
+                "trade_count": len(cond_list),
+                "avg_conditions": avg_conditions,
+            }
+
+        # Find conditions most correlated with PnL
+        condition_pnl_correlations: list[dict] = []
+        for key, pairs in all_condition_pnl.items():
+            if len(pairs) < 5:
+                continue
+            vals = [p[0] for p in pairs]
+            pnls = [p[1] for p in pairs]
+            try:
+                corr = self._pearson(vals, pnls)
+                condition_pnl_correlations.append({
+                    "key": key,
+                    "correlation": round(corr, 4),
+                    "sample_size": len(pairs),
+                })
+            except Exception:
+                pass
+
+        condition_pnl_correlations.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+
+        return {
+            "coverage": round(trades_with_data / max(len(trades), 1), 4),
+            "total_with_data": trades_with_data,
+            "by_regime": by_regime,
+            "condition_pnl_correlations": condition_pnl_correlations[:5],
+        }
+
+    @staticmethod
+    def _pearson(x: list[float], y: list[float]) -> float:
+        """Compute Pearson correlation coefficient."""
+        n = len(x)
+        if n < 2:
+            return 0.0
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+        cov = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+        std_x = (sum((xi - mean_x) ** 2 for xi in x)) ** 0.5
+        std_y = (sum((yi - mean_y) ** 2 for yi in y)) ** 0.5
+        if std_x == 0 or std_y == 0:
+            return 0.0
+        return cov / (std_x * std_y)
+
     def write_curated(
         self,
         trades: list[TradeEvent],
@@ -745,10 +1437,45 @@ class DailyMetricsBuilder:
         indicator_snapshot_events: list[dict] | None = None,
         orderbook_context_events: list[dict] | None = None,
         parameter_change_events: list[dict] | None = None,
+        order_events: list[dict] | None = None,
+        process_quality_events: list[dict] | None = None,
+        stop_adjustment_events: list[dict] | None = None,
+        post_exit_events: list[dict] | None = None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
         output_dir = base_dir / self.date / self.bot_id
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Merge standalone post_exit events into trades BEFORE any computation
+        # so exit_efficiency, trades.jsonl, etc. all benefit from backfilled data.
+        if post_exit_events:
+            trade_map = {t.trade_id: t for t in trades}
+            for evt in post_exit_events:
+                payload = self._unwrap_event_payload(evt)
+                if not payload:
+                    continue
+                tid = payload.get("trade_id", "")
+                trade = trade_map.get(tid)
+                if not trade:
+                    continue
+                if trade.post_exit_1h_price is None:
+                    val = self._safe_float(payload.get("post_exit_1h_price"))
+                    if val is not None:
+                        trade.post_exit_1h_price = val
+                if trade.post_exit_4h_price is None:
+                    val = self._safe_float(payload.get("post_exit_4h_price"))
+                    if val is not None:
+                        trade.post_exit_4h_price = val
+                if trade.post_exit_1h_move_pct is None:
+                    val = self._safe_float(payload.get("post_exit_1h_move_pct"))
+                    if val is not None:
+                        trade.post_exit_1h_move_pct = val
+                if trade.post_exit_4h_move_pct is None:
+                    val = self._safe_float(payload.get("post_exit_4h_move_pct"))
+                    if val is not None:
+                        trade.post_exit_4h_move_pct = val
+                if not trade.post_exit_backfill_status:
+                    trade.post_exit_backfill_status = payload.get("backfill_status", "complete")
 
         summary = self.build_summary(trades, daily_snapshot=daily_snapshot, missed=missed)
 
@@ -780,7 +1507,7 @@ class DailyMetricsBuilder:
         self._write_json(output_dir / "slippage_stats.json", self.slippage_stats(trades))
         factor_attr = self.factor_attribution(trades)
         self._write_json(output_dir / "factor_attribution.json", factor_attr.model_dump(mode="json"))
-        self._write_json(output_dir / "exit_efficiency.json", self.exit_efficiency(trades).model_dump(mode="json"))
+        self._write_json(output_dir / "exit_efficiency.json", self.exit_efficiency(trades))
 
         # Record factor history for rolling analysis
         if findings_dir is not None:
@@ -875,6 +1602,46 @@ class DailyMetricsBuilder:
                 self.build_parameter_change_log(parameter_change_events),
             )
 
+        if order_events:
+            self._write_json(
+                output_dir / "order_lifecycle.json",
+                self.build_order_lifecycle_summary(order_events),
+            )
+
+        if process_quality_events:
+            self._write_json(
+                output_dir / "process_quality.json",
+                self.build_process_quality_summary(process_quality_events),
+            )
+
+        # Write stop adjustment analysis if events provided
+        if stop_adjustment_events:
+            self._write_json(
+                output_dir / "stop_adjustment_analysis.json",
+                self.build_stop_adjustment_analysis(stop_adjustment_events),
+            )
+
+        # Write enriched instrumentation analyses
+        exec_latency = self.build_execution_latency_analysis(trades)
+        if exec_latency.get("coverage", 0) > 0:
+            self._write_json(output_dir / "execution_latency.json", exec_latency)
+
+        sizing = self.build_sizing_analysis(trades)
+        if sizing.get("coverage", 0) > 0:
+            self._write_json(output_dir / "sizing_analysis.json", sizing)
+
+        param_corr = self.build_param_outcome_correlation(trades)
+        if param_corr.get("coverage", 0) > 0:
+            self._write_json(output_dir / "param_outcome_correlation.json", param_corr)
+
+        portfolio_ctx = self.build_portfolio_context_analysis(trades)
+        if portfolio_ctx.get("coverage", 0) > 0:
+            self._write_json(output_dir / "portfolio_context.json", portfolio_ctx)
+
+        market_cond = self.build_market_condition_summary(trades)
+        if market_cond.get("coverage", 0) > 0:
+            self._write_json(output_dir / "market_conditions.json", market_cond)
+
         # Write applied regime config from snapshot (per-bot, varies by family)
         if daily_snapshot:
             applied_config = daily_snapshot.get("applied_regime_config")
@@ -884,7 +1651,7 @@ class DailyMetricsBuilder:
         return output_dir
 
     def _write_json(self, path: Path, data: dict | list) -> None:
-        path.write_text(json.dumps(data, indent=2, default=str))
+        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
     def _write_jsonl(self, path: Path, records: list[BaseModel]) -> None:
         if not records:

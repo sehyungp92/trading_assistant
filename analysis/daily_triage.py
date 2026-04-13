@@ -37,6 +37,12 @@ class TriageReport:
 class DailyTriage:
     """Deterministic pre-processor that identifies what deserves Claude's attention."""
 
+    _ALWAYS_VISIBLE_KEYS = (
+        "order_lifecycle.json",
+        "process_quality.json",
+        "parameter_changes.json",
+    )
+
     def __init__(
         self,
         curated_dir: Path,
@@ -120,6 +126,7 @@ class DailyTriage:
 
         # Always include summary.json for all bots
         relevant_keys.add("summary.json")
+        self._include_always_visible_keys(relevant_keys)
 
         return TriageReport(
             significant_events=events,
@@ -127,6 +134,14 @@ class DailyTriage:
             focus_questions=questions,
             relevant_data_keys=sorted(relevant_keys),
         )
+
+    def _include_always_visible_keys(self, relevant_keys: set[str]) -> None:
+        """Keep compact execution/process evidence visible even on triage-filtered runs."""
+        for bot_id in self._bots:
+            bot_dir = self._curated_dir / self._date / bot_id
+            for filename in self._ALWAYS_VISIBLE_KEYS:
+                if (bot_dir / filename).exists():
+                    relevant_keys.add(filename)
 
     def _check_pnl_anomaly(
         self, bot_id: str, today_pnl: float, trailing: list[dict]

@@ -131,6 +131,7 @@ class AppConfig(BaseModel):
     relay_url: str = ""
     relay_hmac_secret: str = ""
     relay_api_key: str = ""
+    orchestrator_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_bot_token: str = ""
@@ -200,6 +201,7 @@ class AppConfig(BaseModel):
             relay_url=env.get("RELAY_URL", ""),
             relay_hmac_secret=env.get("RELAY_HMAC_SECRET", ""),
             relay_api_key=env.get("RELAY_API_KEY", ""),
+            orchestrator_api_key=env.get("ORCHESTRATOR_API_KEY", ""),
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""),
             discord_bot_token=env.get("DISCORD_BOT_TOKEN", ""),

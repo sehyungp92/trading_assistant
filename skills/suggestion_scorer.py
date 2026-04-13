@@ -50,7 +50,7 @@ class SuggestionScorer:
         Uses 5%/week decay (same rate as learning_ledger) so old outcomes
         gradually lose influence, allowing categories to recover.
         """
-        ts = outcome.get("measured_at") or outcome.get("timestamp", "")
+        ts = outcome.get("measurement_date") or outcome.get("measured_at") or outcome.get("timestamp", "")
         if not ts:
             return 0.5  # unknown age → half weight
         try:
@@ -447,7 +447,7 @@ class SuggestionScorer:
         from datetime import datetime, timezone
         weekly: dict[str, list[dict]] = {}
         for s in suggestions:
-            ts = s.get("timestamp", "") or s.get("created_at", "")
+            ts = s.get("proposed_at", "") or s.get("timestamp", "") or s.get("created_at", "")
             if not ts or len(ts) < 10:
                 continue
             try:
@@ -456,7 +456,7 @@ class SuggestionScorer:
             except (ValueError, TypeError):
                 continue
             status = s.get("status", "")
-            if status in ("implemented", "measured"):
+            if status in ("deployed", "implemented", "measured"):
                 weekly.setdefault(week_key, []).append(s)
 
         sorted_weeks = sorted(weekly.keys())[-weeks:]

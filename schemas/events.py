@@ -145,6 +145,21 @@ class TradeEvent(BaseModel):
     macro_regime: str = ""  # G/R/S/D active at trade time
     stress_level_at_entry: float = 0.0  # P(stress) at trade time
 
+    # Execution pipeline timing {signal_detected_at, intent_created_at, risk_checked_at, order_submitted_at, fill_received_at}
+    execution_timestamps: dict | None = None
+    # Position sizing decision context {target_risk_pct, account_equity, volatility_basis, sizing_model, unit_risk_usd, ...multipliers}
+    sizing_inputs: dict | None = None
+    # Full dict of active strategy parameter values at trade execution time
+    strategy_params_at_entry: dict | None = None
+    # Portfolio state at entry {exposure, direction, correlated_positions}
+    portfolio_state_at_entry: dict | None = None
+    # Comprehensive market condition dict from bot (supplements atr_at_entry, volume_24h, etc.)
+    market_conditions_at_entry: dict | None = None
+    # Post-exit move percentages (backfilled by bot, supplements post_exit_1h_price/4h_price)
+    post_exit_1h_move_pct: float | None = None
+    post_exit_4h_move_pct: float | None = None
+    post_exit_backfill_status: str = ""  # pending | partial | complete
+
 
 class MissedOpportunityEvent(BaseModel):
     event_metadata: Optional[EventMetadata] = None
@@ -202,6 +217,8 @@ class DailySnapshot(BaseModel):
     # Macro regime context (from portfolio-level HMM classifier)
     regime_context: dict | None = None  # RegimeContext snapshot (macro_regime, confidence, stress, etc.)
     applied_regime_config: dict | None = None  # Active regime-adjusted portfolio config
+
+    calmar_rolling_30d: float = 0.0
 
 
 class RegimeTransitionEvent(BaseModel):

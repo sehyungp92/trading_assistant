@@ -25,6 +25,7 @@ def _make_trade(
     pnl: float = 100.0,
     market_regime: str = "trending",
     entry_signal: str = "momentum",
+    strategy_id: str = "",
     entry_time: str = "2026-01-05T10:00:00",
     exit_time: str = "2026-01-05T14:00:00",
 ) -> TradeEvent:
@@ -41,6 +42,7 @@ def _make_trade(
         pnl_pct=pnl / 1000 * 100,
         market_regime=market_regime,
         entry_signal=entry_signal,
+        strategy_id=strategy_id,
     )
 
 
@@ -164,10 +166,10 @@ class TestOptimalAllocations:
     def test_allocation_per_regime(self):
         engine = StrategyEngine("2026-01-01", "2026-01-07")
         trades = [
-            _make_trade(pnl=100.0, market_regime="trending", entry_signal="s1"),
-            _make_trade(pnl=100.0, market_regime="trending", entry_signal="s1"),
-            _make_trade(pnl=50.0, market_regime="trending", entry_signal="s2"),
-            _make_trade(pnl=50.0, market_regime="trending", entry_signal="s2"),
+            _make_trade(pnl=100.0, market_regime="trending", strategy_id="s1"),
+            _make_trade(pnl=100.0, market_regime="trending", strategy_id="s1"),
+            _make_trade(pnl=50.0, market_regime="trending", strategy_id="s2"),
+            _make_trade(pnl=50.0, market_regime="trending", strategy_id="s2"),
         ]
         report = engine.compute_regime_conditional_metrics({}, {"bot1": trades})
         allocs = {a.regime: a for a in report.optimal_allocations}
@@ -226,7 +228,7 @@ class TestEdgeCases:
     def test_multiple_bots(self):
         engine = StrategyEngine("2026-01-01", "2026-01-07")
         trades_bot1 = [_make_trade(bot_id="bot1", pnl=100.0)]
-        trades_bot2 = [_make_trade(bot_id="bot2", pnl=-50.0, entry_signal="helix")]
+        trades_bot2 = [_make_trade(bot_id="bot2", pnl=-50.0, strategy_id="helix")]
         report = engine.compute_regime_conditional_metrics(
             {},
             {"bot1": trades_bot1, "bot2": trades_bot2},

@@ -559,11 +559,14 @@ class TestHandlerWiringSuggestionValidation:
 
     def test_validation_evidence_in_detection_context(self, tmp_path):
         """When a parameter suggestion is validated, detection_context has validation_evidence."""
+        from datetime import datetime, timedelta
+
         tracker = MockSuggestionTracker()
         handlers, curated_dir = _make_handlers(tmp_path, suggestion_tracker=tracker)
 
-        # Write trade data so validator can run
-        _write_trades(curated_dir, "2026-03-10", "bot_a", _sample_trades())
+        # Write trade data so validator can run — use recent date within lookback window
+        recent_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _write_trades(curated_dir, recent_date, "bot_a", _sample_trades())
 
         from schemas.agent_response import AgentSuggestion
         from analysis.response_validator import ValidationResult
@@ -589,6 +592,8 @@ class TestHandlerWiringSuggestionValidation:
 
     def test_degradation_produces_requires_review(self, tmp_path):
         """When degradation is detected, detection_context has requires_review=True."""
+        from datetime import datetime, timedelta
+
         tracker = MockSuggestionTracker()
         handlers, curated_dir = _make_handlers(tmp_path, suggestion_tracker=tracker)
 
@@ -597,7 +602,9 @@ class TestHandlerWiringSuggestionValidation:
             {"pnl": 200, "signal_strength": 0.5, "regime": "trending"},
             {"pnl": 150, "signal_strength": 0.4, "regime": "trending"},
         ]
-        _write_trades(curated_dir, "2026-03-10", "bot_a", trades)
+        # Use a recent date within the validator's 30-day lookback window
+        recent_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _write_trades(curated_dir, recent_date, "bot_a", trades)
 
         from schemas.agent_response import AgentSuggestion
         from analysis.response_validator import ValidationResult
@@ -676,11 +683,14 @@ class TestHandlerWiringSuggestionValidation:
 
     def test_validation_evidence_key_present(self, tmp_path):
         """The 'validation_evidence' key is present even for simple parameter suggestions."""
+        from datetime import datetime, timedelta
+
         tracker = MockSuggestionTracker()
         handlers, curated_dir = _make_handlers(tmp_path, suggestion_tracker=tracker)
 
-        # Write some trades
-        _write_trades(curated_dir, "2026-03-10", "bot_a", [
+        # Write some trades — use a recent date within the validator's 30-day lookback
+        recent_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _write_trades(curated_dir, recent_date, "bot_a", [
             {"pnl": 50, "signal_strength": 0.9, "regime": "trending"},
         ])
 

@@ -303,7 +303,7 @@ class LearningLedger:
                 if not line.strip():
                     continue
                 entry = json.loads(line)
-                ts = entry.get("measured_at") or entry.get("timestamp", "")
+                ts = entry.get("measurement_date") or entry.get("measured_at") or entry.get("timestamp", "")
                 if ts and len(ts) >= 10 and week_start <= ts[:10] <= week_end:
                     if not is_conclusive_outcome(entry):
                         continue

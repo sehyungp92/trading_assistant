@@ -22,6 +22,11 @@ dev = [
     "pytest-xdist>=3.5.0",
     "ruff>=0.9.0",
 ]
+notifications = [
+    "python-telegram-bot>=22.0",
+    "discord.py>=2.6.0",
+    "aiosmtplib>=3.0.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["orchestrator*", "schemas*", "skills*", "analysis*", "comms*"]

@@ -27,7 +27,7 @@ class EmailAdapter(BaseChannel):
         self._config = config
 
     async def _start(self) -> None:
-        pass  # No persistent connection needed
+        import aiosmtplib  # noqa: F401 - fail fast if the optional dependency is missing
 
     async def _stop(self) -> None:
         pass

@@ -14,7 +14,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from starlette.responses import JSONResponse
 
 from comms.dispatcher import NotificationDispatcher
 from comms.telegram_handlers import TelegramCallbackResponse, TelegramCallbackRouter
@@ -603,6 +604,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         autonomous_pipeline._experiment_tracker = structural_experiment_tracker
         if experiment_config_gen is not None:
             autonomous_pipeline._experiment_config_generator = experiment_config_gen
+        if experiment_manager is not None:
+            autonomous_pipeline._experiment_manager = experiment_manager
 
     # Wire handler slots on worker
     worker.on_alert = handlers.handle_alert
@@ -982,7 +985,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             logger.warning("Failed to record hypothesis outcome for %s", hyp_id)
 
                     # Promote linked patterns on positive outcome
-                    if outcome.net_positive_7d:
+                    if verdict_str == "positive":
                         try:
                             from skills.pattern_library import PatternLibrary
                             from schemas.pattern_library import PatternStatus as _PS
@@ -1296,7 +1299,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         "p_value": result.p_value,
                     })
                     # Escalate: link back to suggestion and hypothesis
-                    if result.recommendation == "adopt":
+                    if result.recommendation == "adopt_treatment":
                         if getattr(exp, "suggestion_id", None) and suggestion_tracker:
                             try:
                                 suggestion_tracker.accept(exp.suggestion_id)
@@ -1315,7 +1318,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                                 )
                             except Exception:
                                 logger.warning("Failed to record hypothesis outcome %s", exp.hypothesis_id)
-                    elif result.recommendation == "discard":
+                    elif result.recommendation == "keep_control":
                         if getattr(exp, "hypothesis_id", None):
                             try:
                                 hypothesis_library.record_outcome(exp.hypothesis_id, positive=False)
@@ -1340,13 +1343,26 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             _METRIC_FIELD_MAP = {
                 "sharpe": "sharpe_ratio_30d",
                 "sharpe_ratio": "sharpe_ratio_30d",
+                "sharpe_ratio_30d": "sharpe_ratio_30d",
                 "win_rate": "win_rate",
                 "drawdown": "max_drawdown_pct",
                 "max_drawdown": "max_drawdown_pct",
+                "max_drawdown_pct": "max_drawdown_pct",
                 "process_quality": "avg_process_quality",
+                "avg_process_quality": "avg_process_quality",
                 "composite": "composite_score",
                 "composite_score": "composite_score",
                 "pnl": "pnl_total",
+                "pnl_total": "pnl_total",
+                "net_pnl": "pnl_total",
+                "calmar": "calmar_ratio_30d",
+                "calmar_ratio": "calmar_ratio_30d",
+                "calmar_ratio_30d": "calmar_ratio_30d",
+                "profit_factor": "profit_factor",
+                "expectancy": "expectancy",
+                "expected_r": "expected_total_r",
+                "expected_total_r": "expected_total_r",
+                "trade_count": "trade_count",
             }
 
             gt = GroundTruthComputer(curated_dir)
@@ -1359,6 +1375,19 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         continue
                     gt_before = gt.compute_snapshot(exp.bot_id, activated_date)
                     gt_after = gt.compute_snapshot(exp.bot_id, now_date)
+
+                    # Check trade sufficiency before evaluating
+                    max_min_trades = max(
+                        (getattr(c, "minimum_trade_count", 20) or 20)
+                        for c in exp.acceptance_criteria
+                    ) if exp.acceptance_criteria else 20
+                    actual_trades = getattr(gt_after, "trade_count", None)
+                    if actual_trades is not None and actual_trades < max_min_trades:
+                        logger.info(
+                            "Experiment %s: insufficient trades (%d < %d), skipping evaluation",
+                            exp.experiment_id, actual_trades, max_min_trades,
+                        )
+                        continue
 
                     # Evaluate each acceptance criterion
                     criteria_met: list[bool] = []
@@ -1374,9 +1403,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         delta = after_val - before_val
                         actual_values.append(round(delta, 4))
                         if criterion.direction == "improve":
-                            criteria_met.append(delta >= criterion.minimum_change)
+                            met = delta >= criterion.minimum_change
                         else:  # not_degrade
-                            criteria_met.append(delta >= -criterion.minimum_change)
+                            met = delta >= -criterion.minimum_change
+                        if met and getattr(criterion, "baseline_value", None) is not None:
+                            met = after_val is not None and after_val >= criterion.baseline_value
+                        criteria_met.append(met)
 
                     structural_experiment_tracker.resolve(
                         exp.experiment_id, criteria_met, actual_values,
@@ -1755,6 +1787,19 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     app = FastAPI(title="Trading Assistant Orchestrator", lifespan=lifespan)
     app.state.start_time = datetime.now(timezone.utc)
+
+    @app.middleware("http")
+    async def _require_api_key(request: Request, call_next):
+        """Protect the control plane when ORCHESTRATOR_API_KEY is configured."""
+        required_key = config.orchestrator_api_key
+        if not required_key or request.url.path == "/health":
+            return await call_next(request)
+
+        provided_key = request.headers.get("X-Api-Key", "")
+        if provided_key != required_key:
+            return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
+
+        return await call_next(request)
 
     # Expose on app.state so test fixtures can manually initialize/close
     # (httpx ASGITransport does not trigger lifespan events)

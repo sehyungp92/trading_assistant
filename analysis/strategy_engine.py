@@ -85,6 +85,15 @@ class StrategyEngine:
         "regime_config_effectiveness": "regime_gate",
         "regime_transition_cost": "regime_gate",
         "stress_entry_pattern": "regime_gate",
+        "execution_bottleneck": "signal",
+        "sizing_methodology": "position_sizing",
+        "portfolio_crowding": "position_sizing",
+        # Portfolio-level detectors (use "detect_" prefix in detector_name)
+        "detect_family_imbalance": "position_sizing",
+        "detect_correlation_concentration": "signal",
+        "detect_drawdown_tier_miscalibration": "stop_loss",
+        "detect_coordination_gaps": "position_sizing",
+        "detect_heat_cap_utilization": "position_sizing",
     }
 
     # Keywords indicating direction of change
@@ -836,7 +845,7 @@ class StrategyEngine:
         for bot_id, trades in trades_by_bot.items():
             for t in trades:
                 regime = getattr(t, "market_regime", None) or "unknown"
-                strat = getattr(t, "entry_signal", "") or "default"
+                strat = getattr(t, "strategy_id", "") or "default"
                 grouped[(bot_id, strat, regime)].append(t)
                 regime_counts[regime] += 1
                 total_trades += 1
@@ -1307,6 +1316,155 @@ class StrategyEngine:
                 return True
         return False
 
+    def detect_execution_bottleneck(
+        self,
+        bot_id: str,
+        latency_stats: dict,
+        strategy_id: str = "",
+    ) -> list[StrategySuggestion]:
+        """Detect execution pipeline bottlenecks from latency data."""
+        stages = latency_stats.get("stages", {})
+        bottleneck_stage = latency_stats.get("bottleneck_stage", "")
+        latency_corr = latency_stats.get("latency_slippage_correlation")
+
+        # Fire if any stage p95 > 500ms or latency-slippage correlation > 0.3
+        high_p95_stages = [
+            (name, data["p95_ms"])
+            for name, data in stages.items()
+            if data.get("p95_ms", 0) > 500
+        ]
+        corr_issue = latency_corr is not None and latency_corr > 0.3
+
+        if not high_p95_stages and not corr_issue:
+            return []
+
+        parts = []
+        if high_p95_stages:
+            worst = max(high_p95_stages, key=lambda x: x[1])
+            parts.append(f"p95 latency {worst[1]:.0f}ms at {worst[0]} stage")
+        if corr_issue:
+            parts.append(f"latency-slippage correlation {latency_corr:.2f}")
+
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            strategy_id=strategy_id,
+            title=f"Execution bottleneck — {bot_id}",
+            description=f"Execution pipeline shows: {'; '.join(parts)}. "
+            f"Bottleneck stage: {bottleneck_stage}.",
+            confidence=0.6,
+            evidence_days=30,
+            requires_human_judgment=True,
+            detection_context=DetectionContext(
+                detector_name="execution_bottleneck",
+                bot_id=bot_id,
+                threshold_name="p95_ms",
+                threshold_value=500.0,
+                observed_value=high_p95_stages[0][1] if high_p95_stages else (latency_corr or 0),
+            ),
+        )]
+
+    def detect_sizing_methodology(
+        self,
+        bot_id: str,
+        sizing_data: dict,
+        strategy_id: str = "",
+    ) -> list[StrategySuggestion]:
+        """Detect sizing methodology issues from sizing analysis data."""
+        by_model = sizing_data.get("by_sizing_model", {})
+        if not by_model:
+            return []
+
+        # Check for low risk efficiency in any model
+        low_eff_models = [
+            (model, data)
+            for model, data in by_model.items()
+            if data.get("avg_risk_efficiency") is not None
+            and data["avg_risk_efficiency"] < 0.5
+            and data.get("trade_count", 0) >= 5
+        ]
+
+        # Check for divergent win rates between models
+        win_rates = [
+            (model, data["win_rate"])
+            for model, data in by_model.items()
+            if data.get("trade_count", 0) >= 5
+        ]
+        wr_divergence = 0.0
+        if len(win_rates) >= 2:
+            rates = [wr for _, wr in win_rates]
+            wr_divergence = max(rates) - min(rates)
+
+        if not low_eff_models and wr_divergence <= 0.15:
+            return []
+
+        parts = []
+        if low_eff_models:
+            worst = min(low_eff_models, key=lambda x: x[1].get("avg_risk_efficiency", 0))
+            parts.append(f"{worst[0]} model risk_efficiency={worst[1]['avg_risk_efficiency']:.2f}")
+        if wr_divergence > 0.15:
+            parts.append(f"model win_rate divergence {wr_divergence:.1%}")
+
+        observed = low_eff_models[0][1]["avg_risk_efficiency"] if low_eff_models else wr_divergence
+
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            strategy_id=strategy_id,
+            title=f"Sizing methodology issue — {bot_id}",
+            description=f"Position sizing analysis: {'; '.join(parts)}.",
+            confidence=0.6,
+            evidence_days=30,
+            requires_human_judgment=True,
+            detection_context=DetectionContext(
+                detector_name="sizing_methodology",
+                bot_id=bot_id,
+                threshold_name="risk_efficiency",
+                threshold_value=0.5,
+                observed_value=observed,
+            ),
+        )]
+
+    def detect_portfolio_crowding(
+        self,
+        bot_id: str,
+        portfolio_context: dict,
+        strategy_id: str = "",
+    ) -> list[StrategySuggestion]:
+        """Detect portfolio crowding effects from portfolio context data."""
+        crowded_wr = portfolio_context.get("crowded_win_rate")
+        uncrowded_wr = portfolio_context.get("uncrowded_win_rate")
+        crowding_count = portfolio_context.get("crowding_count", 0)
+
+        if crowded_wr is None or uncrowded_wr is None or crowding_count < 3:
+            return []
+
+        wr_gap = uncrowded_wr - crowded_wr
+        if wr_gap <= 0.10:
+            return []
+
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            strategy_id=strategy_id,
+            title=f"Portfolio crowding drag — {bot_id}",
+            description=(
+                f"Crowded entries (>2 correlated positions) have {wr_gap:.1%} lower "
+                f"win rate than uncrowded ({crowded_wr:.1%} vs {uncrowded_wr:.1%}, "
+                f"n={crowding_count} crowded trades)."
+            ),
+            confidence=0.6,
+            evidence_days=30,
+            requires_human_judgment=True,
+            detection_context=DetectionContext(
+                detector_name="portfolio_crowding",
+                bot_id=bot_id,
+                threshold_name="crowding_win_rate_gap",
+                threshold_value=0.10,
+                observed_value=wr_gap,
+            ),
+        )]
+
     def build_report(
         self,
         bot_summaries: dict[str, BotWeeklySummary],
@@ -1325,6 +1483,11 @@ class StrategyEngine:
         regime_transition_events: list[dict] | None = None,
         daily_pnl_by_date: dict[str, float] | None = None,
         stress_entry_stats: dict[str, dict[str, dict]] | None = None,
+        exit_efficiency_data: dict[str, dict] | None = None,
+        execution_latency: dict[str, dict] | None = None,
+        sizing_data: dict[str, dict] | None = None,
+        portfolio_context: dict[str, dict] | None = None,
+        param_correlations: dict[str, dict] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
@@ -1447,6 +1610,34 @@ class StrategyEngine:
             for bot_id, stress_data in stress_entry_stats.items():
                 all_suggestions.extend(
                     self.detect_stress_entry_pattern(bot_id, stress_data)
+                )
+
+        if exit_efficiency_data:
+            for bot_id, data in exit_efficiency_data.items():
+                all_suggestions.extend(
+                    self.detect_exit_timing_issues(
+                        bot_id,
+                        data.get("avg_exit_efficiency", 1.0),
+                        data.get("premature_exit_pct", 0.0),
+                    )
+                )
+
+        if execution_latency:
+            for bot_id, stats in execution_latency.items():
+                all_suggestions.extend(
+                    self.detect_execution_bottleneck(bot_id, stats)
+                )
+
+        if sizing_data:
+            for bot_id, data in sizing_data.items():
+                all_suggestions.extend(
+                    self.detect_sizing_methodology(bot_id, data)
+                )
+
+        if portfolio_context:
+            for bot_id, ctx in portfolio_context.items():
+                all_suggestions.extend(
+                    self.detect_portfolio_crowding(bot_id, ctx)
                 )
 
         # Apply per-detector confidence calibration from outcome data

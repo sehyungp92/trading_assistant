@@ -3,7 +3,7 @@
 
 Unlike daily/weekly analysis, the discovery agent gets access to raw trade
 data (JSONL) and higher max_turns for iterative exploration. The goal is to
-find patterns NOT covered by the 7 automated detectors.
+find patterns NOT covered by the 21 automated detectors.
 """
 from __future__ import annotations
 
@@ -19,16 +19,32 @@ You are exploring raw trade data to discover patterns that the automated
 detectors miss. You have access to raw JSONL trade files via Read/Grep/Glob.
 
 ## CONTEXT
-The system has 7 automated detectors:
+The system has 21 automated detectors:
 1. Alpha decay (signal correlation degradation)
 2. Signal decay (win rate decline)
-3. Exit timing issues (premature exits)
-4. Correlation breakdown (cross-bot)
-5. Time-of-day patterns
-6. Drawdown patterns
-7. Position sizing issues
+3. Component signal decay (per-signal-component decay)
+4. Factor decay (factor-level signal degradation)
+5. Exit timing issues (premature exits)
+6. Correlation breakdown (cross-bot)
+7. Time-of-day patterns
+8. Drawdown concentration (clustered drawdowns)
+9. Position sizing issues
+10. Tight stop (stop-loss too tight)
+11. Wide stop (stop-loss too wide)
+12. Filter cost (filter threshold cost exceeds benefit)
+13. Filter interactions (inter-filter dependency effects)
+14. Regime loss (regime gate mismatch)
+15. Regime config effectiveness (regime configuration quality)
+16. Regime transition cost (cost of regime switches)
+17. Stress entry pattern (entries during stress periods)
+18. Microstructure (market microstructure anomalies)
+19. Execution bottleneck (pipeline latency → slippage correlation)
+20. Sizing methodology (risk efficiency and model divergence)
+21. Portfolio crowding (correlated-position drag on win rate)
 
-Your job is to find patterns OUTSIDE this coverage.
+Your job is to find patterns OUTSIDE this coverage. The detectors are
+grouped by category: stop_loss, filter_threshold, regime_gate, signal,
+exit_timing, position_sizing.
 
 ## DATA ACCESS
 Raw trade data is available in the curated directories listed in context_files.
@@ -45,7 +61,7 @@ exit_time, mae_pct, mfe_pct, position_size_pct, root_cause, etc.
 ## ANTI-PATTERNS (do NOT do these)
 - Do NOT restate curated summary statistics — those are already computed
 - Do NOT report patterns with fewer than 5 supporting trades
-- Do NOT report patterns that ARE covered by the 7 detectors above
+- Do NOT report patterns that ARE covered by the 21 detectors above
 - Do NOT report obvious observations (e.g., "winners have positive PnL")
 
 ## OUTPUT FORMAT
@@ -88,7 +104,7 @@ At the END, emit a structured data block:
       "proposed_root_cause": "...",
       "testable_hypothesis": "...",
       "confidence": 0.0,
-      "detector_coverage": "novel|alpha_decay|signal_decay|exit_timing|correlation|time_of_day|drawdown|position_sizing",
+      "detector_coverage": "novel|alpha_decay|signal_decay|component_signal_decay|factor_decay|exit_timing|correlation|time_of_day|drawdown_concentration|position_sizing|tight_stop|wide_stop|filter_cost|filter_interactions|regime_loss|regime_config_effectiveness|regime_transition_cost|stress_entry_pattern|microstructure|execution_bottleneck|sizing_methodology|portfolio_crowding",
       "bot_id": "..."
     }
   ],
@@ -154,7 +170,7 @@ class DiscoveryPromptAssembler:
         bot_list = ", ".join(self.bots)
         return (
             f"Explore the last {self.lookback_days} days of raw trade data for bots: {bot_list}.\n"
-            f"Find patterns not covered by the 7 automated detectors.\n"
+            f"Find patterns not covered by the 21 automated detectors.\n"
             f"Use Read/Grep/Glob tools to examine the JSONL trade files listed in context_files.\n"
             f"Reference date: {self.date}."
         )

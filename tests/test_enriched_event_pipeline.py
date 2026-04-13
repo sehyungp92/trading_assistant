@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
+from analysis.daily_triage import DailyTriage
+from analysis.prompt_assembler import DailyPromptAssembler
 from orchestrator.db.queue import EventQueue
 from orchestrator.event_stream import EventStream
 from orchestrator.handlers import Handlers
-from orchestrator.orchestrator_brain import Action, ActionType, OrchestratorBrain
+from orchestrator.orchestrator_brain import OrchestratorBrain
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.worker import Worker
 from schemas.bot_config import BotConfig
@@ -118,6 +119,8 @@ class TestWorkerPersistsEnrichedEvents:
             ("filter_decision", "fd001"),
             ("orderbook_context", "ob001"),
             ("parameter_change", "pc001"),
+            ("order", "ord001"),
+            ("process_quality", "pq001"),
         ]:
             await queue.enqueue({
                 "event_id": eid,
@@ -130,9 +133,66 @@ class TestWorkerPersistsEnrichedEvents:
 
         await worker.process_batch(limit=10)
 
-        for event_type in ["filter_decision", "orderbook_context", "parameter_change"]:
+        for event_type in [
+            "filter_decision",
+            "orderbook_context",
+            "parameter_change",
+            "order",
+            "process_quality",
+        ]:
             files = list(raw_dir.rglob(f"{event_type}.jsonl"))
             assert len(files) == 1, f"Expected 1 file for {event_type}, got {len(files)}"
+
+        order_record = json.loads(
+            (raw_dir / "2026-03-01" / "bot1" / "order.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert order_record["event_type"] == "order"
+        assert order_record["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
+        process_quality_record = json.loads(
+            (raw_dir / "2026-03-01" / "bot1" / "process_quality.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert process_quality_record["event_type"] == "process_quality"
+        assert process_quality_record["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
+    async def test_safety_critical_parameter_change_alerts_and_still_persists_raw(
+        self, queue, registry, brain, tmp_path,
+    ):
+        raw_dir = tmp_path / "raw"
+        alerts = []
+        worker = Worker(
+            queue=queue,
+            registry=registry,
+            brain=brain,
+            raw_data_dir=raw_dir,
+        )
+        async def _on_alert(action):
+            alerts.append(action)
+        worker.on_alert = _on_alert
+
+        await queue.enqueue({
+            "event_id": "pc-critical-001",
+            "bot_id": "bot1",
+            "event_type": "parameter_change",
+            "payload": json.dumps({
+                "param_name": "risk_per_trade",
+                "old_value": 0.01,
+                "new_value": 0.02,
+            }),
+            "exchange_timestamp": "2026-03-01T15:00:00+00:00",
+            "received_at": "2026-03-01T15:00:01+00:00",
+        })
+
+        processed = await worker.process_batch(limit=10)
+
+        assert processed == 1
+        assert len(alerts) == 1
+        assert worker.daily_queue_counts["bot1"] == 1
+        record = json.loads(
+            (raw_dir / "2026-03-01" / "bot1" / "parameter_change.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert record["event_type"] == "parameter_change"
+        assert record["exchange_timestamp"] == "2026-03-01T15:00:00+00:00"
 
 
 class TestHandlerBuildsEnrichedCurated:
@@ -237,6 +297,76 @@ class TestHandlerBuildsEnrichedCurated:
         data = json.loads((raw_dir / "parameter_change.jsonl").read_text().strip())
         assert data["param_name"] == "stop_loss"
 
+    def test_build_enriched_curated_writes_execution_and_process_artifacts(self, tmp_path):
+        handlers = self._make_handlers(tmp_path)
+        date = "2026-03-01"
+        raw_dir = tmp_path / "data" / "raw" / date / "bot1"
+        raw_dir.mkdir(parents=True)
+
+        (raw_dir / "order.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "order_id": "o1",
+                    "pair": "BTCUSDT",
+                    "side": "LONG",
+                    "order_type": "LIMIT",
+                    "status": "fill",
+                    "requested_qty": 1,
+                    "filled_qty": 1,
+                    "requested_price": 50000.0,
+                    "fill_price": 50001.0,
+                    "latency_ms": 15,
+                    "strategy_type": "alpha",
+                }),
+                json.dumps({
+                    "order_id": "o2",
+                    "pair": "ETHUSDT",
+                    "side": "SHORT",
+                    "order_type": "STOP",
+                    "status": "REJECTED",
+                    "requested_qty": 1,
+                    "reject_reason": "risk_check",
+                    "strategy_type": "beta",
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        (raw_dir / "process_quality.jsonl").write_text(
+            json.dumps({
+                "trade_id": "t1",
+                "process_quality_score": 52,
+                "classification": "poor",
+                "root_causes": ["order_reject"],
+                "negative_factors": ["reject"],
+                "evidence_refs": ["run-1"],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (raw_dir / "parameter_change.jsonl").write_text(
+            json.dumps({
+                "strategy_id": "alpha",
+                "param_name": "stop_loss",
+                "old_value": 0.02,
+                "new_value": 0.015,
+                "reason": "WFO",
+                "exchange_timestamp": "2026-03-01T15:00:00+00:00",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        handlers._build_enriched_curated(date)
+
+        curated_dir = tmp_path / "data" / "curated" / date / "bot1"
+        order_lifecycle = json.loads((curated_dir / "order_lifecycle.json").read_text(encoding="utf-8"))
+        process_quality = json.loads((curated_dir / "process_quality.json").read_text(encoding="utf-8"))
+        parameter_changes = json.loads((curated_dir / "parameter_changes.json").read_text(encoding="utf-8"))
+
+        assert order_lifecycle["fill_count"] == 1
+        assert order_lifecycle["reject_count"] == 1
+        assert process_quality["low_score_count"] == 1
+        assert parameter_changes["total_changes"] == 1
+        assert parameter_changes["changes"][0]["timestamp"] == "2026-03-01T15:00:00+00:00"
+
 
 class TestEndToEndEnrichedPipeline:
     """End-to-end: enriched event → raw JSONL → curated JSON."""
@@ -271,3 +401,93 @@ class TestEndToEndEnrichedPipeline:
         assert len(raw_files) == 1
         raw_data = json.loads(raw_files[0].read_text(encoding="utf-8").strip())
         assert raw_data["filter_name"] == "rsi_filter"
+
+    async def test_order_and_process_quality_visible_in_prompt_package(
+        self, queue, registry, brain, tmp_path,
+    ):
+        raw_dir = tmp_path / "raw"
+        curated_dir = tmp_path / "curated"
+        memory_dir = tmp_path / "memory"
+        worker = Worker(
+            queue=queue, registry=registry, brain=brain,
+            raw_data_dir=raw_dir,
+        )
+
+        for rel_path, content in {
+            "policies/v1/agent.md": "agent",
+            "policies/v1/trading_rules.md": "rules",
+            "policies/v1/soul.md": "soul",
+        }.items():
+            path = memory_dir / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        (memory_dir / "findings").mkdir(parents=True, exist_ok=True)
+
+        for event in [
+            {
+                "event_id": "ord001",
+                "bot_id": "bot1",
+                "event_type": "order",
+                "payload": json.dumps({
+                    "order_id": "o1",
+                    "pair": "BTCUSDT",
+                    "side": "LONG",
+                    "order_type": "LIMIT",
+                    "status": "fill",
+                    "requested_qty": 1,
+                    "filled_qty": 1,
+                    "requested_price": 50000.0,
+                    "fill_price": 50001.0,
+                    "latency_ms": 15,
+                    "strategy_type": "alpha",
+                }),
+                "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+                "received_at": "2026-03-01T14:00:01+00:00",
+            },
+            {
+                "event_id": "pq001",
+                "bot_id": "bot1",
+                "event_type": "process_quality",
+                "payload": json.dumps({
+                    "trade_id": "t1",
+                    "process_quality_score": 52,
+                    "classification": "poor",
+                    "root_causes": ["order_reject"],
+                    "negative_factors": ["reject"],
+                    "evidence_refs": ["run-1"],
+                }),
+                "exchange_timestamp": "2026-03-01T14:05:00+00:00",
+                "received_at": "2026-03-01T14:05:01+00:00",
+            },
+        ]:
+            await queue.enqueue(event)
+
+        processed = await worker.process_batch(limit=10)
+        assert processed == 2
+
+        handlers = Handlers(
+            agent_runner=AsyncMock(),
+            event_stream=EventStream(),
+            dispatcher=AsyncMock(),
+            notification_prefs=NotificationPreferences(),
+            curated_dir=curated_dir,
+            memory_dir=memory_dir,
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path / "src",
+            bots=["bot1"],
+            raw_data_dir=raw_dir,
+        )
+        handlers._build_enriched_curated("2026-03-01")
+
+        triage = DailyTriage(curated_dir, "2026-03-01", ["bot1"]).run()
+        assembler = DailyPromptAssembler(
+            date="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated_dir,
+            memory_dir=memory_dir,
+        )
+        pkg = assembler.assemble(triage_report=triage)
+
+        bot_data = pkg.data["bot1"]
+        assert "order_lifecycle" in bot_data
+        assert "process_quality" in bot_data

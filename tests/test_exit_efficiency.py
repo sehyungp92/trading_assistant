@@ -41,9 +41,9 @@ class TestExitEfficiencyPipeline:
         ]
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         result = builder.exit_efficiency(trades)
-        assert isinstance(result, ExitEfficiencyStats)
-        assert result.total_trades_with_data == 2
-        assert result.avg_efficiency > 0
+        assert isinstance(result, dict)
+        assert result["total_trades_with_data"] == 2
+        assert result["avg_efficiency"] > 0
 
     def test_premature_exit_detection(self):
         from skills.build_daily_metrics import DailyMetricsBuilder
@@ -55,7 +55,7 @@ class TestExitEfficiencyPipeline:
         ]
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         result = builder.exit_efficiency(trades)
-        assert result.premature_exit_pct > 0
+        assert result["premature_exit_pct"] > 0
 
     def test_grouping_by_exit_reason(self):
         from skills.build_daily_metrics import DailyMetricsBuilder
@@ -66,8 +66,8 @@ class TestExitEfficiencyPipeline:
         ]
         builder = DailyMetricsBuilder(date="2026-03-01", bot_id="bot1")
         result = builder.exit_efficiency(trades)
-        assert "SIGNAL" in result.by_exit_reason
-        assert "STOP_LOSS" in result.by_exit_reason
+        assert "SIGNAL" in result["by_exit_reason"]
+        assert "STOP_LOSS" in result["by_exit_reason"]
 
     def test_exit_efficiency_written_to_curated(self, tmp_path):
         from skills.build_daily_metrics import DailyMetricsBuilder

@@ -14,24 +14,27 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from schemas.learning_ledger import GroundTruthSnapshot
+from schemas.objective_weights import (
+    W_CALMAR,
+    W_EXPECTANCY,
+    W_EXPECTED_R,
+    W_INV_DRAWDOWN,
+    W_PROCESS,
+    W_PROFIT_FACTOR,
+)
 
 
 class GroundTruthComputer:
     """Computes immutable ground truth performance snapshots."""
 
-    # Composite formula weights — aligned with soul.md priorities
-    # Expected total return (30%): annualized net PnL — primary optimization target
-    # Calmar (20%): preferred risk-adjusted metric; net profit / max drawdown
-    # Profit factor (15%): gross_wins / gross_losses quality ratio
-    # Expectancy (15%): win_rate × (avg_win / avg_loss) — the expectancy equation
-    # Inverse drawdown (10%): hard constraint emphasis
-    # Process quality (10%): process over outcomes; anti-gaming safeguard
-    _W_EXPECTED_R = 0.30
-    _W_CALMAR = 0.20
-    _W_PROFIT_FACTOR = 0.15
-    _W_EXPECTANCY = 0.15
-    _W_INV_DRAWDOWN = 0.10
-    _W_PROCESS = 0.10
+    # Composite formula weights — imported from shared objective_weights module.
+    # See schemas/objective_weights.py for rationale and soul.md alignment.
+    _W_EXPECTED_R = W_EXPECTED_R
+    _W_CALMAR = W_CALMAR
+    _W_PROFIT_FACTOR = W_PROFIT_FACTOR
+    _W_EXPECTANCY = W_EXPECTANCY
+    _W_INV_DRAWDOWN = W_INV_DRAWDOWN
+    _W_PROCESS = W_PROCESS
     _Z_CLIP = 3.0
     _PF_CAP = 10.0  # cap extreme profit factors for z-score stability
     _MIN_TRADES = 10
@@ -255,11 +258,13 @@ class GroundTruthComputer:
         avg_pq: float,
         history: list[dict],
     ) -> float:
-        """Deterministic composite score from z-score normalized metrics.
+        """Absolute composite score via z-score normalization, output [0, 1].
 
         Formula: 0.30*z_expected_r + 0.20*z_calmar + 0.15*z_pf + 0.15*z_expectancy
                  + 0.10*z_inv_dd + 0.10*z_process_quality
         Z-scores normalized against bot's own 90-day history, clipped to [-3, 3].
+        See schemas/objective_weights.py for weight rationale and the intentional
+        divergence between this z-score scale and ParameterSearcher's ratio scale.
         """
         # Compute historical baselines for z-scoring
         hist_expected_rs = self._rolling_expected_rs(history)

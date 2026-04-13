@@ -16,6 +16,7 @@ from schemas.convergence import (
     ConvergenceDimension,
     ConvergenceReport,
     DimensionStatus,
+    LoopHealthMetrics,
 )
 from skills._outcome_utils import is_conclusive_outcome, is_positive_outcome
 
@@ -38,12 +39,14 @@ class ConvergenceTracker:
         overall = self._synthesize_overall(dims)
         oscillation = any(d.status == DimensionStatus.OSCILLATING for d in dims)
         recommendation = self._generate_recommendation(overall, dims)
+        health_metrics = self._compute_health_metrics(dims, weeks)
         return ConvergenceReport(
             overall_status=overall,
             dimensions=dims,
             oscillation_detected=oscillation,
             weeks_analyzed=weeks,
             recommendation=recommendation,
+            health_metrics=health_metrics,
         )
 
     # ------------------------------------------------------------------
@@ -246,6 +249,169 @@ class ConvergenceTracker:
         )
 
     # ------------------------------------------------------------------
+    # Loop health metrics
+    # ------------------------------------------------------------------
+
+    def _compute_health_metrics(
+        self, dims: list[ConvergenceDimension], weeks: int,
+    ) -> LoopHealthMetrics:
+        """Compute quantitative loop health metrics from JSONL data."""
+        outcomes = self._read_jsonl(self._findings_dir / "outcomes.jsonl")
+        suggestions = self._read_jsonl(self._findings_dir / "suggestions.jsonl")
+        ledger = self._read_jsonl(self._findings_dir / "learning_ledger.jsonl")
+        transfers = self._read_jsonl(self._findings_dir / "transfer_outcomes.jsonl")
+
+        return LoopHealthMetrics(
+            proposal_to_measurement_days=self._avg_proposal_to_measurement(
+                suggestions, outcomes,
+            ),
+            oscillation_severity=self._compute_oscillation_severity(dims),
+            transfer_success_rate=self._compute_transfer_success_rate(transfers),
+            recalibration_effectiveness=self._compute_recalibration_effectiveness(
+                outcomes,
+            ),
+            suggestions_per_cycle=self._avg_suggestions_per_cycle(ledger),
+            measurement_coverage=self._compute_measurement_coverage(
+                suggestions, outcomes,
+            ),
+        )
+
+    @staticmethod
+    def _avg_proposal_to_measurement(
+        suggestions: list[dict], outcomes: list[dict],
+    ) -> float | None:
+        """Average days between suggestion proposal and outcome measurement."""
+        # Build index of suggestion_id → proposed_at
+        proposed_dates: dict[str, datetime] = {}
+        for s in suggestions:
+            sid = s.get("suggestion_id", "")
+            ts = s.get("proposed_at") or s.get("timestamp", "")
+            if sid and ts:
+                try:
+                    proposed_dates[sid] = datetime.fromisoformat(
+                        ts.replace("Z", "+00:00"),
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+        latencies: list[float] = []
+        for o in outcomes:
+            sid = o.get("suggestion_id", "")
+            ts = o.get("measurement_date") or o.get("measured_at") or o.get("timestamp", "")
+            if sid in proposed_dates and ts:
+                try:
+                    measured = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    delta = (measured - proposed_dates[sid]).total_seconds() / 86400
+                    if delta >= 0:
+                        latencies.append(delta)
+                except (ValueError, TypeError):
+                    pass
+
+        if not latencies:
+            return None
+        return round(sum(latencies) / len(latencies), 1)
+
+    @staticmethod
+    def _compute_oscillation_severity(
+        dims: list[ConvergenceDimension],
+    ) -> float:
+        """Quantify oscillation severity as 0.0-1.0 score.
+
+        Combines fraction of oscillating dimensions with the magnitude
+        of their trend reversals.
+        """
+        if not dims:
+            return 0.0
+        osc_dims = [
+            d for d in dims if d.status == DimensionStatus.OSCILLATING
+        ]
+        if not osc_dims:
+            return 0.0
+        # Fraction of dimensions oscillating
+        fraction = len(osc_dims) / len(dims)
+        # Average absolute trend value of oscillating dimensions (higher = worse)
+        avg_magnitude = sum(abs(d.trend_value) for d in osc_dims) / len(osc_dims)
+        # Normalize magnitude: clip at 0.1 slope for maximum severity
+        magnitude_score = min(1.0, avg_magnitude / 0.1)
+        # Combine: 60% fraction, 40% magnitude
+        return round(0.6 * fraction + 0.4 * magnitude_score, 3)
+
+    @staticmethod
+    def _compute_transfer_success_rate(
+        transfers: list[dict],
+    ) -> float | None:
+        """Positive outcome ratio for cross-bot transfers."""
+        conclusive = [
+            t for t in transfers
+            if t.get("verdict") in ("positive", "negative", "neutral")
+        ]
+        if not conclusive:
+            return None
+        positive = sum(
+            1 for t in conclusive if t.get("verdict") == "positive"
+        )
+        return round(positive / len(conclusive), 3)
+
+    @staticmethod
+    def _compute_recalibration_effectiveness(
+        outcomes: list[dict],
+    ) -> float | None:
+        """Measure whether recalibrated categories improve subsequent outcomes.
+
+        Compares win rate of outcomes with recalibrated=True vs False.
+        """
+        recalibrated: list[bool] = []
+        non_recalibrated: list[bool] = []
+        for o in outcomes:
+            if not is_conclusive_outcome(o):
+                continue
+            positive = is_positive_outcome(o)
+            if o.get("recalibrated"):
+                recalibrated.append(positive)
+            else:
+                non_recalibrated.append(positive)
+
+        if len(recalibrated) < 3 or len(non_recalibrated) < 3:
+            return None
+
+        recalib_rate = sum(recalibrated) / len(recalibrated)
+        non_rate = sum(non_recalibrated) / len(non_recalibrated)
+        # Positive = recalibration helps, negative = hurts
+        return round(recalib_rate - non_rate, 3)
+
+    @staticmethod
+    def _avg_suggestions_per_cycle(ledger: list[dict]) -> float:
+        """Average suggestions_proposed per learning cycle."""
+        counts = [
+            r.get("suggestions_proposed", 0)
+            for r in ledger
+            if r.get("suggestions_proposed") is not None
+        ]
+        if not counts:
+            return 0.0
+        return round(sum(counts) / len(counts), 1)
+
+    @staticmethod
+    def _compute_measurement_coverage(
+        suggestions: list[dict], outcomes: list[dict],
+    ) -> float:
+        """Fraction of implemented suggestions that received outcome measurement."""
+        implemented = {
+            s.get("suggestion_id")
+            for s in suggestions
+            if s.get("status") in ("implemented", "IMPLEMENTED", "measured")
+            and s.get("suggestion_id")
+        }
+        if not implemented:
+            return 0.0
+        measured = {
+            o.get("suggestion_id")
+            for o in outcomes
+            if o.get("suggestion_id") in implemented
+        }
+        return round(len(measured) / len(implemented), 3)
+
+    # ------------------------------------------------------------------
     # Trend analysis helpers
     # ------------------------------------------------------------------
 
@@ -363,7 +529,7 @@ class ConvergenceTracker:
 
         weekly: dict[str, list[bool]] = {}
         for r in records:
-            ts = r.get("measured_at") or r.get("timestamp", "")
+            ts = r.get("measurement_date") or r.get("measured_at") or r.get("timestamp", "")
             if not ts:
                 continue
             try:
@@ -388,7 +554,7 @@ class ConvergenceTracker:
     @staticmethod
     def _in_time_range(record: dict, start: datetime, end: datetime) -> bool:
         """Check if a record's timestamp falls within [start, end)."""
-        ts = record.get("measured_at") or record.get("timestamp", "")
+        ts = record.get("measurement_date") or record.get("measured_at") or record.get("timestamp", "")
         if not ts:
             return False
         try:

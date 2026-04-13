@@ -141,6 +141,22 @@ class TestDailyTriageRun:
         report = triage.run()
         assert "summary.json" in report.relevant_data_keys
 
+    def test_run_includes_execution_artifacts_when_present(self, tmp_path: Path):
+        curated = tmp_path / "curated"
+        date = "2026-03-10"
+        bot_dir = curated / date / "bot-a"
+        _write_summary(curated, date, "bot-a")
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("order_lifecycle.json", "process_quality.json", "parameter_changes.json"):
+            (bot_dir / filename).write_text("{}", encoding="utf-8")
+
+        triage = DailyTriage(curated, date, ["bot-a"])
+        report = triage.run()
+
+        assert "order_lifecycle.json" in report.relevant_data_keys
+        assert "process_quality.json" in report.relevant_data_keys
+        assert "parameter_changes.json" in report.relevant_data_keys
+
     def test_run_limits_focus_questions_to_max_5(self, tmp_path: Path):
         """Even with many events, focus_questions should not exceed 5."""
         curated = tmp_path / "curated"
@@ -778,6 +794,41 @@ class TestDailyPromptAssemblerTriageIntegration:
         # winners.json and filter_analysis.json should NOT be loaded
         assert "winners" not in bot_data
         assert "filter_analysis" not in bot_data
+
+    def test_load_structured_data_includes_execution_artifacts_when_requested(self, tmp_path: Path):
+        memory_dir = _setup_memory(tmp_path)
+        curated = tmp_path / "curated"
+        date = "2026-03-10"
+        bot_dir = curated / date / "bot-a"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / "summary.json").write_text('{"net_pnl": 100}')
+        (bot_dir / "order_lifecycle.json").write_text('{"reject_count": 1}')
+        (bot_dir / "process_quality.json").write_text('{"low_score_count": 2}')
+        (bot_dir / "parameter_changes.json").write_text('{"total_changes": 1}')
+
+        triage_report = TriageReport(
+            significant_events=[],
+            routine_summary="",
+            focus_questions=[],
+            relevant_data_keys=[
+                "summary.json",
+                "order_lifecycle.json",
+                "process_quality.json",
+                "parameter_changes.json",
+            ],
+        )
+        assembler = DailyPromptAssembler(
+            date=date,
+            bots=["bot-a"],
+            curated_dir=curated,
+            memory_dir=memory_dir,
+        )
+        data = assembler._load_structured_data(triage_report)
+        bot_data = data.get("bot-a", {})
+
+        assert "order_lifecycle" in bot_data
+        assert "process_quality" in bot_data
+        assert "parameter_changes" in bot_data
 
 
 # ===========================================================================

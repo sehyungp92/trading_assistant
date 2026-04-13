@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Minimum total trades across all bots to justify a full agent-runtime invocation.
 # Days with fewer trades get a deterministic summary instead.
 _MIN_TRADES_FOR_ANALYSIS = 3
+_INSTRUMENTATION_READINESS_THRESHOLD = 0.4  # warn when a bot's overall readiness is below this
 
 
 class Handlers:
@@ -208,6 +209,26 @@ class Handlers:
             from analysis.prompt_assembler import DailyPromptAssembler
 
             ctx = ContextBuilder(self._memory_dir, curated_dir=self._curated_dir)
+
+            # Instrumentation readiness check — warn (never block) for under-instrumented bots
+            try:
+                readiness = ctx.load_instrumentation_readiness(bots)
+                low_readiness_bots = {
+                    bid: r.get("overall_score", 0)
+                    for bid, r in readiness.items()
+                    if r.get("overall_score", 0) < _INSTRUMENTATION_READINESS_THRESHOLD
+                }
+                if low_readiness_bots:
+                    logger.warning(
+                        "Low instrumentation readiness: %s",
+                        ", ".join(f"{b}={s:.0%}" for b, s in low_readiness_bots.items()),
+                    )
+                    self._event_stream.broadcast("instrumentation_readiness_low", {
+                        "date": date, "bots": low_readiness_bots,
+                    })
+            except Exception:
+                logger.debug("Instrumentation readiness check skipped", exc_info=True)
+
             active_suggestions = ctx.load_active_suggestions()
             triage = DailyTriage(
                 curated_dir=self._curated_dir,
@@ -1386,25 +1407,67 @@ class Handlers:
                             idea["status"] = "proposed"
                             f.write(json.dumps(idea) + "\n")
 
-                    # High-confidence ideas → experiment proposals
-                    for idea in strategy_ideas:
-                        if idea.get("confidence", 0) >= 0.7 and self._experiment_manager is not None:
-                            try:
-                                self._experiment_manager.propose(
-                                    title=idea.get("title", "Strategy idea"),
-                                    description=idea.get("description", ""),
-                                    hypothesis_id=None,
-                                    suggestion_id=None,
-                                    acceptance_criteria=[{
-                                        "metric": "pnl",
-                                        "direction": "improve",
-                                        "minimum_change": 0.0,
-                                        "observation_window_days": 14,
-                                        "minimum_trade_count": 20,
-                                    }],
-                                )
-                            except Exception:
-                                logger.warning("Failed to create experiment for strategy idea %s", idea.get("idea_id"))
+                    # High-confidence ideas → structural experiment records
+                    if self._structural_experiment_tracker is not None:
+                        from schemas.structural_experiment import (
+                            AcceptanceCriteria,
+                            ExperimentRecord,
+                        )
+
+                        for idea in strategy_ideas:
+                            if idea.get("confidence", 0) >= 0.7:
+                                try:
+                                    exp_id = "exp_" + _hashlib.sha256(
+                                        f"{run_id}:{idea.get('bot_id', 'unknown')}:{idea.get('title', '')}".encode()
+                                    ).hexdigest()[:12]
+
+                                    # Extract criteria from the idea itself if available
+                                    idea_criteria: list[AcceptanceCriteria] = []
+                                    for raw_c in idea.get("acceptance_criteria", []):
+                                        if isinstance(raw_c, dict) and raw_c.get("metric"):
+                                            try:
+                                                idea_criteria.append(AcceptanceCriteria(**raw_c))
+                                            except Exception:
+                                                pass
+                                    if not idea_criteria:
+                                        # Fallback: infer from applicable_regimes and edge_hypothesis
+                                        default_metric = "pnl"
+                                        default_window = 14
+                                        default_min_trades = 20
+                                        # Longer window for regime-specific strategies
+                                        if idea.get("applicable_regimes") and len(idea.get("applicable_regimes", [])) <= 2:
+                                            default_window = 30
+                                            default_min_trades = 15
+                                        idea_criteria = [
+                                            AcceptanceCriteria(
+                                                metric=default_metric,
+                                                direction="improve",
+                                                minimum_change=0.0,
+                                                observation_window_days=default_window,
+                                                minimum_trade_count=default_min_trades,
+                                            ),
+                                        ]
+
+                                    experiment = ExperimentRecord(
+                                        experiment_id=exp_id,
+                                        bot_id=idea.get("bot_id", "unknown"),
+                                        title=idea.get("title", "Strategy idea"),
+                                        description=idea.get("description", ""),
+                                        proposal_run_id=run_id,
+                                        acceptance_criteria=idea_criteria,
+                                    )
+                                    self._structural_experiment_tracker.record_experiment(experiment)
+                                    logger.info("Recorded structural experiment %s for strategy idea %s", exp_id, idea.get("idea_id"))
+                                    await self._notify(
+                                        "structural_experiment_proposed",
+                                        NotificationPriority.NORMAL,
+                                        f"Structural Experiment Proposed: {experiment.title}",
+                                        (f"Bot: {experiment.bot_id}\n"
+                                         f"ID: {exp_id}\n"
+                                         f"Description: {experiment.description[:200]}"),
+                                    )
+                                except Exception:
+                                    logger.warning("Failed to create experiment for strategy idea %s", idea.get("idea_id"))
 
                     self._event_stream.broadcast("strategy_ideas_proposed", {
                         "run_id": run_id, "count": len(strategy_ideas),
@@ -3111,6 +3174,39 @@ class Handlers:
                     pass
         evidence["macro_regime_data"] = macro_regime_data
 
+        # Aggregate exit efficiency data for detect_exit_timing_issues
+        exit_efficiency_data: dict[str, dict] = {}
+        for bot_id in bot_ids:
+            daily_effs: list[dict] = []
+            for date_str in self._iter_date_range(week_start, week_end):
+                data = self._load_json_file(
+                    self._curated_dir / date_str / bot_id / "exit_efficiency.json"
+                )
+                if isinstance(data, dict) and data.get("total_trades_with_data", 0) > 0:
+                    daily_effs.append(data)
+            if daily_effs:
+                avg_eff = statistics.mean(d["avg_efficiency"] for d in daily_effs)
+                avg_premature = statistics.mean(d["premature_exit_pct"] for d in daily_effs)
+                exit_efficiency_data[bot_id] = {
+                    "avg_exit_efficiency": avg_eff,
+                    "premature_exit_pct": avg_premature,
+                }
+        evidence["exit_efficiency_data"] = exit_efficiency_data or None
+
+        # Aggregate enriched instrumentation curated files
+        evidence["execution_latency"] = self._aggregate_curated_file(
+            "execution_latency.json", week_start, week_end, bot_ids,
+        )
+        evidence["sizing_data"] = self._aggregate_curated_file(
+            "sizing_analysis.json", week_start, week_end, bot_ids,
+        )
+        evidence["param_correlations"] = self._aggregate_curated_file(
+            "param_outcome_correlation.json", week_start, week_end, bot_ids,
+        )
+        evidence["portfolio_context"] = self._aggregate_curated_file(
+            "portfolio_context.json", week_start, week_end, bot_ids,
+        )
+
         return {key: value for key, value in evidence.items() if value}
 
     def _aggregate_weekly_filter_summaries(
@@ -3522,6 +3618,26 @@ class Handlers:
                 results[bot_id] = {"by_context": by_context}
         return results
 
+    def _aggregate_curated_file(
+        self,
+        filename: str,
+        week_start: str,
+        week_end: str,
+        bot_ids: list[str],
+    ) -> dict[str, dict] | None:
+        """Load a named curated JSON file per bot, using most recent day's data."""
+        result: dict[str, dict] = {}
+        for bot_id in bot_ids:
+            # Walk backwards through the week to find most recent data
+            for date_str in reversed(self._iter_date_range(week_start, week_end)):
+                data = self._load_json_file(
+                    self._curated_dir / date_str / bot_id / filename
+                )
+                if isinstance(data, dict) and data.get("coverage", 0) > 0:
+                    result[bot_id] = data
+                    break
+        return result or None
+
     def _load_recent_daily_metric_series(
         self, bot_id: str, end_date: str, metric_key: str, max_points: int,
     ) -> list[float]:
@@ -3662,6 +3778,11 @@ class Handlers:
                 "filter_decision": "filter_decision_events",
                 "indicator_snapshot": "indicator_snapshot_events",
                 "orderbook_context": "orderbook_context_events",
+                "parameter_change": "parameter_change_events",
+                "order": "order_events",
+                "process_quality": "process_quality_events",
+                "stop_adjustment": "stop_adjustment_events",
+                "post_exit": "post_exit_events",
             }.items():
                 events = self._load_raw_json_records(bot_raw, event_type)
                 if events:

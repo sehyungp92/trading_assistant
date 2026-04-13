@@ -8,6 +8,13 @@ from typing import Any
 
 from schemas.autonomous_pipeline import ParameterDefinition
 from schemas.events import TradeEvent, MissedOpportunityEvent
+from schemas.objective_weights import (
+    W_CALMAR_NO_PROCESS,
+    W_EXPECTANCY_NO_PROCESS,
+    W_EXPECTED_R_NO_PROCESS,
+    W_INV_DRAWDOWN_NO_PROCESS,
+    W_PROFIT_FACTOR_NO_PROCESS,
+)
 from schemas.parameter_search import (
     CandidateResult,
     ParameterSearchReport,
@@ -260,9 +267,12 @@ class ParameterSearcher:
         metrics: SimulationMetrics,
         baseline: SimulationMetrics,
     ) -> float:
-        """Aligned with ground truth (excl. process_quality, renormalized to 90%).
+        """Ratio-based composite for candidate ranking (baseline = 1.0).
 
-        expected_r≈33.3%, calmar≈22.2%, pf≈16.7%, expectancy≈16.7%, inv_dd≈11.1%
+        Uses shared weights from schemas.objective_weights (excl. process_quality).
+        Output is a ratio, NOT a [0, 1] score — see objective_weights.py for the
+        intentional divergence between this and GroundTruthComputer's z-score scale.
+        Use ratio_to_unit_scale() for [0, 1] normalization when needed.
         """
         # Baseline guards — avoid division by zero and perverse sign flips
         b_er = baseline.net_pnl if baseline.net_pnl > 0 else 1.0
@@ -279,11 +289,11 @@ class ParameterSearcher:
         dd_inc = abs(metrics.max_drawdown_pct) / b_dd - 1.0
 
         return (
-            0.333 * er_imp
-            + 0.222 * calmar_imp
-            + 0.167 * pf_imp
-            + 0.167 * exp_imp
-            - 0.111 * max(0, dd_inc)
+            W_EXPECTED_R_NO_PROCESS * er_imp
+            + W_CALMAR_NO_PROCESS * calmar_imp
+            + W_PROFIT_FACTOR_NO_PROCESS * pf_imp
+            + W_EXPECTANCY_NO_PROCESS * exp_imp
+            - W_INV_DRAWDOWN_NO_PROCESS * max(0, dd_inc)
         )
 
     @staticmethod

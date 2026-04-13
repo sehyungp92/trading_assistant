@@ -106,10 +106,14 @@ class TestOrchestratorBrain:
             "bot_id": "bot1",
             "event_type": "order",
             "payload": json.dumps({"order_id": "o1", "side": "BUY"}),
+            "exchange_timestamp": "2026-03-01T14:00:00+00:00",
         }
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "order"
+        assert actions[0].details["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+        assert json.loads(actions[0].details["payload"])["order_id"] == "o1"
 
     def test_process_quality_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
@@ -117,10 +121,35 @@ class TestOrchestratorBrain:
             "bot_id": "bot2",
             "event_type": "process_quality",
             "payload": json.dumps({"score": 85}),
+            "exchange_timestamp": "2026-03-01T14:05:00+00:00",
         }
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "process_quality"
+        assert actions[0].details["exchange_timestamp"] == "2026-03-01T14:05:00+00:00"
+        assert json.loads(actions[0].details["payload"])["score"] == 85
+
+    def test_safety_critical_parameter_change_alerts_and_queues_for_daily(
+        self, brain: OrchestratorBrain,
+    ):
+        event = {
+            "event_id": "pc001",
+            "bot_id": "bot1",
+            "event_type": "parameter_change",
+            "payload": json.dumps({"param_name": "risk_per_trade", "old_value": 0.01, "new_value": 0.02}),
+            "exchange_timestamp": "2026-03-01T15:00:00+00:00",
+        }
+
+        actions = brain.decide(event)
+
+        assert [action.type for action in actions] == [
+            ActionType.ALERT_IMMEDIATE,
+            ActionType.QUEUE_FOR_DAILY,
+        ]
+        assert actions[0].details["safety_critical"] is True
+        assert actions[1].details["event_type"] == "parameter_change"
+        assert actions[1].details["exchange_timestamp"] == "2026-03-01T15:00:00+00:00"
 
     def test_bot_error_critical_alerts_immediately(self, brain: OrchestratorBrain):
         event = {

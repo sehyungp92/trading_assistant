@@ -531,3 +531,158 @@ class TestLedgerRecordWeekExtended:
         )
         assert entry.composite_delta == {}
         assert entry.net_improvement is False
+
+
+# ── A1/A2: Timestamp and field drift fixes ──
+
+
+class TestTimestampFallbackFixes:
+    """Verify proposed_at and resolved_at fallback chains work correctly."""
+
+    def _make_cycle(self, tmp_path):
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        memory_dir = tmp_path / "memory"
+        (memory_dir / "findings").mkdir(parents=True)
+        cycle = LearningCycle(
+            curated_dir=tmp_path / "curated",
+            memory_dir=memory_dir,
+            runs_dir=tmp_path / "runs",
+            bots=["bot_a"],
+        )
+        return cycle, memory_dir
+
+    def test_count_suggestions_with_proposed_at_only(self, tmp_path):
+        """Suggestions with only proposed_at (current schema) are counted."""
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        cycle, memory_dir = self._make_cycle(tmp_path)
+        tracker = MagicMock()
+        tracker.load_all.return_value = [
+            {"suggestion_id": "s1", "proposed_at": "2026-03-03T10:00:00Z", "status": "deployed"},
+            {"suggestion_id": "s2", "proposed_at": "2026-03-04T10:00:00Z", "status": "accepted"},
+            {"suggestion_id": "s3", "proposed_at": "2026-02-28T10:00:00Z", "status": "deployed"},  # out of range
+        ]
+        cycle._suggestion_tracker = tracker
+
+        proposed, accepted, implemented = cycle._count_suggestions("2026-03-01", "2026-03-07")
+        assert proposed == 2
+        assert accepted == 2
+        assert implemented == 1
+
+    def test_count_suggestions_with_legacy_timestamp(self, tmp_path):
+        """Suggestions with legacy timestamp field still work."""
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        cycle, memory_dir = self._make_cycle(tmp_path)
+        tracker = MagicMock()
+        tracker.load_all.return_value = [
+            {"suggestion_id": "s1", "timestamp": "2026-03-03T10:00:00Z", "status": "deployed"},
+        ]
+        cycle._suggestion_tracker = tracker
+
+        proposed, accepted, implemented = cycle._count_suggestions("2026-03-01", "2026-03-07")
+        assert proposed == 1
+
+    def test_classify_loop_sources_with_proposed_at(self, tmp_path):
+        """_classify_loop_sources uses proposed_at for current-schema suggestions."""
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        cycle, memory_dir = self._make_cycle(tmp_path)
+        tracker = MagicMock()
+        tracker.load_all.return_value = [
+            {
+                "suggestion_id": "s1",
+                "proposed_at": "2026-03-03T10:00:00Z",
+                "detection_context": {"detector_name": "alpha_decay"},
+            },
+            {
+                "suggestion_id": "s2",
+                "proposed_at": "2026-03-04T10:00:00Z",
+            },
+        ]
+        cycle._suggestion_tracker = tracker
+
+        inner_p, outer_p, _, _, _, _ = cycle._classify_loop_sources(
+            "2026-03-01", "2026-03-07", memory_dir / "findings",
+        )
+        assert inner_p == 1
+        assert outer_p == 1
+
+    def test_count_experiments_with_resolved_at(self, tmp_path):
+        """Experiments with resolved_at (current schema) are counted."""
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        cycle, memory_dir = self._make_cycle(tmp_path)
+
+        exp_mock = MagicMock()
+        exp_mock.resolved_at = "2026-03-05T10:00:00Z"
+        # No concluded_at attribute
+        del exp_mock.concluded_at
+
+        tracker = MagicMock()
+        tracker.load_all.return_value = [exp_mock]
+        cycle._experiment_tracker = tracker
+
+        count = cycle._count_experiments("2026-03-01", "2026-03-07")
+        assert count == 1
+
+    def test_count_experiments_with_legacy_concluded_at(self, tmp_path):
+        """Experiments with only concluded_at (legacy) are still counted."""
+        from skills.learning_cycle import LearningCycle
+        from unittest.mock import MagicMock
+
+        cycle, memory_dir = self._make_cycle(tmp_path)
+
+        exp_mock = MagicMock()
+        exp_mock.resolved_at = None
+        exp_mock.concluded_at = "2026-03-05T10:00:00Z"
+
+        tracker = MagicMock()
+        tracker.load_all.return_value = [exp_mock]
+        cycle._experiment_tracker = tracker
+
+        count = cycle._count_experiments("2026-03-01", "2026-03-07")
+        assert count == 1
+
+
+class TestSuggestionQualityTrendTimestampFix:
+    """Verify suggestion_scorer uses proposed_at fallback."""
+
+    def test_quality_trend_with_proposed_at_only(self, tmp_path):
+        """compute_suggestion_quality_trend picks up proposed_at suggestions."""
+        from skills.suggestion_scorer import SuggestionScorer
+
+        findings = tmp_path / "findings"
+        findings.mkdir()
+
+        # Write suggestions with only proposed_at
+        with open(findings / "suggestions.jsonl", "w") as f:
+            f.write(json.dumps({
+                "suggestion_id": "s1",
+                "bot_id": "bot_a",
+                "category": "signal",
+                "proposed_at": "2026-03-03T10:00:00Z",
+                "status": "deployed",
+            }) + "\n")
+
+        # Write matching outcome
+        with open(findings / "outcomes.jsonl", "w") as f:
+            f.write(json.dumps({
+                "suggestion_id": "s1",
+                "verdict": "POSITIVE",
+                "measurement_date": "2026-03-10T10:00:00Z",
+                "measurement_quality": "high",
+            }) + "\n")
+
+        scorer = SuggestionScorer(findings)
+        result = scorer.compute_suggestion_quality_trend(weeks=8)
+
+        # Should have at least one week with data (not empty due to missing timestamps)
+        assert result.get("weekly_metrics") is not None
+        assert len(result["weekly_metrics"]) > 0

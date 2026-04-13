@@ -237,10 +237,10 @@ class OrchestratorBrain:
         return self._queue_for_daily_event(event_id, bot_id, event, "daily_snapshot")
 
     def _handle_order(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "order")
 
     def _handle_process_quality(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "process_quality")
 
     def _handle_bot_error(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return self._handle_error(event_id, bot_id, event)
@@ -278,12 +278,15 @@ class OrchestratorBrain:
         }
 
         if is_safety_critical or param_name in _SAFETY_CRITICAL_PARAMS:
-            return [Action(
-                type=ActionType.ALERT_IMMEDIATE,
-                event_id=event_id,
-                bot_id=bot_id,
-                details={"param_name": param_name, "safety_critical": True, **payload},
-            )]
+            return [
+                Action(
+                    type=ActionType.ALERT_IMMEDIATE,
+                    event_id=event_id,
+                    bot_id=bot_id,
+                    details={"param_name": param_name, "safety_critical": True, **payload},
+                ),
+                *self._queue_for_daily_event(event_id, bot_id, event, "parameter_change"),
+            ]
         return self._queue_for_daily_event(event_id, bot_id, event, "parameter_change")
 
     def _handle_unknown(self, event_id: str, bot_id: str, event: dict) -> list[Action]:

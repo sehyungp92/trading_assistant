@@ -1157,3 +1157,121 @@ class TestParameterChangeLog:
     def test_prompt_assembler_includes_parameter_changes(self):
         from analysis.prompt_assembler import _CURATED_FILES
         assert "parameter_changes.json" in _CURATED_FILES
+
+
+class TestExecutionEvidenceArtifacts:
+    def test_builds_order_lifecycle_summary(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        events = [
+            {"payload": {"order_id": "o1", "pair": "BTCUSDT", "side": "LONG", "order_type": "LIMIT", "status": "submitted", "requested_qty": 1, "strategy_type": "alpha"}},
+            {"payload": {"order_id": "o1", "pair": "BTCUSDT", "side": "LONG", "order_type": "LIMIT", "status": "fill", "requested_qty": 1, "filled_qty": 1, "requested_price": 50000.0, "fill_price": 50010.0, "latency_ms": 25, "strategy_type": "alpha"}},
+            {"payload": {"order_id": "o2", "pair": "ETHUSDT", "side": "SHORT", "order_type": "STOP", "status": "REJECTED", "requested_qty": 2, "reject_reason": "risk_check", "latency_ms": 10, "strategy_type": "beta"}},
+            {"payload": {"order_id": "o3", "pair": "SOLUSDT", "side": "LONG", "order_type": "LIMIT", "status": "CANCELLED", "requested_qty": 3, "strategy_type": "alpha"}},
+            {"payload": json.dumps({"order_id": "o4", "pair": "ADAUSDT", "side": "LONG", "order_type": "LIMIT", "status": "partially_filled", "requested_qty": 4, "filled_qty": 2, "slippage_bps": 1.5, "latency_ms": 40, "strategy_type": "alpha"})},
+        ]
+
+        result = builder.build_order_lifecycle_summary(events)
+
+        assert result["total_events"] == 5
+        assert result["distinct_orders"] == 4
+        assert result["status_counts"]["FILLED"] == 1
+        assert result["status_counts"]["PARTIAL_FILL"] == 1
+        assert result["reject_count"] == 1
+        assert result["cancel_count"] == 1
+        assert result["partial_fill_count"] == 1
+        assert result["fill_count"] == 1
+        assert result["avg_fill_slippage_bps"] == pytest.approx(1.75)
+        assert result["max_fill_slippage_bps"] == pytest.approx(2.0)
+        assert result["avg_latency_ms"] == pytest.approx(25.0)
+        assert result["top_reject_reasons"] == [{"reason": "risk_check", "count": 1}]
+        assert result["by_strategy"]["alpha"]["event_count"] == 4
+        assert result["by_strategy"]["alpha"]["partial_fill_count"] == 1
+        assert result["by_strategy"]["beta"]["reject_count"] == 1
+        assert result["rejects"][0]["status"] == "REJECTED"
+
+    def test_builds_order_lifecycle_summary_with_common_fallback_fields(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        events = [
+            {
+                "order_id": "o5",
+                "pair": "BTCUSDT",
+                "status": "partial fill",
+                "requested_qty": 4,
+                "qty": 2,
+                "requested_price": 100.0,
+                "price": 100.5,
+                "strategy": "gamma",
+                "event_metadata": {"exchange_timestamp": "2026-03-01T09:31:00+00:00"},
+            },
+        ]
+
+        result = builder.build_order_lifecycle_summary(events)
+
+        assert result["partial_fill_count"] == 1
+        assert result["avg_fill_slippage_bps"] == pytest.approx(50.0)
+        assert result["by_strategy"]["gamma"]["partial_fill_count"] == 1
+        assert result["partial_fills"][0]["filled_qty"] == 2.0
+        assert result["partial_fills"][0]["fill_price"] == 100.5
+        assert result["partial_fills"][0]["timestamp"] == "2026-03-01T09:31:00+00:00"
+
+    def test_builds_process_quality_summary(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        events = [
+            {"payload": {"trade_id": "t1", "process_quality_score": 52, "classification": "poor", "root_causes": ["order_reject", "latency_spike"], "negative_factors": ["latency"], "evidence_refs": ["run-1"]}},
+            {"payload": json.dumps({"trade_id": "t2", "score": 88, "classification": "good", "root_causes": ["good_execution"], "negative_factors": [], "evidence_refs": ["run-2"]})},
+            {"payload": {"trade_id": "t3", "process_quality_score": 41, "classification": "poor", "root_causes": ["order_reject"], "negative_factors": ["reject"], "evidence_refs": ["run-3"]}},
+        ]
+
+        result = builder.build_process_quality_summary(events)
+
+        assert result["total_scores"] == 3
+        assert result["avg_score"] == pytest.approx(60.333)
+        assert result["min_score"] == 41.0
+        assert result["max_score"] == 88.0
+        assert result["low_score_count"] == 2
+        assert result["classification_counts"] == {"poor": 2, "good": 1}
+        assert result["root_cause_counts"]["order_reject"] == 2
+        assert [row["trade_id"] for row in result["worst_scores"][:2]] == ["t3", "t1"]
+
+    def test_builds_process_quality_summary_with_scalar_fields(self):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        events = [
+            {
+                "payload": {
+                    "trade_id": "t4",
+                    "process_quality_score": 59,
+                    "classification": " Poor ",
+                    "root_causes": "order_reject",
+                    "negative_factors": "latency",
+                    "evidence_refs": "run-4",
+                },
+            },
+        ]
+
+        result = builder.build_process_quality_summary(events)
+
+        assert result["classification_counts"] == {"poor": 1}
+        assert result["root_cause_counts"] == {"order_reject": 1}
+        assert result["worst_scores"][0]["negative_factors"] == ["latency"]
+        assert result["worst_scores"][0]["evidence_refs"] == ["run-4"]
+
+    def test_write_curated_writes_execution_artifacts(self, tmp_path: Path):
+        builder = DailyMetricsBuilder("2026-03-01", "bot1")
+        output_dir = builder.write_curated(
+            trades=[],
+            missed=[],
+            base_dir=tmp_path,
+            order_events=[{"payload": {"order_id": "o1", "status": "FILLED", "requested_price": 100.0, "fill_price": 100.2}}],
+            process_quality_events=[{"payload": {"trade_id": "t1", "process_quality_score": 55, "classification": "poor"}}],
+        )
+
+        assert (output_dir / "order_lifecycle.json").exists()
+        assert (output_dir / "process_quality.json").exists()
+
+    def test_prompt_assembler_includes_order_lifecycle(self):
+        from analysis.prompt_assembler import _CURATED_FILES
+        assert "order_lifecycle.json" in _CURATED_FILES
+
+    def test_prompt_assembler_includes_process_quality(self):
+        from analysis.prompt_assembler import _CURATED_FILES
+        assert "process_quality.json" in _CURATED_FILES

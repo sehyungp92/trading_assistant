@@ -49,6 +49,7 @@ class StructuralProposal(BaseModel):
     reversibility: Literal["easy", "moderate", "hard"] = "moderate"
     evidence: str = ""
     estimated_complexity: Literal["low", "medium", "high"] = "medium"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     file_changes: list[FileChange] = Field(default_factory=list)
     verification_commands: list[str] = Field(default_factory=list)
     acceptance_criteria: list[dict] = Field(default_factory=list)

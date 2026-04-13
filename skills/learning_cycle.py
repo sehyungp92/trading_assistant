@@ -259,7 +259,7 @@ class LearningCycle:
                     sid = s.get("suggestion_id", "")
                     source = self.classify_suggestion_source(s)
                     sid_to_source[sid] = source  # ALL suggestions → mapping
-                    ts = s.get("timestamp", "") or s.get("created_at", "")
+                    ts = s.get("proposed_at", "") or s.get("timestamp", "") or s.get("created_at", "")
                     if ts and week_start <= ts[:10] <= week_end:
                         if source == "inner":
                             inner_proposed += 1
@@ -279,7 +279,7 @@ class LearningCycle:
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    ts = entry.get("measured_at") or entry.get("timestamp", "")
+                    ts = entry.get("measurement_date") or entry.get("measured_at") or entry.get("timestamp", "")
                     if not ts or not (week_start <= ts[:10] <= week_end):
                         continue
                     if not is_conclusive_outcome(entry):
@@ -310,14 +310,14 @@ class LearningCycle:
             return proposed, accepted, implemented
         try:
             for s in self._suggestion_tracker.load_all():
-                ts = s.get("timestamp", "") or s.get("created_at", "")
+                ts = s.get("proposed_at", "") or s.get("timestamp", "") or s.get("created_at", "")
                 if not ts or not (week_start <= ts[:10] <= week_end):
                     continue
                 proposed += 1
                 status = s.get("status", "")
                 if status in ("accepted", "merged", "deployed", "implemented", "measured"):
                     accepted += 1
-                if status in ("implemented", "measured"):
+                if status in ("deployed", "implemented", "measured"):
                     implemented += 1
         except Exception:
             logger.warning("Failed to count suggestions for ledger")
@@ -336,7 +336,7 @@ class LearningCycle:
                 return 0
             count = 0
             for exp in loader():
-                concluded = str(getattr(exp, "concluded_at", "") or "")
+                concluded = str(getattr(exp, "resolved_at", "") or getattr(exp, "concluded_at", "") or "")
                 if concluded and week_start <= concluded[:10] <= week_end:
                     count += 1
             return count

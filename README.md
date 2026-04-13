@@ -44,15 +44,13 @@ When parameters pass, the autonomous pipeline backtests the specific change, val
 
 ### Proposes structural and portfolio-level improvements
 
-Beyond parameter tuning, the strategy engine runs 11 detectors looking for higher-level issues:
+Beyond parameter tuning, the strategy engine runs 19 detectors across four levels:
 
-- Alpha decay and signal decay (declining signal-to-outcome correlation)
-- Exit timing issues (premature exits based on MFE/exit efficiency)
-- Correlation breakdown between bots
-- Position sizing mismatches (size vs. outcome)
-- Filter interaction effects (multi-filter combinations)
-- Factor correlation drift
-- Microstructure issues (fill quality, adverse selection)
+- **Signal quality** (4): alpha decay, signal decay, component signal decay, factor correlation decay
+- **Execution quality** (4): exit timing issues, microstructure issues (fill quality, adverse selection), stress entry patterns, position sizing mismatches
+- **Regime awareness** (3): regime config effectiveness, regime transition cost, time-of-day patterns
+- **Portfolio structure** (5): family imbalance, correlation concentration, drawdown tier miscalibration, coordination gaps, heat cap utilisation
+- **Pattern detection** (3): drawdown patterns, filter interaction effects, correlation breakdown
 
 These findings feed into the configured weekly analysis provider, which produces structural suggestions (e.g., "add a regime-aware exit rule", "split this strategy into two variants"). Portfolio-level analysis computes cross-bot exposure concentration, crowding alerts, and risk-parity allocation recommendations with Calmar ratio tilt. Cross-bot transfer proposals identify validated patterns from one bot that may apply to others, scored by regime distribution overlap and historical transfer success rates.
 
@@ -63,30 +61,56 @@ Structural suggestions surface in reports for human consideration — they are n
 Every suggestion the system makes is tracked through a full lifecycle:
 
 ```
-Strategy Engine → suggestion with ID → SuggestionTracker
-         ↓
-User approves/rejects via Telegram → lifecycle update
-         ↓
-AutoOutcomeMeasurer (weekly) → 7-day pre/post performance comparison → outcomes.jsonl
-         ↓
-Per-category win rate scorecard → blocks suggestion types with poor track records
-         ↓
-Prediction accuracy tracking → confidence calibration on future analyses
-         ↓
-Convergence tracker → is the learning system improving, degrading, or oscillating?
-         ↓
-All of the above injected into the next analysis prompt
+                         Strategy Engine (19 detectors)
+                                    ↓
+                    suggestion with ID → SuggestionTracker
+                          ↓                       ↓
+                   parameter change          structural proposal
+                          ↓                       ↓
+                   ParameterSearcher         6 validation gates
+                   (grid search, backtest,   (hypothesis track record,
+                    robustness testing)       category win rate, confidence,
+                          ↓                   acceptance criteria)
+                   search_reports.jsonl            ↓
+                          ↓                  report for human review
+                   Telegram approval card
+                          ↓
+              User approves/rejects via Telegram → lifecycle update
+                          ↓
+  ┌─────────────────── Learning Cycle (weekly) ───────────────────┐
+  │  ground truth snapshot → ledger delta → route pending items   │
+  │  parameter suggestions → inner loop    structural → tracker   │
+  └───────────────────────────────────────────────────────────────┘
+                          ↓
+         AutoOutcomeMeasurer → 7-day pre/post comparison → outcomes.jsonl
+                          ↓
+         Outcome-derived lessons → learning ledger entries
+         Correction patterns (count ≥ 3) → synthesised lessons
+                          ↓
+         ExperimentManager auto-conclusion (when statistically decisive)
+           → accept/reject linked suggestion
+           → record hypothesis outcome (positive/negative)
+                          ↓
+  ┌─────────── Fed back into every subsequent prompt ─────────────┐
+  │  ground truth trends · search reports · outcome measurements  │
+  │  category scorecards · prediction accuracy · convergence      │
+  │  loop health metrics · instrumentation readiness · bias data  │
+  └───────────────────────────────────────────────────────────────┘
 ```
 
-The system won't re-suggest rejected ideas. Categories with low success rates get their suggestions stripped before delivery. Confidence levels are capped based on historical prediction accuracy. Hypotheses that accumulate rejections and negative outcomes are auto-retired. 
+The system won't re-suggest rejected ideas. Categories with low success rates get their suggestions stripped before delivery. Confidence levels are capped based on historical prediction accuracy. Hypotheses that accumulate rejections and negative outcomes are auto-retired. Measured outcomes and persistent correction patterns are automatically synthesised into learning ledger entries, so the system's accumulated experience informs future analysis without manual curation.
 
 Crucially, the learning system is self-correcting — it monitors whether its own optimisation process is working and adjusts accordingly:
 
 - **Convergence tracking** synthesises composite score trends, prediction accuracy, outcome ratios, and scorecard evolution into an overall signal (improving/degrading/oscillating/stable). When oscillation is detected, the LLM is instructed to hold steady rather than reversing last week's suggestions.
+- **Loop health metrics** quantify six operational KPIs per cycle: proposal-to-measurement latency, oscillation severity, transfer success rate, recalibration effectiveness, suggestions per cycle, and measurement coverage. These are injected into every prompt so the agent can see where the learning pipeline itself is underperforming.
 - **Temporal decay on scorecards** applies 5%/week exponential decay to outcome weights, matching the learning ledger's existing decay rate. Categories recover from early failures as old negatives fade, making the inner loop adaptive rather than accumulative.
 - **Directional bias correction** detects systematic optimism or pessimism per metric in the LLM's prediction track record and reduces confidence on predictions that match the bias pattern (capped at 20%).
-- **Per-detector confidence calibration** gives each of the strategy engine's 11 detectors an empirical confidence multiplier derived from its outcome history. This is distinct from threshold learning (which adapts *when* a detector fires) — confidence calibration adapts *how much to trust* a detection once it fires.
+- **Per-detector confidence calibration** gives each of the strategy engine's 19 detectors an empirical confidence multiplier derived from its outcome history. This is distinct from threshold learning (which adapts *when* a detector fires) — confidence calibration adapts *how much to trust* a detection once it fires.
 - **Suggestion pre-validation** filters strategy engine suggestions against the scorecard at recording time, preventing category leakage when the scorecard was unavailable during report generation.
+- **Structural proposal validation** runs six parity gates before any structural suggestion reaches a report: hypothesis track record (block if effectiveness ≤ 0 or retired), category track record (block if win rate < 0.3 with n ≥ 5), simplicity criterion (block marginal suggestions), acceptance criteria presence (require at least one well-formed metric criterion), low-confidence block (< 0.4), and empirical calibration adjustment.
+- **Instrumentation readiness scoring** evaluates each bot across eight capability categories (basic analysis, process quality, exit analysis, regime analysis, slippage analysis, factor attribution, signal health, drawdown analysis) and injects per-bot readiness reports into prompts. The agent sees which bots have sufficient data coverage for which analysis types, preventing confident conclusions from incomplete instrumentation.
+- **Experiment auto-conclusion** tracks parameter experiments to statistical resolution, then escalates through the full chain: conclude experiment → accept/reject linked suggestion → record hypothesis outcome (positive or negative). This closes the loop from "the system proposed a change" through "the change was tested" to "the hypothesis that motivated it was updated."
 - **Discovery and convergence context** in prompt instructions tells the LLM how to use automated pattern discoveries and convergence status that were previously loaded into data but invisible to the instruction set.
 
 ## Design Philosophy: OpenClaw Governance + Autoresearch Optimisation
@@ -111,21 +135,25 @@ This disposability depends on clear, enforceable boundaries between what the sys
 
 The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimisation loop that runs without the LLM in the critical path.
 
-**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalised metrics with fixed weights derived from `soul.md` priorities: Calmar ratio (30%), profit factor (25%), inverse drawdown (25%), and process quality (20%). This function is immutable — it lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured. Every downstream decision in the learning system — cycle verdicts, retrospective synthesis, experiment acceptance, calibration tracking — flows from this one number.
+**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalised metrics with fixed weights centralised in `schemas/objective_weights.py`: expected return (30%), Calmar ratio (20%), profit factor (15%), expectancy (15%), inverse drawdown (10%), and process quality (10%). These six weights are the single source of truth — the parameter searcher uses the same constants (renormalised to exclude process quality, which only applies to human-facing evaluation). This function is immutable — it lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured. Every downstream decision in the learning system — cycle verdicts, retrospective synthesis, experiment acceptance, calibration tracking — flows from this one number.
 
-**The parameter search inner loop** (`skills/parameter_searcher.py`) runs neighbourhood exploration without any LLM involvement. When the LLM proposes a parameter change, the inner loop takes over: it builds a candidate grid around the proposed value, backtests each candidate, tests robustness across regimes and cost multipliers, and ranks results by a composite score aligned with the ground truth formula. The best value often differs from what the LLM suggested — the LLM identifies *what* to change, the inner loop finds the *optimal value*. Results route to APPROVE, EXPERIMENT, or DISCARD based on improvement thresholds and robustness scores.
+**The parameter search inner loop** (`skills/parameter_searcher.py`) runs neighbourhood exploration without any LLM involvement. When the LLM proposes a parameter change, the inner loop takes over: it builds a candidate grid around the proposed value, backtests each candidate, tests robustness across regimes and cost multipliers, and ranks results by a composite score using the same objective weights as the ground truth computer (renormalised to exclude process quality, since backtests have no process signal). The best value often differs from what the LLM suggested — the LLM identifies *what* to change, the inner loop finds the *optimal value*. Results route to APPROVE, EXPERIMENT, or DISCARD based on improvement thresholds and robustness scores.
 
 **The weekly learning cycle** (`skills/learning_cycle.py`) ties both architectures together. Each week it computes ground truth snapshots at the start and end of the period, records the delta in the learning ledger, and routes pending suggestions by type — parameter changes to the inner loop, structural changes to the experiment tracker. The composite score trajectory is injected into every subsequent LLM prompt, so the agent always sees whether its suggestions are actually improving performance against the immutable metric.
 
-### How they reinforce each other
+### How they integrate into a single learning system
 
-The two architectures are not just additive — they create a system where each compensates for the other's weakness.
+The two architectures are not just additive — they share a single objective function and a unified suggestion lifecycle, so that every proposal flows through the same measurement and feedback path regardless of whether it originated from the LLM or the inner loop.
 
-OpenClaw's permission gates prevent the failure mode Autoresearch is vulnerable to: an optimisation loop that games its own metric. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot drift its objective to something easier to optimise.
+**Shared objective function.** The ground truth computer and the parameter searcher draw their weights from the same source (`schemas/objective_weights.py`). The ground truth computer uses all six components with z-score normalisation against a bot's own history; the parameter searcher uses the same five non-process weights renormalised to sum to 1.0, applied as improvement ratios against a baseline simulation. The scoring *methods* differ because they serve different purposes — evaluation vs exploration — but the relative priority of metrics is identical. When weights are updated (behind double-approval), both systems move together.
 
-Autoresearch's inner loop prevents the failure mode OpenClaw is vulnerable to: an LLM that confidently proposes changes without empirical validation. Every parameter suggestion gets backtested, robustness-tested, and cost-sensitivity-tested before a human even sees it. The approval card a human receives includes the full exploration summary — not just the LLM's reasoning, but the inner loop's empirical evidence.
+**Unified suggestion lifecycle.** Whether a suggestion comes from the LLM's structural analysis or from the parameter searcher's grid exploration, it enters `SuggestionTracker` with a deterministic ID and follows the same path: proposed → approved → implemented → measured. The `AutoOutcomeMeasurer` doesn't distinguish origin — it measures pre/post performance deltas against the ground truth composite for every implemented suggestion. Outcomes feed back into per-category scorecards, which gate future suggestions of both types.
 
-The feedback loop closes through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, prediction accuracy, convergence reports, and directional bias data into every prompt. The LLM is told what the inner loop already explored (so it does not re-propose tested values), what past suggestions actually achieved (so it calibrates confidence), which suggestion categories have poor track records (so those get automatically stripped), whether the learning system is converging or oscillating (so it avoids destabilising reversals), and where its own directional biases lie (so it corrects for systematic over-optimism or over-pessimism). The inner loop, in turn, calibrates its own detector confidence and scorecard weights from the outcomes its suggestions produce — closing the loop in both directions. The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
+**Experiment-to-hypothesis traceability.** When the inner loop runs a parameter experiment, `ExperimentManager` tracks it to statistical conclusion. On resolution, the auto-conclusion chain updates the linked suggestion (accept or reject) and records the outcome against the hypothesis that motivated it (positive or negative). This means the LLM's next analysis prompt reflects not just "this parameter change was tested" but "the hypothesis behind it was strengthened or weakened" — connecting empirical results back to the analytical reasoning that produced them.
+
+**Bidirectional context flow.** The weekly learning cycle is the single orchestration point. It computes ground truth deltas, routes pending parameter suggestions to the inner loop, routes structural changes to the experiment tracker, and records the period's ledger entry. Results flow back through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, prediction accuracy, convergence reports, loop health metrics, instrumentation readiness, and directional bias data into every prompt. The LLM sees what the inner loop explored (preventing re-proposals), what past suggestions achieved (calibrating confidence), which categories have poor track records (auto-stripping weak suggestions), whether the system is converging or oscillating (avoiding destabilising reversals), where its directional biases lie (correcting systematic over-optimism), and which bots have sufficient instrumentation (preventing conclusions from incomplete data). The inner loop, in turn, receives updated detector confidence multipliers and scorecard weights from the outcomes its suggestions produce — closing the loop in both directions.
+
+**Governance prevents gaming.** OpenClaw's permission gates ensure neither loop can drift its own objective. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot shift to something easier to optimise. Structural proposals pass through six validation gates before reaching reports, ensuring only well-supported, high-confidence suggestions with measurable acceptance criteria survive. The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
 
 ### Matching the change type to the right tool
 
@@ -163,7 +191,7 @@ skills/         — data pipelines, metrics builders, simulation runners, tracke
 comms/          — Telegram, Discord, Email adapters + dispatcher + renderers
 schemas/        — Pydantic v2 models for all data contracts
 memory/         — policies/ (human-edited) + findings/ (system-written)
-tests/          — pytest, asyncio_mode=auto, ~2980 tests
+tests/          — pytest, asyncio_mode=auto, ~3240 tests
 ```
 
 ## Quick Start
@@ -262,9 +290,14 @@ Provider notes:
 | Weekly Summary | Sunday | Cross-bot review, strategy suggestions, structural proposals |
 | WFO | Weekly/monthly | Walk-forward parameter optimisation |
 | Proactive Scanner | Morning + evening | Anomaly detection, heartbeat monitoring |
+| Learning Cycle | Weekly | Ground truth snapshots, suggestion routing, ledger deltas |
 | Outcome Measurement | Sunday 10:00 UTC | Measures implemented suggestions against pre/post performance |
 | Memory Consolidation | Sunday 09:00 UTC | Aggregates findings, generates hypothesis candidates |
 | Transfer Outcome Tracking | Sunday 10:30 UTC | Measures cross-bot pattern transfer results |
+| Threshold Learning | Periodic | Adapts detector firing thresholds from outcome history |
+| Experiment Check | Periodic | Auto-concludes experiments that reach statistical significance |
+| Discovery Analysis | Periodic | Raw JSONL pattern discovery outside detector coverage |
+| Reliability Verification | Periodic | Verifies system health and data pipeline integrity |
 
 Bug triage runs on-demand when HIGH+ severity errors arrive. The configured agent runtime is invoked per-task (not always-running), which keeps subscription-backed profiles at zero extra cost while idle.
 

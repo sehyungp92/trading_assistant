@@ -44,6 +44,7 @@ class AutonomousPipeline:
         parameter_searcher: Any | None = None,
         experiment_config_generator: Any | None = None,
         experiment_tracker: Any | None = None,
+        experiment_manager: Any | None = None,
         calibration_tracker: Any | None = None,
         search_log_dir: Path | None = None,
         curated_dir: Path | None = None,
@@ -59,6 +60,7 @@ class AutonomousPipeline:
         self._parameter_searcher = parameter_searcher
         self._experiment_config_generator = experiment_config_generator
         self._experiment_tracker = experiment_tracker
+        self._experiment_manager = experiment_manager
         self._calibration_tracker = calibration_tracker
         self._search_log_dir = search_log_dir
         self._curated_dir = curated_dir
@@ -261,7 +263,24 @@ class AutonomousPipeline:
             logger.debug("No implementation payload for structural suggestion %s", suggestion_id)
             return None
 
-        profile = self._registry.get_profile(suggestion.get("bot_id", ""))
+        bot_id = suggestion.get("bot_id", "")
+
+        # Structural validation gate: check category track record if available
+        category = suggestion.get("category", "structural")
+        calibration_escalate = False
+        if self._calibration_tracker:
+            modifier = self._calibration_tracker.get_approval_modifier(
+                bot_id, category,
+            )
+            if modifier == "require_experiment":
+                calibration_escalate = True
+                logger.info(
+                    "Structural suggestion %s in low-reliability category %s/%s — "
+                    "escalating to double approval",
+                    suggestion_id, bot_id, category,
+                )
+
+        profile = self._registry.get_profile(bot_id)
         planned_files = list(context.get("planned_files", []) or [])
         if not planned_files:
             planned_files = [file_change.file_path for file_change in file_changes]
@@ -277,6 +296,9 @@ class AutonomousPipeline:
             if profile and planned_files
             else RepoRiskTier.REQUIRES_APPROVAL
         )
+        # Escalate risk tier for low-reliability categories
+        if calibration_escalate and risk_tier != RepoRiskTier.REQUIRES_DOUBLE_APPROVAL:
+            risk_tier = RepoRiskTier.REQUIRES_DOUBLE_APPROVAL
         request_id = hashlib.sha256(
             f"{suggestion_id}:structural:{'|'.join(planned_files)}:{implementation_notes}".encode(),
         ).hexdigest()[:12]
@@ -284,7 +306,7 @@ class AutonomousPipeline:
         return ApprovalRequest(
             request_id=request_id,
             suggestion_id=suggestion_id,
-            bot_id=suggestion.get("bot_id", ""),
+            bot_id=bot_id,
             change_kind=ChangeKind.STRUCTURAL_CHANGE,
             title=suggestion.get("title", "Structural change"),
             summary=suggestion.get("description", ""),
@@ -483,6 +505,18 @@ class AutonomousPipeline:
             proposed_value=report.best_value,
             title=suggestion.get("title", ""),
         )
+
+        # Persist DRAFT experiment via ExperimentManager so it survives
+        # beyond the ApprovalRequest string reference
+        if self._experiment_manager is not None:
+            try:
+                self._experiment_manager.create_experiment(config)
+                logger.info(
+                    "Persisted DRAFT experiment %s for suggestion %s",
+                    config.experiment_id, suggestion_id,
+                )
+            except Exception:
+                logger.warning("Failed to persist experiment config for %s", suggestion_id)
 
         profile = self._registry.get_profile(bot_id)
         risk_tier = self._risk_tier_for_files(profile, [param.file_path]) if profile else RepoRiskTier.REQUIRES_APPROVAL

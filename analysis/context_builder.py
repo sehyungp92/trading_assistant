@@ -830,6 +830,23 @@ class ContextBuilder:
         except Exception:
             return {}
 
+    def load_instrumentation_readiness(self, bots: list[str]) -> dict:
+        """Load per-bot instrumentation readiness scorecards."""
+        if not self._curated_dir or not bots:
+            return {}
+        try:
+            from skills.instrumentation_scorer import InstrumentationScorer
+
+            scorer = InstrumentationScorer(self._curated_dir, lookback_days=30)
+            reports = scorer.score_all_bots(bots)
+            return {
+                bot_id: report.model_dump(mode="json")
+                for bot_id, report in reports.items()
+                if report.days_with_data > 0
+            }
+        except Exception:
+            return {}
+
     def load_retrospective_synthesis(self) -> dict:
         """Load most recent retrospective synthesis from findings."""
         path = self._memory_dir / "findings" / "retrospective_synthesis.jsonl"
@@ -1192,6 +1209,7 @@ class ContextBuilder:
         "pattern_library",
         "failure_log",
         "reliability_summary",
+        "instrumentation_readiness",
         "allocation_history",
         "session_history",
     ]
@@ -1298,6 +1316,12 @@ class ContextBuilder:
         convergence_report = self.load_convergence_report()
         if convergence_report:
             data["convergence_report"] = convergence_report
+        if bot_configs:
+            instrumentation = self.load_instrumentation_readiness(
+                list(bot_configs.keys()),
+            )
+            if instrumentation:
+                data["instrumentation_readiness"] = instrumentation
         cycle_effectiveness = self.load_cycle_effectiveness()
         if cycle_effectiveness:
             data["cycle_effectiveness_trend"] = cycle_effectiveness
