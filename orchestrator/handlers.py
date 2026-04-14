@@ -3847,7 +3847,7 @@ class Handlers:
                 if not bot_raw.exists():
                     continue
                 all_trade_records.extend(self._load_raw_json_records(bot_raw, "trade"))
-                all_rule_events.extend(self._load_raw_json_records(bot_raw, "portfolio_rule"))
+                all_rule_events.extend(self._load_raw_json_records(bot_raw, "portfolio_rule_check"))
                 all_daily_snapshots.extend(self._load_raw_json_records(bot_raw, "daily_snapshot"))
 
             # Load BotDailySummary from just-written per-bot summary.json files

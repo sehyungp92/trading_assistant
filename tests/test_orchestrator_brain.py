@@ -51,6 +51,8 @@ class TestOrchestratorBrain:
         }
         actions = brain.decide(event)
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "error"
 
     def test_missed_opportunity_queued(self, brain: OrchestratorBrain):
         event = {
@@ -181,17 +183,21 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "post_exit"
 
     def test_portfolio_rule_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
             "event_id": "pr001",
             "bot_id": "bot1",
-            "event_type": "portfolio_rule",
+            "event_type": "portfolio_rule_check",
             "payload": json.dumps({"rule": "max_exposure", "triggered": True}),
         }
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "portfolio_rule_check"
 
     def test_market_snapshot_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
@@ -203,6 +209,8 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "market_snapshot"
 
     def test_exit_movement_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
@@ -214,6 +222,79 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "exit_movement"
+
+    def test_stop_adjustment_queued_for_daily(self, brain: OrchestratorBrain):
+        event = {
+            "event_id": "sa001",
+            "bot_id": "bot1",
+            "event_type": "stop_adjustment",
+            "payload": json.dumps({"trade_id": "t1", "old_stop": 100.0, "new_stop": 105.0}),
+            "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+        }
+        actions = brain.decide(event)
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "stop_adjustment"
+        assert actions[0].details["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
+    def test_trade_entry_queued_for_daily(self, brain: OrchestratorBrain):
+        event = {
+            "event_id": "te001",
+            "bot_id": "bot1",
+            "event_type": "trade_entry",
+            "payload": json.dumps({"trade_id": "t1", "side": "LONG", "entry_price": 50000}),
+            "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+        }
+        actions = brain.decide(event)
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "trade_entry"
+        assert actions[0].details["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
+    def test_error_low_queued_for_weekly(self, brain: OrchestratorBrain):
+        event = {
+            "event_id": "err004",
+            "bot_id": "bot1",
+            "event_type": "error",
+            "payload": json.dumps({"severity": "LOW", "message": "minor warning"}),
+            "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+        }
+        actions = brain.decide(event)
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_WEEKLY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "error"
+        assert actions[0].details["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
+    def test_error_high_suppressed_queued_for_daily(self, brain: OrchestratorBrain):
+        """Second HIGH error with same error_type is suppressed → QUEUE_FOR_DAILY with details."""
+        base = {
+            "bot_id": "bot1",
+            "event_type": "error",
+            "payload": json.dumps({"severity": "HIGH", "error_type": "api_timeout"}),
+        }
+        # First HIGH error spawns triage
+        brain.decide({"event_id": "sup001", **base})
+        # Second is suppressed — must still populate details
+        actions = brain.decide({"event_id": "sup002", **base})
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details is not None
+        assert actions[0].details["event_type"] == "error"
+
+    def test_non_safety_parameter_change_queued_for_daily(self, brain: OrchestratorBrain):
+        event = {
+            "event_id": "pc002",
+            "bot_id": "bot1",
+            "event_type": "parameter_change",
+            "payload": json.dumps({"param_name": "ema_period", "old_value": 20, "new_value": 25}),
+        }
+        actions = brain.decide(event)
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == "parameter_change"
 
     def test_truly_unknown_type_still_logged(self, brain: OrchestratorBrain):
         """Unrecognized event types still get LOG_UNKNOWN."""

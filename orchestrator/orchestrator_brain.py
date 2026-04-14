@@ -156,7 +156,7 @@ class OrchestratorBrain:
             count, suppressed, is_storm = self._error_tracker.record_and_check(bot_id, error_type)
 
             if suppressed:
-                return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+                return self._queue_for_daily_event(event_id, bot_id, event, "error")
 
             details = dict(payload)
             if is_storm:
@@ -167,9 +167,18 @@ class OrchestratorBrain:
                 Action(type=ActionType.SPAWN_TRIAGE, event_id=event_id, bot_id=bot_id, details=details),
             ]
         elif severity == "LOW":
-            return [Action(type=ActionType.QUEUE_FOR_WEEKLY, event_id=event_id, bot_id=bot_id)]
+            return [Action(
+                type=ActionType.QUEUE_FOR_WEEKLY,
+                event_id=event_id,
+                bot_id=bot_id,
+                details={
+                    "event_type": "error",
+                    "payload": self._extract_persistable_payload(event),
+                    "exchange_timestamp": event.get("exchange_timestamp"),
+                },
+            )]
         else:  # MEDIUM or unrecognized
-            return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+            return self._queue_for_daily_event(event_id, bot_id, event, "error")
 
     def _handle_heartbeat(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return [Action(type=ActionType.UPDATE_HEARTBEAT, event_id=event_id, bot_id=bot_id)]
@@ -246,16 +255,22 @@ class OrchestratorBrain:
         return self._handle_error(event_id, bot_id, event)
 
     def _handle_post_exit(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "post_exit")
 
     def _handle_portfolio_rule(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "portfolio_rule_check")
 
     def _handle_market_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "market_snapshot")
 
     def _handle_exit_movement(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
-        return [Action(type=ActionType.QUEUE_FOR_DAILY, event_id=event_id, bot_id=bot_id)]
+        return self._queue_for_daily_event(event_id, bot_id, event, "exit_movement")
+
+    def _handle_stop_adjustment(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return self._queue_for_daily_event(event_id, bot_id, event, "stop_adjustment")
+
+    def _handle_trade_entry(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return self._queue_for_daily_event(event_id, bot_id, event, "trade_entry")
 
     def _handle_indicator_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return self._queue_for_daily_event(event_id, bot_id, event, "indicator_snapshot")
@@ -266,18 +281,18 @@ class OrchestratorBrain:
     def _handle_filter_decision(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return self._queue_for_daily_event(event_id, bot_id, event, "filter_decision")
 
+    _SAFETY_CRITICAL_PARAMS = frozenset({
+        "risk_per_trade", "max_position_size", "kill_switch_enabled",
+        "trailing_stop_pct", "max_drawdown_pct", "leverage_limit",
+    })
+
     def _handle_parameter_change(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         """Route parameter changes — safety-critical params get immediate alert."""
         payload = json.loads(event.get("payload", "{}")) if isinstance(event.get("payload"), str) else event.get("payload", {})
         param_name = payload.get("param_name", "")
         is_safety_critical = payload.get("is_safety_critical", False)
 
-        _SAFETY_CRITICAL_PARAMS = {
-            "risk_per_trade", "max_position_size", "kill_switch_enabled",
-            "trailing_stop_pct", "max_drawdown_pct", "leverage_limit",
-        }
-
-        if is_safety_critical or param_name in _SAFETY_CRITICAL_PARAMS:
+        if is_safety_critical or param_name in self._SAFETY_CRITICAL_PARAMS:
             return [
                 Action(
                     type=ActionType.ALERT_IMMEDIATE,
@@ -319,9 +334,11 @@ class OrchestratorBrain:
         "process_quality": _handle_process_quality,
         "bot_error": _handle_bot_error,
         "post_exit": _handle_post_exit,
-        "portfolio_rule": _handle_portfolio_rule,
+        "portfolio_rule_check": _handle_portfolio_rule,
         "market_snapshot": _handle_market_snapshot,
         "exit_movement": _handle_exit_movement,
+        "stop_adjustment": _handle_stop_adjustment,
+        "trade_entry": _handle_trade_entry,
         "user_feedback": _handle_user_feedback,
         "parameter_change": _handle_parameter_change,
         "indicator_snapshot": _handle_indicator_snapshot,

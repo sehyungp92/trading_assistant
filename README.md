@@ -113,9 +113,9 @@ Crucially, the learning system is self-correcting — it monitors whether its ow
 - **Experiment auto-conclusion** tracks parameter experiments to statistical resolution, then escalates through the full chain: conclude experiment → accept/reject linked suggestion → record hypothesis outcome (positive or negative). This closes the loop from "the system proposed a change" through "the change was tested" to "the hypothesis that motivated it was updated."
 - **Discovery and convergence context** in prompt instructions tells the LLM how to use automated pattern discoveries and convergence status that were previously loaded into data but invisible to the instruction set.
 
-## Design Philosophy: OpenClaw Governance + Autoresearch Optimisation
+## Design Philosophy: OpenClaw Governance + Hermes Memory + Autoresearch Optimisation
 
-This system combines two reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
+This system combines three reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
 
 ### From OpenClaw: disposable agents, permanent knowledge
 
@@ -131,6 +131,16 @@ This disposability depends on clear, enforceable boundaries between what the sys
 
 **Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
 
+### From Hermes: learning delivery and memory infrastructure
+
+From Hermes it inherits memory plumbing, the infrastructure that makes learning signals actually reach the agent runtime and provides a foundation for smarter retrieval later.
+
+**Prompt delivery closes the last-mile gap.** The context builder already assembled corrections, skill instructions, and outcome histories — but these were sidecar files in the run directory that the CLI runtime might never read. `InvocationBuilder.build_full_prompt()` now merges all learning context directly into the prompt text. The agent sees its past mistakes, the methodology for the current workflow, and ranked learning cards in every run — so the upstream learning system (outcome measurement, suggestion scoring, convergence tracking) actually influences the analysis it was built to improve.
+
+**Learning cards replace flat dumps with ranked injection.** Ten evidence types (corrections, outcomes, discoveries, hypothesis results, validator blocks, etc.) are unified into `LearningCard` objects scored by recency, impact, confidence, and context match. `ranked_for_prompt()` injects the most relevant cards first, so a daily analysis for a specific bot in a drawdown regime sees the corrections and outcomes that matter to that situation, not an unranked list of everything the system has ever learned.
+
+**Grouped writes keep learning state consistent.** The write coordinator batches related writes (correction + hypothesis update + ledger append) with deduplication and per-operation error handling, preventing the partial-write inconsistencies that could corrupt the learning data the above two components depend on.
+
 ### From Autoresearch: an immutable objective function and a separable inner loop
 
 The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimisation loop that runs without the LLM in the critical path.
@@ -143,7 +153,7 @@ The core insight from Autoresearch is that a self-improving system needs an eval
 
 ### How they integrate into a single learning system
 
-The two architectures are not just additive — they share a single objective function and a unified suggestion lifecycle, so that every proposal flows through the same measurement and feedback path regardless of whether it originated from the LLM or the inner loop.
+The three architectures are not just additive — they share a single objective function and a unified suggestion lifecycle, so that every proposal flows through the same measurement and feedback path regardless of whether it originated from the LLM or the inner loop.
 
 **Shared objective function.** The ground truth computer and the parameter searcher draw their weights from the same source (`schemas/objective_weights.py`). The ground truth computer uses all six components with z-score normalisation against a bot's own history; the parameter searcher uses the same five non-process weights renormalised to sum to 1.0, applied as improvement ratios against a baseline simulation. The scoring *methods* differ because they serve different purposes — evaluation vs exploration — but the relative priority of metrics is identical. When weights are updated (behind double-approval), both systems move together.
 
