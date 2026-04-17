@@ -285,17 +285,21 @@ class AgentRunner:
         run_dir: Path,
         result: AgentResult,
         invocation: InvocationSpec,
+        prompt_package: "PromptPackage | None" = None,
     ) -> None:
         """Index the completed run in RunIndex (best-effort)."""
         if self._run_index is None:
             return
         try:
+            _meta = prompt_package.metadata if prompt_package else {}
             self._run_index.index_run(
                 run_id=run_id,
                 agent_type=agent_type,
                 run_dir=run_dir,
                 provider=invocation.provider.value,
                 model=invocation.effective_model,
+                bot_ids=_meta.get("bot_ids", ""),
+                date=_meta.get("date", ""),
                 success=result.success,
                 duration_ms=result.duration_ms,
                 cost_usd=result.cost_usd,
@@ -334,7 +338,7 @@ class AgentRunner:
         session_id = f"{run_id}-{uuid.uuid4().hex[:8]}"
         run_dir = self._runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        self._write_run_files(run_dir, prompt_package)
+        self._write_run_files(run_dir, prompt_package, agent_type=agent_type)
 
         status = self._get_provider_status(selection.provider)
         auth_mode = self._auth_checker.auth_mode_for_provider(selection.provider)
@@ -517,7 +521,18 @@ class AgentRunner:
             run_dir=run_dir,
             result=result,
             invocation=invocation,
+            prompt_package=prompt_package,
         )
+
+        # Backfill metadata.json with actual provider/model (written empty pre-invocation)
+        try:
+            _meta_path = run_dir / "metadata.json"
+            _meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+            _meta["provider"] = invocation.provider.value
+            _meta["effective_model"] = invocation.effective_model
+            _meta_path.write_text(json.dumps(_meta, default=str), encoding="utf-8")
+        except Exception:
+            pass
 
         self._broadcast_runtime_event(
             "agent_invocation_completed",
@@ -555,7 +570,7 @@ class AgentRunner:
                     raise PermissionError(msg)
                 logger.warning(msg)
 
-    def _write_run_files(self, run_dir: Path, package: PromptPackage) -> None:
+    def _write_run_files(self, run_dir: Path, package: PromptPackage, agent_type: str = "") -> None:
         for key, value in package.data.items():
             file_path = run_dir / f"{key}.json"
             file_path.write_text(
@@ -575,6 +590,19 @@ class AgentRunner:
 
         if package.skill_context:
             (run_dir / "skill_context.md").write_text(package.skill_context, encoding="utf-8")
+
+        # Write metadata.json for reindex_from_directory() compatibility
+        meta = {
+            "agent_type": agent_type,
+            "bot_ids": package.metadata.get("bot_ids", ""),
+            "date": package.metadata.get("date", ""),
+            "provider": "",
+            "effective_model": "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (run_dir / "metadata.json").write_text(
+            json.dumps(meta, default=str), encoding="utf-8",
+        )
 
     # -- Async subprocess lifecycle --
 

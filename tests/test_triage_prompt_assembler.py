@@ -76,6 +76,32 @@ class TestTriagePromptAssembler:
 
         assert "return x / y" in result.data["context"]
 
+    def test_bot_id_passed_to_metadata(self, tmp_path: Path):
+        ctx = TriageContext(
+            error_event_summary="[HIGH] RuntimeError: x",
+            stack_trace="...",
+            source_snippet="",
+            recent_git_log="",
+            past_rejections=[],
+        )
+        asm = TriagePromptAssembler(memory_dir=tmp_path)
+        result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX, bot_id="bot_a")
+
+        assert result.metadata["bot_ids"] == ["bot_a"]
+
+    def test_empty_bot_id_omits_bot_ids_metadata(self, tmp_path: Path):
+        ctx = TriageContext(
+            error_event_summary="[HIGH] RuntimeError: x",
+            stack_trace="...",
+            source_snippet="",
+            recent_git_log="",
+            past_rejections=[],
+        )
+        asm = TriagePromptAssembler(memory_dir=tmp_path)
+        result = asm.assemble(ctx, BugSeverity.HIGH, BugComplexity.OBVIOUS_FIX)
+
+        assert "bot_ids" not in result.metadata
+
     def test_loads_policies_for_system_prompt(self, tmp_path: Path):
         policy_dir = tmp_path / "policies" / "v1"
         policy_dir.mkdir(parents=True)

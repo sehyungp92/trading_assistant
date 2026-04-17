@@ -1108,8 +1108,13 @@ class ContextBuilder:
             all_lessons: list[str] = []
             seen: set[str] = set()
             for r in recalibrations:
-                for lesson in r.get("lessons_learned", []):
-                    if lesson and lesson not in seen:
+                raw_lessons = r.get("lessons_learned", [])
+                if isinstance(raw_lessons, str):
+                    items = [raw_lessons] if raw_lessons.strip() else []
+                else:
+                    items = [l for l in (raw_lessons or []) if isinstance(l, str) and l.strip()]
+                for lesson in items:
+                    if lesson not in seen:
                         seen.add(lesson)
                         all_lessons.append(lesson)
             if all_lessons:
@@ -1351,6 +1356,7 @@ class ContextBuilder:
         context_budget_items: int = _DEFAULT_CONTEXT_BUDGET_ITEMS,
         context_budget_tokens: int = 0,
         strategy_registry=None,
+        bot_id: str = "",
     ) -> PromptPackage:
         """Build a PromptPackage pre-filled with system prompt, corrections, and metadata.
 
@@ -1590,9 +1596,9 @@ class ContextBuilder:
         learning_cards_text = ""
         try:
             from skills.learning_card_store import LearningCardStore
-            card_store = LearningCardStore(self._findings_dir)
+            card_store = LearningCardStore(self._memory_dir / "findings")
             ranked = card_store.ranked_for_prompt(
-                limit=10, bot_id="", workflow=agent_type,
+                limit=10, bot_id=bot_id, workflow=agent_type,
             )
             if ranked:
                 card_store.load().record_retrieval([c.card_id for c in ranked])

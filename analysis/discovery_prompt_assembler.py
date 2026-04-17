@@ -168,6 +168,8 @@ class DiscoveryPromptAssembler:
         pkg.instructions = _DISCOVERY_INSTRUCTIONS
         pkg.data.update(self._load_discovery_context())
         pkg.context_files.extend(self._list_raw_data_files())
+        pkg.metadata["bot_ids"] = ",".join(self.bots)
+        pkg.metadata["date"] = self.date
         return pkg
 
     def _build_task_prompt(self) -> str:

@@ -233,6 +233,22 @@ class TestOutcomeReasoningAssembler:
         assert "exit_tweak" in pkg.instructions
         assert "filter_change" in pkg.instructions
 
+    def test_metadata_includes_bot_ids_from_outcomes(self, tmp_path):
+        asm, _ = self._make_assembler(tmp_path)
+        outcomes = [
+            {"suggestion_id": "s1", "bot_id": "bot_a", "pnl_before": 0, "pnl_after": 0},
+            {"suggestion_id": "s2", "bot_id": "bot_b", "pnl_before": 0, "pnl_after": 0},
+            {"suggestion_id": "s3", "bot_id": "bot_a", "pnl_before": 0, "pnl_after": 0},
+        ]
+        pkg = asm.assemble(outcomes)
+        assert pkg.metadata["bot_ids"] == ["bot_a", "bot_b"]
+
+    def test_metadata_omits_bot_ids_when_none_present(self, tmp_path):
+        asm, _ = self._make_assembler(tmp_path)
+        outcomes = [{"suggestion_id": "s1", "pnl_before": 0, "pnl_after": 0}]
+        pkg = asm.assemble(outcomes)
+        assert "bot_ids" not in pkg.metadata
+
     def test_load_suggestion_details_loads_matching(self, tmp_path):
         asm, memory_dir = self._make_assembler(tmp_path)
         suggestions_path = memory_dir / "findings" / "suggestions.jsonl"

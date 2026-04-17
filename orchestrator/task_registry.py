@@ -145,7 +145,7 @@ class TaskRegistry:
             """SELECT * FROM tasks
                WHERE status = 'running'
                  AND started_at IS NOT NULL
-                 AND (julianday('now') - julianday(started_at)) * 86400 > ?
+                 AND (julianday('now') - julianday(started_at)) * 86400 >= ?
                ORDER BY started_at ASC""",
             (timeout_seconds,),
         )

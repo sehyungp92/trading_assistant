@@ -317,6 +317,13 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     dispatcher = NotificationDispatcher()
     skills_registry = SkillsRegistry()
     cost_tracker = CostTracker(db_path / "data" / "cost_log.jsonl")
+    from orchestrator.run_index import RunIndex
+    run_index = RunIndex(db_path / "data" / "run_index.db")
+    from skills.learning_write_coordinator import LearningWriteCoordinator
+    write_coordinator = LearningWriteCoordinator(
+        findings_dir=db_path / "memory" / "findings",
+        event_stream=event_stream,
+    )
     agent_runner = AgentRunner(
         runs_dir=db_path / "runs",
         session_store=session_store,
@@ -330,6 +337,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         openrouter_api_key=config.openrouter_api_key,
         event_stream=event_stream,
         cost_tracker=cost_tracker,
+        run_index=run_index,
     )
     monitoring_loop = MonitoringLoop(
         checks=[MonitoringCheck(
@@ -1099,27 +1107,24 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
                         parsed_reasoning = _parse(reasoning_result.response)
                         if parsed_reasoning.raw_structured and "reasonings" in parsed_reasoning.raw_structured:
-                            reasoning_path.parent.mkdir(parents=True, exist_ok=True)
-                            with open(reasoning_path, "a", encoding="utf-8") as f:
-                                for r in parsed_reasoning.raw_structured["reasonings"]:
-                                    r["reasoned_at"] = datetime.now(timezone.utc).isoformat()
-                                    f.write(_json.dumps(r) + "\n")
-                            logger.info(
-                                "Recorded %d outcome reasonings",
-                                len(parsed_reasoning.raw_structured["reasonings"]),
-                            )
+                            reasonings = parsed_reasoning.raw_structured["reasonings"]
+                            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-                            # ACT on reasoning results (autoresearch keep/discard)
-                            findings = db_path / "memory" / "findings"
-                            spurious_path = findings / "spurious_outcomes.jsonl"
-                            recalib_path = findings / "recalibrations.jsonl"
+                            # Enrich reasoning records with timestamp
+                            enriched = [
+                                {**r, "reasoned_at": datetime.now(timezone.utc).isoformat()}
+                                for r in reasonings
+                            ]
 
-                            # Build suggestion lookup for enriching recalibrations
+                            # Collect spurious + recalibration records
                             suggestion_lookup = {s.get("suggestion_id", ""): s for s in deployed}
+                            spurious_records: list[dict] = []
+                            recalib_records: list[dict] = []
 
-                            # Hoist builder outside loop (reused for all transferable reasonings)
+                            # Transfer proposals stay in-loop (self-contained, uses _tpb)
+                            findings = db_path / "memory" / "findings"
                             _tpb = None
-                            for r in parsed_reasoning.raw_structured["reasonings"]:
+                            for r in reasonings:
                                 sid = r.get("suggestion_id", "")
                                 # Transferable patterns → cross-bot transfer proposals
                                 if r.get("transferable") and sid:
@@ -1136,38 +1141,64 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                                         _tpb.create_from_reasoning(r, source_bot=r.get("bot_id", ""))
                                     except Exception:
                                         logger.warning("Transfer proposal from reasoning failed for %s", sid)
-                                # Spurious effects → log for context
+                                # Collect spurious
                                 if r.get("genuine_effect") is False and sid:
-                                    try:
-                                        spurious_path.parent.mkdir(parents=True, exist_ok=True)
-                                        with open(spurious_path, "a", encoding="utf-8") as _sf:
-                                            _sf.write(_json.dumps({
-                                                "suggestion_id": sid,
-                                                "mechanism": r.get("mechanism", ""),
-                                                "confounders": r.get("confounders", []),
-                                                "recorded_at": datetime.now(timezone.utc).isoformat(),
-                                            }) + "\n")
-                                    except Exception:
-                                        logger.warning("Failed to record spurious outcome for %s", sid)
-                                # Revised confidence → recalibration log
+                                    spurious_records.append({
+                                        "suggestion_id": sid,
+                                        "bot_id": suggestion_lookup.get(sid, {}).get("bot_id", ""),
+                                        "mechanism": r.get("mechanism", ""),
+                                        "confounders": r.get("confounders", []),
+                                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                                    })
+                                # Collect recalibrations
                                 revised = r.get("revised_confidence")
                                 if revised is not None and sid:
-                                    try:
-                                        recalib_path.parent.mkdir(parents=True, exist_ok=True)
-                                        sugg_rec = suggestion_lookup.get(sid, {})
-                                        with open(recalib_path, "a", encoding="utf-8") as _rf:
-                                            _rf.write(_json.dumps({
-                                                "suggestion_id": sid,
-                                                "bot_id": sugg_rec.get("bot_id", ""),
-                                                "category": sugg_rec.get("category", ""),
-                                                "revised_confidence": revised,
-                                                "lessons_learned": r.get("lessons_learned", []),
-                                                "recorded_at": datetime.now(timezone.utc).isoformat(),
-                                            }) + "\n")
-                                    except Exception:
-                                        logger.warning("Failed to record recalibration for %s", sid)
+                                    sugg_rec = suggestion_lookup.get(sid, {})
+                                    recalib_records.append({
+                                        "suggestion_id": sid,
+                                        "bot_id": sugg_rec.get("bot_id", ""),
+                                        "category": sugg_rec.get("category", ""),
+                                        "revised_confidence": revised,
+                                        "lessons_learned": r.get("lessons_learned", ""),
+                                        "recorded_at": datetime.now(timezone.utc).isoformat(),
+                                    })
+
+                            # Batch-write via coordinator
+                            group = write_coordinator.begin(
+                                source_workflow="outcome_reasoning",
+                                source_run_id=f"reasoning-{date_str}",
+                            )
+                            write_coordinator.add_jsonl_append(
+                                group, "record_reasonings",
+                                "outcome_reasonings.jsonl", enriched,
+                            )
+                            if spurious_records:
+                                write_coordinator.add_jsonl_append(
+                                    group, "record_spurious",
+                                    "spurious_outcomes.jsonl", spurious_records,
+                                )
+                            if recalib_records:
+                                write_coordinator.add_jsonl_append(
+                                    group, "record_recalibrations",
+                                    "recalibrations.jsonl", recalib_records,
+                                )
+                            wc_result = write_coordinator.execute(group)
+                            logger.info(
+                                "Outcome reasoning writes: group=%s, all_ok=%s, ops=%d",
+                                wc_result.group_id, wc_result.all_succeeded,
+                                len(wc_result.operations),
+                            )
         except Exception:
             logger.warning("Outcome reasoning failed — skipping", exc_info=True)
+
+        # Best-effort card ingestion after learning artifacts are written
+        try:
+            from skills.learning_card_store import LearningCardStore as _LCS
+            _card_count = _LCS(db_path / "memory" / "findings").ingest_from_existing()
+            if _card_count:
+                logger.info("Ingested %d new learning cards after outcome reasoning", _card_count)
+        except Exception:
+            logger.warning("Learning card ingestion after outcome reasoning failed", exc_info=True)
 
     # TransferOutcomeMeasurer — runs weekly to measure cross-bot transfer outcomes
     async def _measure_transfer_outcomes(scheduled_for: datetime | None = None) -> None:
@@ -1279,6 +1310,15 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 logger.info("Promoted %d candidate hypotheses to active", promoted)
         except Exception:
             logger.exception("Memory consolidation failed")
+
+        # Best-effort card ingestion after consolidation
+        try:
+            from skills.learning_card_store import LearningCardStore as _LCS
+            _card_count = _LCS(db_path / "memory" / "findings").ingest_from_existing()
+            if _card_count:
+                logger.info("Ingested %d new learning cards after consolidation", _card_count)
+        except Exception:
+            logger.warning("Learning card ingestion after consolidation failed", exc_info=True)
 
     # Experiment check function (for scheduler)
     async def _check_experiments() -> None:
@@ -1787,6 +1827,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         await queue.close()
         await registry.close()
         await scheduled_run_store.close()
+        run_index.close()
 
     app = FastAPI(title="Trading Assistant Orchestrator", lifespan=lifespan)
     app.state.start_time = datetime.now(timezone.utc)

@@ -1207,6 +1207,7 @@ class Handlers:
                 package = assembler.assemble(
                     context, triage_result.severity, triage_result.complexity,
                     session_store=self._agent_runner.session_store,
+                    bot_id=bot_id,
                 )
 
                 result = await self._agent_runner.invoke(

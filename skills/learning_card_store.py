@@ -8,6 +8,7 @@ Provides:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -21,6 +22,13 @@ from schemas.learning_card import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_FILENAME = "learning_cards.jsonl"
+
+
+def _normalize_lessons(raw) -> list[str]:
+    """Normalize lessons_learned which may be a string or list."""
+    if isinstance(raw, str):
+        return [raw] if raw.strip() else []
+    return [l for l in (raw or []) if isinstance(l, str) and l.strip()]
 
 
 class LearningCardStore:
@@ -183,29 +191,163 @@ class LearningCardStore:
             **LearningCardStore._extract_provenance(entry),
         )
 
+    @staticmethod
+    def card_from_validation_log(entry: dict) -> list[LearningCard]:
+        """Create cards from a real validation_log.jsonl entry.
+
+        Each entry has ``blocked_details`` — a list of individual blocks.
+        Returns one card per blocked detail (may be empty).
+        """
+        cards: list[LearningCard] = []
+        for d in entry.get("blocked_details", []):
+            title_raw = d.get("title", "unknown")
+            source_hash = hashlib.sha256(title_raw.encode()).hexdigest()[:8]
+            cards.append(LearningCard(
+                card_type=CardType.VALIDATOR_BLOCK,
+                source_id=f"vlog:{entry.get('date', '')}:{source_hash}",
+                bot_id=d.get("bot_id", ""),
+                title=f"BLOCKED: {title_raw}"[:120],
+                content=d.get("reason", ""),
+                confidence=0.9,
+                impact_score=-0.5,
+                **LearningCardStore._extract_provenance(entry),
+            ))
+        return cards
+
+    @staticmethod
+    def card_from_outcome_reasoning(entry: dict) -> LearningCard:
+        """Create a card from an outcome_reasonings.jsonl entry."""
+        lessons = _normalize_lessons(entry.get("lessons_learned", []))
+        return LearningCard(
+            card_type=CardType.SYNTHESIS,
+            source_id=entry.get("suggestion_id", entry.get("id", "")),
+            bot_id=entry.get("bot_id", ""),
+            title=f"Outcome reasoning: {entry.get('category', 'unknown')}"[:120],
+            content=entry.get("mechanism", "") + (
+                "\n" + "; ".join(lessons) if lessons else ""
+            ),
+            tags=[entry.get("category", "")] + (
+                ["transferable"] if entry.get("transferable") else []
+            ),
+            confidence=entry.get("revised_confidence", 0.5),
+            impact_score=0.4 if entry.get("genuine_effect", True) else -0.3,
+            **LearningCardStore._extract_provenance(entry),
+        )
+
+    @staticmethod
+    def card_from_recalibration(entry: dict) -> LearningCard:
+        """Create a card from a recalibrations.jsonl entry."""
+        revised = entry.get("revised_confidence", 0.5)
+        return LearningCard(
+            card_type=CardType.RECALIBRATION,
+            source_id=entry.get("suggestion_id", entry.get("id", "")),
+            bot_id=entry.get("bot_id", ""),
+            title=f"Recalibration: {entry.get('category', 'unknown')} → {revised:.0%}"[:120],
+            content="; ".join(_normalize_lessons(entry.get("lessons_learned", []))) or "Confidence recalibrated",
+            tags=[entry.get("category", "")],
+            confidence=revised,
+            impact_score=0.3,
+            **LearningCardStore._extract_provenance(entry),
+        )
+
+    @staticmethod
+    def card_from_spurious_outcome(entry: dict) -> LearningCard:
+        """Create a card from a spurious_outcomes.jsonl entry."""
+        return LearningCard(
+            card_type=CardType.OUTCOME,
+            source_id=f"spurious:{entry.get('suggestion_id', entry.get('id', ''))}",
+            bot_id=entry.get("bot_id", ""),
+            title=f"SPURIOUS: {entry.get('suggestion_id', 'unknown')}"[:120],
+            content=entry.get("mechanism", "") + (
+                f"\nConfounders: {', '.join(entry.get('confounders', []))}"
+                if entry.get("confounders") else ""
+            ),
+            tags=["spurious"],
+            confidence=0.7,
+            impact_score=-0.3,
+            **LearningCardStore._extract_provenance(entry),
+        )
+
+    @staticmethod
+    def card_from_transfer_outcome(entry: dict) -> LearningCard:
+        """Create a card from a transfer_outcomes.jsonl entry."""
+        verdict = entry.get("verdict", "?")
+        impact = 0.4 if verdict == "positive" else (-0.3 if verdict == "negative" else 0.0)
+        confidence = 0.7 if entry.get("regime_matched", True) else 0.4
+        content_parts = []
+        if entry.get("source_bot"):
+            content_parts.append(f"Source: {entry['source_bot']}")
+        if entry.get("pnl_delta_7d") is not None:
+            content_parts.append(f"PnL delta 7d: {entry['pnl_delta_7d']:+.2f}")
+        if entry.get("win_rate_delta_7d") is not None:
+            content_parts.append(f"Win rate delta 7d: {entry['win_rate_delta_7d']:+.2%}")
+        if entry.get("regime_matched") is not None:
+            content_parts.append(f"Regime matched: {entry['regime_matched']}")
+        return LearningCard(
+            card_type=CardType.TRANSFER_RESULT,
+            source_id=f"transfer:{entry.get('pattern_id', '')}:{entry.get('target_bot', '')}",
+            bot_id=entry.get("target_bot", ""),
+            title=f"Transfer {verdict}: {entry.get('pattern_id', '')} \u2192 {entry.get('target_bot', '')}"[:120],
+            content="; ".join(content_parts) if content_parts else f"Transfer {verdict}",
+            tags=["transfer", verdict],
+            confidence=confidence,
+            impact_score=impact,
+            **LearningCardStore._extract_provenance(entry),
+        )
+
+    @staticmethod
+    def card_from_retrospective(entry: dict) -> LearningCard:
+        """Create a card from a retrospective_synthesis.jsonl entry."""
+        content_parts = []
+        for item in entry.get("what_worked", []):
+            title = item.get("title", item) if isinstance(item, dict) else str(item)
+            content_parts.append(f"Worked: {title}")
+        for item in entry.get("what_failed", []):
+            title = item.get("title", item) if isinstance(item, dict) else str(item)
+            content_parts.append(f"Failed: {title}")
+        for item in entry.get("discard", []):
+            reason = item.get("reason", item) if isinstance(item, dict) else str(item)
+            content_parts.append(f"Discard: {reason}")
+        lessons = _normalize_lessons(entry.get("lessons_learned", []))
+        for lesson in lessons:
+            content_parts.append(f"Lesson: {lesson}")
+        return LearningCard(
+            card_type=CardType.SYNTHESIS,
+            source_id=f"retro:{entry.get('week_start', '')}",
+            bot_id="",
+            title=f"Retrospective {entry.get('week_start', '')} \u2192 {entry.get('week_end', '')}"[:120],
+            content="\n".join(content_parts) if content_parts else "Weekly retrospective",
+            tags=["retrospective"],
+            confidence=0.8,
+            impact_score=0.3,
+            **LearningCardStore._extract_provenance(entry),
+        )
+
     def ingest_from_existing(self) -> int:
         """Bulk-create cards from existing JSONL stores.
 
-        Scans corrections, outcomes, and discoveries JSONL files and creates
-        cards for entries not already in the index.  Returns count of new cards.
+        Scans corrections, outcomes, discoveries, and other learning artifact
+        JSONL files and creates cards for entries not already in the index.
+        Returns count of new cards.
         """
         index = self.load()
         existing_ids = {c.card_id for c in index.cards}
         new_count = 0
 
-        sources: list[tuple[str, CardType]] = [
-            ("corrections.jsonl", CardType.CORRECTION),
-            ("outcomes.jsonl", CardType.OUTCOME),
-            ("discoveries.jsonl", CardType.DISCOVERY),
+        # Map filename → factory method (one card per entry)
+        sources = [
+            ("corrections.jsonl", self.card_from_correction),
+            ("outcomes.jsonl", self.card_from_outcome),
+            ("discoveries.jsonl", self.card_from_discovery),
+            ("outcome_reasonings.jsonl", self.card_from_outcome_reasoning),
+            ("recalibrations.jsonl", self.card_from_recalibration),
+            ("spurious_outcomes.jsonl", self.card_from_spurious_outcome),
+            ("hypotheses.jsonl", self.card_from_hypothesis),
+            ("transfer_outcomes.jsonl", self.card_from_transfer_outcome),
+            ("retrospective_synthesis.jsonl", self.card_from_retrospective),
         ]
 
-        factory_map = {
-            CardType.CORRECTION: self.card_from_correction,
-            CardType.OUTCOME: self.card_from_outcome,
-            CardType.DISCOVERY: self.card_from_discovery,
-        }
-
-        for filename, card_type in sources:
+        for filename, factory in sources:
             path = self._findings_dir / filename
             if not path.exists():
                 continue
@@ -214,11 +356,27 @@ class LearningCardStore:
                     continue
                 try:
                     entry = json.loads(line)
-                    card = factory_map[card_type](entry)
+                    card = factory(entry)
                     if card.card_id not in existing_ids:
                         index.add(card)
                         existing_ids.add(card.card_id)
                         new_count += 1
+                except Exception:
+                    continue
+
+        # validation_log.jsonl — multi-card expansion (one card per blocked detail)
+        vlog_path = self._findings_dir / "validation_log.jsonl"
+        if vlog_path.exists():
+            for line in vlog_path.read_text(encoding="utf-8").strip().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    for card in self.card_from_validation_log(entry):
+                        if card.card_id not in existing_ids:
+                            index.add(card)
+                            existing_ids.add(card.card_id)
+                            new_count += 1
                 except Exception:
                     continue
 

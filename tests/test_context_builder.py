@@ -877,3 +877,91 @@ class TestOutcomeQualityFilter:
         assert len(reliable) == 1
         assert reliable[0]["measurement_quality"] == "high"
         assert len(low_q) == 0
+
+
+class TestBotAwareCardRetrieval:
+    """Phase B: bot_id parameter flows through base_package to ranked_for_prompt."""
+
+    def test_base_package_passes_bot_id_to_ranked_for_prompt(self, tmp_path: Path):
+        """base_package(bot_id='bot_a') should pass bot_id to card_store.ranked_for_prompt."""
+        policy_dir = tmp_path / "policies" / "v1"
+        policy_dir.mkdir(parents=True)
+        (policy_dir / "agent.md").write_text("agent")
+        (policy_dir / "soul.md").write_text("soul")
+        (policy_dir / "trading_rules.md").write_text("rules")
+        (tmp_path / "findings").mkdir()
+
+        from unittest.mock import patch
+
+        ctx = ContextBuilder(tmp_path)
+        with patch("skills.learning_card_store.LearningCardStore") as MockStore:
+            mock_instance = MockStore.return_value
+            mock_instance.ranked_for_prompt.return_value = []
+            ctx.base_package(bot_id="bot_a", agent_type="daily_analysis")
+            mock_instance.ranked_for_prompt.assert_called_once_with(
+                limit=10, bot_id="bot_a", workflow="daily_analysis",
+            )
+
+    def test_base_package_defaults_bot_id_to_empty(self, tmp_path: Path):
+        """base_package() without bot_id should default to empty string."""
+        policy_dir = tmp_path / "policies" / "v1"
+        policy_dir.mkdir(parents=True)
+        (policy_dir / "agent.md").write_text("agent")
+        (policy_dir / "soul.md").write_text("soul")
+        (policy_dir / "trading_rules.md").write_text("rules")
+        (tmp_path / "findings").mkdir()
+
+        from unittest.mock import patch
+
+        ctx = ContextBuilder(tmp_path)
+        with patch("skills.learning_card_store.LearningCardStore") as MockStore:
+            mock_instance = MockStore.return_value
+            mock_instance.ranked_for_prompt.return_value = []
+            ctx.base_package(agent_type="weekly_analysis")
+            mock_instance.ranked_for_prompt.assert_called_once_with(
+                limit=10, bot_id="", workflow="weekly_analysis",
+            )
+
+    def test_wfo_assembler_passes_bot_id(self, tmp_path: Path):
+        """WFO assembler should pass self.bot_id to base_package."""
+        from analysis.wfo_prompt_assembler import WFOPromptAssembler
+        from unittest.mock import patch
+
+        memory_dir = tmp_path / "memory"
+        policy_dir = memory_dir / "policies" / "v1"
+        policy_dir.mkdir(parents=True)
+        (policy_dir / "agent.md").write_text("agent")
+        (policy_dir / "soul.md").write_text("soul")
+        (policy_dir / "trading_rules.md").write_text("rules")
+        (memory_dir / "findings").mkdir()
+
+        wfo_dir = tmp_path / "wfo_output"
+        wfo_dir.mkdir()
+        assembler = WFOPromptAssembler(bot_id="my_bot", memory_dir=memory_dir, wfo_output_dir=wfo_dir)
+
+        with patch.object(ContextBuilder, "base_package", wraps=assembler._ctx.base_package) as mock_bp:
+            assembler.assemble()
+            mock_bp.assert_called_once()
+            assert mock_bp.call_args.kwargs.get("bot_id") == "my_bot"
+
+    def test_daily_assembler_single_bot_passes_bot_id(self, tmp_path: Path):
+        """Daily assembler with single bot should pass bots[0] as bot_id."""
+        from unittest.mock import patch
+
+        memory_dir = tmp_path / "memory"
+        policy_dir = memory_dir / "policies" / "v1"
+        policy_dir.mkdir(parents=True)
+        (policy_dir / "agent.md").write_text("agent")
+        (policy_dir / "soul.md").write_text("soul")
+        (policy_dir / "trading_rules.md").write_text("rules")
+        (memory_dir / "findings").mkdir()
+        curated = tmp_path / "curated"
+        curated.mkdir()
+
+        assembler = DailyPromptAssembler(
+            date="2026-03-01", bots=["single_bot"], curated_dir=curated, memory_dir=memory_dir,
+        )
+        with patch.object(ContextBuilder, "base_package", wraps=assembler._ctx.base_package) as mock_bp:
+            assembler.assemble()
+            mock_bp.assert_called_once()
+            assert mock_bp.call_args.kwargs.get("bot_id") == "single_bot"

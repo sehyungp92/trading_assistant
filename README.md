@@ -131,15 +131,15 @@ This disposability depends on clear, enforceable boundaries between what the sys
 
 **Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
 
-### From Hermes: learning delivery and memory infrastructure
+### From Hermes: memory orchestration that improves what the next run sees
 
-From Hermes it inherits memory plumbing, the infrastructure that makes learning signals actually reach the agent runtime and provides a foundation for smarter retrieval later.
+The trading assistant already had a rich learning substrate — outcome measurements, scorecards, convergence tracking, calibration, retrospective synthesis. What it lacked was the last mile: ensuring those signals actually reached the agent runtime in ranked, relevant form and that the artifacts produced by each run fed back into the next one. From Hermes, it inherits the memory orchestration layer that closes that gap.
 
-**Prompt delivery closes the last-mile gap.** The context builder already assembled corrections, skill instructions, and outcome histories — but these were sidecar files in the run directory that the CLI runtime might never read. `InvocationBuilder.build_full_prompt()` now merges all learning context directly into the prompt text. The agent sees its past mistakes, the methodology for the current workflow, and ranked learning cards in every run — so the upstream learning system (outcome measurement, suggestion scoring, convergence tracking) actually influences the analysis it was built to improve.
+**Prompt delivery closes the last-mile gap.** The context builder assembled corrections, skill instructions, and outcome histories — but these were sidecar files in the run directory that the CLI runtime might never read. `InvocationBuilder.build_full_prompt()` now merges all learning context directly into the prompt text: instructions, corrections, skill methodology, and ranked learning cards. The agent sees its accumulated experience in every run, so the upstream learning system actually influences the analysis it was built to improve.
 
-**Learning cards replace flat dumps with ranked injection.** Ten evidence types (corrections, outcomes, discoveries, hypothesis results, validator blocks, etc.) are unified into `LearningCard` objects scored by recency, impact, confidence, and context match. `ranked_for_prompt()` injects the most relevant cards first, so a daily analysis for a specific bot in a drawdown regime sees the corrections and outcomes that matter to that situation, not an unranked list of everything the system has ever learned.
+**Learning cards turn past lessons into ranked retrieval.** Eight evidence types — corrections, measured outcomes, discoveries, causal outcome reasonings, confidence recalibrations, spurious outcome flags, hypothesis results, and validator blocks — are ingested into `LearningCard` objects scored by recency, impact, confidence, and context match. Cards are populated automatically after outcome reasoning and weekly memory consolidation. `ranked_for_prompt()` injects the most relevant cards first, scoped by bot for single-bot workflows, so a daily analysis for a specific bot sees the corrections and outcomes that matter to that bot rather than an unranked global dump.
 
-**Grouped writes keep learning state consistent.** The write coordinator batches related writes (correction + hypothesis update + ledger append) with deduplication and per-operation error handling, preventing the partial-write inconsistencies that could corrupt the learning data the above two components depend on.
+**Session history flows through every assembler.** The session store is passed through all six assembler paths into `base_package()`, giving each analysis run visibility into its own recent invocation history — what was analysed, what was recommended, what the agent saw last time. This prevents redundant re-analysis and lets the agent build on prior reasoning rather than starting from a blank slate each run.
 
 ### From Autoresearch: an immutable objective function and a separable inner loop
 
@@ -167,7 +167,9 @@ The three architectures are not just additive — they share a single objective 
 
 ### Matching the change type to the right tool
 
-The learning system routes each type of improvement to whichever tool handles it best. Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimisation problems with a clear objective function. These belong to the autonomous inner loop, which can explore a candidate grid, backtest every value, and rank results by composite score without any LLM involvement. The inner loop is faster, cheaper, and more rigorous than asking a language model to guess the right number.
+The learning system routes each type of improvement to whichever tool handles it best. 
+
+Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimisation problems with a clear objective function. These belong to the autonomous inner loop, which can explore a candidate grid, backtest every value, and rank results by composite score without any LLM involvement. The inner loop is faster, cheaper, and more rigorous than asking a language model to guess the right number.
 
 Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading performance data in context, forming hypotheses about *why* something is failing, and proposing changes that may not have an obvious metric to optimise against. These belong to the LLM, which receives the full context package (ground truth trends, outcome history, regime analysis, root cause distributions) and reasons about what to change and why. Structural proposals always surface in reports for human review — they are never auto-implemented, because the right structural change depends on judgment that neither a grid search nor a language model should make alone.
 
@@ -201,7 +203,7 @@ skills/         — data pipelines, metrics builders, simulation runners, tracke
 comms/          — Telegram, Discord, Email adapters + dispatcher + renderers
 schemas/        — Pydantic v2 models for all data contracts
 memory/         — policies/ (human-edited) + findings/ (system-written)
-tests/          — pytest, asyncio_mode=auto, ~3240 tests
+tests/          — pytest, asyncio_mode=auto, ~3370 tests
 ```
 
 ## Quick Start

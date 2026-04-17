@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
@@ -95,6 +96,10 @@ class OutcomeReasoningAssembler:
         if suggestions:
             pkg.data["suggestion_details"] = suggestions
 
+        pkg.metadata["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        bot_ids = sorted({o.get("bot_id", "") for o in outcomes} - {""})
+        if bot_ids:
+            pkg.metadata["bot_ids"] = bot_ids
         return pkg
 
     def _build_task_prompt(self, outcomes: list[dict]) -> str:

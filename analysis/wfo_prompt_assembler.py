@@ -7,6 +7,7 @@ data: optimization report, skill context, safety flags.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
@@ -41,12 +42,14 @@ class WFOPromptAssembler:
 
     def assemble(self, session_store=None) -> PromptPackage:
         """Build the complete WFO prompt package."""
-        pkg = self._ctx.base_package(session_store=session_store, agent_type="wfo")
+        pkg = self._ctx.base_package(session_store=session_store, agent_type="wfo", bot_id=self.bot_id)
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_data())
         pkg.instructions = _WFO_INSTRUCTIONS.format(bot_id=self.bot_id)
         pkg.skill_context = self._load_skill_context()
         pkg.context_files.extend(self._list_data_files())
+        pkg.metadata["bot_ids"] = self.bot_id
+        pkg.metadata["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return pkg
 
     def _build_task_prompt(self) -> str:

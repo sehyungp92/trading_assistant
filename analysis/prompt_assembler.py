@@ -272,6 +272,7 @@ class DailyPromptAssembler:
             agent_type="daily_analysis",
             bot_configs=self.bot_configs,
             strategy_registry=self.strategy_registry,
+            bot_id=self.bots[0] if len(self.bots) == 1 else "",
         )
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_structured_data(triage_report))
@@ -283,6 +284,8 @@ class DailyPromptAssembler:
         if contradictions:
             pkg.data["contradictions"] = contradictions
 
+        pkg.metadata["bot_ids"] = ",".join(self.bots)
+        pkg.metadata["date"] = self.date
         return pkg
 
     def _build_instructions(self, triage_report=None) -> str:

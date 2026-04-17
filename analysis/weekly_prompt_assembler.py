@@ -8,7 +8,7 @@ rather than mechanically reviewing 34 checklist items.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
@@ -308,6 +308,8 @@ class WeeklyPromptAssembler:
         pkg.data.update(self._load_data())
         pkg.instructions = self._build_instructions(triage_report)
         pkg.context_files.extend(self._list_data_files())
+        pkg.metadata["bot_ids"] = ",".join(self.bots)
+        pkg.metadata["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return pkg
 
     def _build_instructions(self, triage_report=None) -> str:

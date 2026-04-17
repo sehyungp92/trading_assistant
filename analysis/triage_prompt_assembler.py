@@ -6,6 +6,7 @@ context: stack trace, source snippet, git log, past rejections.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
@@ -38,12 +39,16 @@ class TriagePromptAssembler:
         severity: BugSeverity,
         complexity: BugComplexity,
         session_store=None,
+        bot_id: str = "",
     ) -> PromptPackage:
         """Build the complete prompt package."""
-        pkg = self._ctx.base_package(session_store=session_store, agent_type="triage")
+        pkg = self._ctx.base_package(session_store=session_store, agent_type="triage", bot_id=bot_id)
         pkg.task_prompt = self._build_task_prompt(severity, complexity)
         pkg.data.update({"context": self._build_context(context)})
         pkg.instructions = _TRIAGE_INSTRUCTIONS
+        pkg.metadata["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if bot_id:
+            pkg.metadata["bot_ids"] = [bot_id]
         return pkg
 
     def _build_task_prompt(
