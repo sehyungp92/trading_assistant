@@ -3751,6 +3751,70 @@ class Handlers:
         return dates
 
     @staticmethod
+    def _merge_daily_snapshots(snapshots: list[dict]) -> dict:
+        """Merge per-strategy daily snapshots into one combined snapshot."""
+        if not snapshots:
+            return {}
+        if len(snapshots) == 1:
+            return snapshots[0]
+
+        merged = dict(snapshots[-1])  # non-additive account-level fields from latest
+
+        # Additive integers
+        for key in ("total_trades", "win_count", "loss_count",
+                    "missed_count", "missed_would_have_won", "error_count"):
+            merged[key] = sum(int(s.get(key, 0) or 0) for s in snapshots)
+
+        # Additive floats
+        for key in ("gross_pnl", "net_pnl"):
+            merged[key] = sum(float(s.get(key, 0.0) or 0.0) for s in snapshots)
+
+        # Count-weighted averages
+        total_wins = merged["win_count"]
+        total_losses = merged["loss_count"]
+        total_trades = merged["total_trades"]
+
+        if total_wins > 0:
+            merged["avg_win"] = sum(
+                int(s.get("win_count", 0) or 0) * float(s.get("avg_win", 0.0) or 0.0)
+                for s in snapshots
+            ) / total_wins
+        if total_losses > 0:
+            merged["avg_loss"] = sum(
+                int(s.get("loss_count", 0) or 0) * float(s.get("avg_loss", 0.0) or 0.0)
+                for s in snapshots
+            ) / total_losses
+        if total_trades > 0:
+            merged["avg_process_quality"] = sum(
+                int(s.get("total_trades", 0) or 0) * float(s.get("avg_process_quality", 0.0) or 0.0)
+                for s in snapshots
+            ) / total_trades
+            merged["win_rate"] = merged["win_count"] / total_trades * 100
+        else:
+            merged["win_rate"] = 0.0
+
+        # Union per_strategy_summary dicts
+        combined_pss: dict = {}
+        for s in snapshots:
+            pss = s.get("per_strategy_summary", {})
+            if isinstance(pss, dict):
+                combined_pss.update(pss)
+        if combined_pss:
+            merged["per_strategy_summary"] = combined_pss
+
+        # Sum root_cause_distribution counts
+        combined_rc: dict = {}
+        for s in snapshots:
+            rc = s.get("root_cause_distribution", {})
+            if isinstance(rc, dict):
+                for cause, count in rc.items():
+                    combined_rc[cause] = combined_rc.get(cause, 0) + int(count or 0)
+        if combined_rc:
+            merged["root_cause_distribution"] = combined_rc
+
+        return merged
+
+    @staticmethod
     def _load_json_file(path: Path) -> dict | list | None:
         if not path.exists():
             return None
@@ -3798,7 +3862,7 @@ class Handlers:
 
             daily_snapshots = self._load_raw_json_records(bot_raw, "daily_snapshot")
             if daily_snapshots:
-                kwargs["daily_snapshot"] = daily_snapshots[-1]
+                kwargs["daily_snapshot"] = self._merge_daily_snapshots(daily_snapshots)
 
             coordinator_events = self._load_raw_json_records(bot_raw, "coordinator_action")
             if coordinator_events:

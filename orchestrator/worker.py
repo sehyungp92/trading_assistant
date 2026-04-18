@@ -124,6 +124,9 @@ class Worker:
             return
 
         payload = self._normalize_payload(details)
+        # Ensure bot_id survives envelope stripping
+        if isinstance(payload, dict) and "bot_id" not in payload:
+            payload["bot_id"] = action.bot_id
         date = self._resolve_raw_event_date(action.bot_id, details, payload)
         bot_dir = self._raw_data_dir / date / action.bot_id
         bot_dir.mkdir(parents=True, exist_ok=True)

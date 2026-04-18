@@ -84,3 +84,77 @@ class TestWorker:
     async def test_empty_queue_returns_zero(self, worker: Worker):
         processed = await worker.process_batch(limit=10)
         assert processed == 0
+
+
+class TestPersistRawEvent:
+    """Tests for Worker._persist_raw_event bot_id injection."""
+
+    def _make_worker_with_raw_dir(self, tmp_path):
+        w = Worker.__new__(Worker)
+        w._raw_data_dir = tmp_path / "raw"
+        w._raw_data_dir.mkdir()
+        w._bot_configs = {}
+        return w
+
+    def _make_action(self, bot_id="bot1", details=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(bot_id=bot_id, details=details or {})
+
+    def test_persist_raw_event_injects_bot_id(self, tmp_path):
+        worker = self._make_worker_with_raw_dir(tmp_path)
+        action = self._make_action(
+            bot_id="bot1",
+            details={
+                "event_type": "trade",
+                "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+                "symbol": "AAPL",
+            },
+        )
+        worker._persist_raw_event(action)
+
+        jsonl_path = list((tmp_path / "raw").rglob("trade.jsonl"))[0]
+        record = json.loads(jsonl_path.read_text(encoding="utf-8").strip())
+        assert record["bot_id"] == "bot1"
+
+    def test_persist_raw_event_preserves_existing_bot_id(self, tmp_path):
+        worker = self._make_worker_with_raw_dir(tmp_path)
+        action = self._make_action(
+            bot_id="bot1",
+            details={
+                "event_type": "trade",
+                "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+                "bot_id": "original_bot",
+            },
+        )
+        worker._persist_raw_event(action)
+
+        jsonl_path = list((tmp_path / "raw").rglob("trade.jsonl"))[0]
+        record = json.loads(jsonl_path.read_text(encoding="utf-8").strip())
+        assert record["bot_id"] == "original_bot"
+
+    def test_persist_raw_event_handles_string_payload(self, tmp_path):
+        worker = self._make_worker_with_raw_dir(tmp_path)
+        action = self._make_action(
+            bot_id="bot1",
+            details={
+                "event_type": "trade",
+                "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+                "payload": "raw_string_data",
+            },
+        )
+        # Should not crash on string payload
+        worker._persist_raw_event(action)
+
+        jsonl_path = list((tmp_path / "raw").rglob("trade.jsonl"))[0]
+        content = jsonl_path.read_text(encoding="utf-8").strip()
+        assert len(content) > 0
+
+    def test_persist_raw_event_no_op_without_raw_dir(self, tmp_path):
+        worker = Worker.__new__(Worker)
+        worker._raw_data_dir = None
+        action = self._make_action(
+            bot_id="bot1",
+            details={"event_type": "trade"},
+        )
+        # Should return immediately without error
+        worker._persist_raw_event(action)
