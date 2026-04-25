@@ -89,6 +89,16 @@ class RunIndex:
     ) -> None:
         """Index a completed run from its run directory."""
         now = datetime.now(timezone.utc).isoformat()
+        created_at = now
+        try:
+            existing = self._conn.execute(
+                "SELECT created_at FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if existing and existing["created_at"]:
+                created_at = existing["created_at"]
+        except sqlite3.Error:
+            created_at = now
 
         # Read available artifacts from run directory
         response_text = self._read_file(run_dir / "response.md")
@@ -107,7 +117,7 @@ class RunIndex:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id, agent_type, provider, model, bot_ids, date,
-                    1 if success else 0, duration_ms, cost_usd, now,
+                    1 if success else 0, duration_ms, cost_usd, created_at,
                     str(run_dir), response_preview,
                     json.dumps(metadata or {}, default=str),
                 ),
@@ -177,7 +187,7 @@ class RunIndex:
                 SELECT r.run_id, r.agent_type, r.provider, r.model,
                        r.bot_ids, r.date, r.success, r.duration_ms,
                        r.cost_usd, r.created_at, r.response_preview,
-                       snippet(runs_fts, 3, '<b>', '</b>', '...', 32) as snippet
+                       snippet(runs_fts, -1, '<b>', '</b>', '...', 32) as snippet
                 FROM runs_fts f
                 JOIN runs r ON r.run_id = f.run_id
                 WHERE runs_fts MATCH ?
@@ -195,6 +205,7 @@ class RunIndex:
     def get_recent_runs(
         self,
         agent_type: str = "",
+        bot_id: str = "",
         limit: int = 20,
         days: int = 30,
     ) -> list[dict]:
@@ -206,6 +217,10 @@ class RunIndex:
         if agent_type:
             conditions.append("agent_type = ?")
             params.append(agent_type)
+        if bot_id:
+            conditions.append("bot_ids LIKE ? ESCAPE '\\'")
+            escaped = bot_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.append(f"%{escaped}%")
 
         sql = f"""
             SELECT run_id, agent_type, provider, model, bot_ids, date,

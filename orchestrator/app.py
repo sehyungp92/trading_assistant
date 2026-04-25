@@ -605,6 +605,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         reliability_tracker=reliability_tracker,
         structural_experiment_tracker=structural_experiment_tracker,
         strategy_registry=config.strategy_registry,
+        run_index=run_index,
     )
 
     # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)
@@ -970,6 +971,17 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     implemented_date=anchor_date,
                 )
                 if result:
+                    detection_context = s.get("detection_context") or {}
+                    if not isinstance(detection_context, dict):
+                        detection_context = {}
+                    result = result.model_copy(update={
+                        "bot_id": s.get("bot_id", ""),
+                        "category": s.get("category", ""),
+                        "source_run_id": s.get("source_report_id", ""),
+                        "source_provider": detection_context.get("source_provider", ""),
+                        "source_model": detection_context.get("source_model", ""),
+                    })
+
                     # Persist the full enhanced measurement to outcomes.jsonl
                     enhanced_path = db_path / "memory" / "findings" / "outcomes.jsonl"
                     enhanced_path.parent.mkdir(parents=True, exist_ok=True)

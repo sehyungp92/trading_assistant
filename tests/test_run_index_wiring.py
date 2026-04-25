@@ -84,6 +84,43 @@ class TestIndexRunWithPromptPackage:
         assert call_kwargs["bot_ids"] == ""
         assert call_kwargs["date"] == ""
 
+    def test_index_metadata_excludes_injected_prompt_blocks(self, tmp_path: Path):
+        """RunIndex metadata should stay compact and omit injected text blobs."""
+        from orchestrator.agent_runner import AgentRunner, AgentResult
+
+        mock_run_index = MagicMock()
+        runner = AgentRunner(
+            runs_dir=tmp_path / "runs",
+            session_store=MagicMock(),
+            run_index=mock_run_index,
+        )
+
+        pkg = PromptPackage(system_prompt="", metadata={
+            "bot_ids": "bot_a",
+            "date": "2026-04-17",
+            "_learning_cards_text": "x" * 1000,
+            "_generated_playbooks_text": "y" * 1000,
+            "_retrieval_profile": {"tags": ["category:parameter"]},
+        })
+        result = AgentResult(response="ok", run_dir=tmp_path, duration_ms=100, session_id="s1")
+        invocation = MagicMock()
+        invocation.provider.value = "claude_max"
+        invocation.effective_model = "sonnet"
+
+        runner._index_run(
+            run_id="r4",
+            agent_type="daily_analysis",
+            run_dir=tmp_path,
+            result=result,
+            invocation=invocation,
+            prompt_package=pkg,
+        )
+
+        metadata = mock_run_index.index_run.call_args.kwargs["metadata"]
+        assert "_learning_cards_text" not in metadata
+        assert "_generated_playbooks_text" not in metadata
+        assert metadata["_retrieval_profile"]["tags"] == ["category:parameter"]
+
     def test_index_run_errors_dont_propagate(self, tmp_path: Path):
         """_index_run should swallow exceptions (best-effort)."""
         from orchestrator.agent_runner import AgentRunner, AgentResult
@@ -197,6 +234,40 @@ class TestMetadataJson:
         assert len(results) == 1
         assert results[0]["provider"] == "claude_max"
         assert results[0]["model"] == "sonnet"
+
+    def test_search_snippet_can_come_from_validator_notes(self, tmp_path: Path):
+        """FTS snippets should surface hits from validator notes, not just response.md."""
+        run_dir = tmp_path / "runs" / "daily-2026-04-17"
+        run_dir.mkdir(parents=True)
+        (run_dir / "validator_notes.md").write_text(
+            "Regime mismatch blocked this suggestion.",
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.json").write_text(json.dumps({
+            "provider": "claude_max",
+            "effective_model": "sonnet",
+            "bot_ids": "bot_y",
+            "date": "2026-04-17",
+            "success": True,
+            "duration_ms": 10,
+            "cost_usd": 0.0,
+        }), encoding="utf-8")
+
+        ri = RunIndex(tmp_path / "test_index.db")
+        ri.index_run(
+            run_id="daily-2026-04-17",
+            agent_type="daily_analysis",
+            run_dir=run_dir,
+            provider="claude_max",
+            model="sonnet",
+            bot_ids="bot_y",
+            date="2026-04-17",
+        )
+        results = ri.search("mismatch", agent_type="daily_analysis")
+        ri.close()
+
+        assert len(results) == 1
+        assert "mismatch" in (results[0]["snippet"] or "").lower()
 
 
 class TestRunIndexClose:

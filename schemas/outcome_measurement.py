@@ -29,6 +29,8 @@ class MeasurementQuality(str, Enum):
 class OutcomeMeasurement(BaseModel):
     """Before/after comparison for an implemented suggestion with regime controls."""
     suggestion_id: str
+    bot_id: str = ""
+    category: str = ""
     implemented_date: str
     measurement_date: str
     window_days: int
@@ -65,6 +67,11 @@ class OutcomeMeasurement(BaseModel):
     target_metric: Optional[str] = None  # "pnl" | "win_rate" | "drawdown"
     target_metric_improved: Optional[bool] = None
     target_metric_delta: float = 0.0
+
+    # Provider attribution
+    source_provider: str = ""
+    source_model: str = ""
+    source_run_id: str = ""
 
     # Effect significance
     effect_size: float = 0.0

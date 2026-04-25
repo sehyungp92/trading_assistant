@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from orchestrator.provider_cooldown import ProviderCooldownTracker
 from schemas.agent_preferences import (
@@ -43,9 +44,11 @@ class AgentPreferencesManager:
         self,
         preferences: AgentPreferences | None = None,
         provider_status_resolver: Callable[[], list[ProviderReadiness]] | None = None,
+        findings_dir: Path | None = None,
     ) -> None:
         self._preferences = preferences or AgentPreferences()
         self._provider_status_resolver = provider_status_resolver
+        self._findings_dir = Path(findings_dir) if findings_dir is not None else None
 
     def set_provider_status_resolver(
         self, resolver: Callable[[], list[ProviderReadiness]] | None
@@ -64,14 +67,18 @@ class AgentPreferencesManager:
         model_override: str | None = None,
     ) -> tuple[AgentSelection, str | None]:
         requested = self._requested_selection(workflow)
-        requested_model = model_override.strip() if model_override and model_override.strip() else requested.model
-        return (
-            AgentSelection(
-                provider=requested.provider,
-                model=requested_model or DEFAULT_PROVIDER_MODELS[requested.provider],
-            ),
-            requested_model,
+        explicit_override = model_override.strip() if model_override and model_override.strip() else None
+        requested_model = explicit_override or requested.model
+        selection = AgentSelection(
+            provider=requested.provider,
+            model=requested_model or DEFAULT_PROVIDER_MODELS[requested.provider],
         )
+        if workflow is not None and explicit_override is None:
+            learned = self._resolve_learned_selection(workflow, selection)
+            if learned is not None:
+                selection = learned
+                requested_model = selection.model
+        return selection, requested_model
 
     def build_view(self) -> AgentPreferencesView:
         effective = {
@@ -201,3 +208,30 @@ class AgentPreferencesManager:
             if override is not None:
                 return override
         return self._preferences.default
+
+    def _resolve_learned_selection(
+        self,
+        workflow: AgentWorkflow,
+        requested: AgentSelection,
+    ) -> AgentSelection | None:
+        if self._findings_dir is None:
+            return None
+        try:
+            from skills.provider_route_scorer import ProviderRouteScorer
+
+            recommendation = ProviderRouteScorer(self._findings_dir).recommend_provider(
+                workflow=workflow.value,
+                requested_provider=requested.provider.value,
+            )
+            if not recommendation:
+                return None
+            provider_value = recommendation.get("provider", "")
+            if not provider_value or provider_value == requested.provider.value:
+                return None
+            provider = AgentProvider(provider_value)
+            return AgentSelection(
+                provider=provider,
+                model=recommendation.get("model") or DEFAULT_PROVIDER_MODELS.get(provider, requested.model),
+            )
+        except Exception:
+            return None

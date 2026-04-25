@@ -100,9 +100,10 @@ def _estimate_tokens(value: object) -> int:
 class ContextBuilder:
     """Loads shared context (policies, corrections, metadata) used by all assemblers."""
 
-    def __init__(self, memory_dir: Path, curated_dir: Path | None = None) -> None:
+    def __init__(self, memory_dir: Path, curated_dir: Path | None = None, run_index: object | None = None) -> None:
         self._memory_dir = memory_dir
         self._curated_dir = curated_dir
+        self._run_index = run_index
 
     @property
     def memory_dir(self) -> Path:
@@ -328,6 +329,182 @@ class ContextBuilder:
                 f"- {s.get('date', '?')}: {', '.join(details)} -- {summary}"
             )
         return "\n".join(formatted_lines)
+
+    def load_similar_runs(
+        self,
+        agent_type: str = "",
+        bot_id: str = "",
+        limit: int = 5,
+        days: int = 60,
+        retrieval_profile: dict | None = None,
+    ) -> list[dict]:
+        """Load recent similar runs from RunIndex for prompt context.
+
+        Returns compact dicts with run_id, date, agent_type, provider, and
+        a truncated response snippet. Gracefully returns [] when RunIndex
+        is not available.
+        """
+        if self._run_index is None:
+            return []
+        try:
+            profile = retrieval_profile or self.build_retrieval_profile(
+                agent_type=agent_type,
+                bot_id=bot_id,
+            )
+            query = self._run_search_query(profile)
+            runs = []
+            if query and hasattr(self._run_index, "search"):
+                min_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+                runs = self._run_index.search(
+                    query=query,
+                    limit=limit,
+                    agent_type=agent_type,
+                    bot_id=bot_id,
+                    min_date=min_date,
+                )
+            if not runs:
+                runs = self._run_index.get_recent_runs(
+                    agent_type=agent_type, bot_id=bot_id, limit=limit, days=days,
+                )
+            return self._format_similar_runs(runs)
+        except Exception:
+            logger.debug("Similar runs loading failed; skipping")
+            return []
+
+    def build_retrieval_profile(self, agent_type: str = "", bot_id: str = "") -> dict:
+        """Build structured retrieval tags and query terms from current context."""
+        tags: list[str] = []
+        query_terms: list[str] = []
+
+        def _add_tag(prefix: str, value: str) -> None:
+            normalized = self._retrieval_tag(prefix, value)
+            if normalized and normalized not in tags:
+                tags.append(normalized)
+
+        def _add_query(value: str) -> None:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in query_terms:
+                query_terms.append(normalized)
+
+        if agent_type:
+            _add_tag("workflow", agent_type)
+            _add_query(agent_type.replace("_", " "))
+        if bot_id:
+            _add_tag("bot", bot_id)
+            _add_query(bot_id)
+
+        macro_regime = self.load_macro_regime_context().get("macro_regime", "")
+        if macro_regime:
+            _add_tag("regime", macro_regime)
+            _add_query(macro_regime)
+
+        validation_patterns = self.load_validation_patterns(bot_id=bot_id)
+        top_blocked = sorted(
+            validation_patterns.items(),
+            key=lambda item: item[1].get("blocked_count", 0),
+            reverse=True,
+        )[:3]
+        for category, info in top_blocked:
+            _add_tag("category", category)
+            _add_query(category)
+            for reason in (info.get("common_reasons") or [])[:2]:
+                _add_tag("reason", reason)
+                _add_query(reason)
+
+        weakest = [
+            score for score in self.load_category_scorecard().get("scores", [])
+            if score.get("sample_size", 0) >= 3
+            and (not bot_id or score.get("bot_id") in ("", bot_id))
+        ]
+        weakest.sort(key=lambda score: (score.get("win_rate", 1.0), -score.get("sample_size", 0)))
+        for score in weakest[:3]:
+            category = score.get("category", "")
+            _add_tag("category", category)
+            _add_query(category)
+
+        return {
+            "tags": tags,
+            "query_terms": query_terms,
+            "macro_regime": macro_regime,
+            "agent_type": agent_type,
+            "bot_id": bot_id,
+        }
+
+    @staticmethod
+    def _retrieval_tag(prefix: str, value: str) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        chars: list[str] = []
+        prev_sep = False
+        for char in text:
+            if char.isalnum():
+                chars.append(char)
+                prev_sep = False
+            elif not prev_sep:
+                chars.append("_")
+                prev_sep = True
+        slug = "".join(chars).strip("_")
+        return f"{prefix}:{slug}" if slug else ""
+
+    @staticmethod
+    def _run_search_query(profile: dict) -> str:
+        terms: list[str] = []
+        for term in profile.get("query_terms", []):
+            cleaned = "".join(char if char.isalnum() or char.isspace() else " " for char in str(term))
+            cleaned = " ".join(cleaned.split())
+            if not cleaned:
+                continue
+            if " " in cleaned:
+                terms.append(f"\"{cleaned}\"")
+            else:
+                terms.append(cleaned)
+        return " OR ".join(terms[:8])
+
+    @staticmethod
+    def _format_similar_runs(runs: list[dict]) -> list[dict]:
+        return [
+            {
+                "run_id": r.get("run_id", ""),
+                "date": r.get("date", ""),
+                "agent_type": r.get("agent_type", ""),
+                "provider": r.get("provider", ""),
+                "snippet": (r.get("snippet") or r.get("response_preview", "") or "")[:200],
+            }
+            for r in runs
+        ]
+
+    def load_generated_playbooks(self, workflow: str, tags: list[str], limit: int = 3) -> list[dict]:
+        """Load top matching generated playbooks for prompt context."""
+        path = self._memory_dir / "playbooks" / "generated" / "playbooks.jsonl"
+        if not path.exists():
+            return []
+        try:
+            from schemas.generated_playbook import GeneratedPlaybook
+
+            matches: list[tuple[float, GeneratedPlaybook]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    playbook = GeneratedPlaybook.model_validate_json(line)
+                except Exception:
+                    continue
+                score = playbook.match_score(workflow, tags)
+                if score > 0:
+                    matches.append((score, playbook))
+            matches.sort(key=lambda item: item[0], reverse=True)
+            return [
+                {
+                    "playbook_id": playbook.playbook_id,
+                    "title": playbook.title,
+                    "text": playbook.to_prompt_text(),
+                }
+                for _, playbook in matches[:limit]
+            ]
+        except Exception:
+            logger.debug("Generated playbook loading failed; skipping")
+            return []
 
     def load_pattern_library(self, bot_id: str = "") -> list[dict]:
         """Load cross-bot pattern library entries.
@@ -686,7 +863,7 @@ class ContextBuilder:
             pass
         return {}
 
-    def load_validation_patterns(self) -> dict:
+    def load_validation_patterns(self, bot_id: str = "") -> dict:
         """Load aggregated validation patterns from findings/validation_log.jsonl.
 
         Groups blocked suggestions by category over the last 30 days.
@@ -704,11 +881,14 @@ class ContextBuilder:
             for line in path.read_text(encoding="utf-8").strip().splitlines():
                 if not line.strip():
                     continue
-                entry = json.loads(line)
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 ts = entry.get("timestamp", "")
                 if ts:
                     try:
-                        entry_time = datetime.fromisoformat(ts)
+                        entry_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         if entry_time.tzinfo is None:
                             entry_time = entry_time.replace(tzinfo=timezone.utc)
                         if entry_time < cutoff:
@@ -716,8 +896,14 @@ class ContextBuilder:
                     except (ValueError, TypeError):
                         pass
                 for detail in entry.get("blocked_details", []):
-                    bot_id = detail.get("bot_id", "")
+                    detail_bot_id = detail.get("bot_id", "")
+                    if bot_id and detail_bot_id and detail_bot_id != bot_id:
+                        continue
                     reason = detail.get("reason", "")
+                    category = detail.get("category", "")
+                    if category:
+                        category_blocks[category].append(reason)
+                        continue
                     # Infer category from reason or title
                     title = detail.get("title", "").lower()
                     for keyword, cat in [
@@ -1369,6 +1555,7 @@ class ContextBuilder:
                 of item count.  Items are added in priority order until the
                 budget is exhausted.
         """
+        retrieval_profile = self.build_retrieval_profile(agent_type=agent_type, bot_id=bot_id)
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
         outcome_measurements, low_quality_outcomes = self.load_outcome_measurements()
@@ -1504,6 +1691,16 @@ class ContextBuilder:
             if session_history:
                 data["session_history"] = session_history
 
+        # Inject similar past runs from RunIndex
+        if self._run_index is not None and agent_type:
+            similar_runs = self.load_similar_runs(
+                agent_type=agent_type,
+                bot_id=bot_id,
+                retrieval_profile=retrieval_profile,
+            )
+            if similar_runs:
+                data["similar_past_runs"] = similar_runs
+
         # Inject strategy registry data if available
         if strategy_registry and getattr(strategy_registry, "strategies", None):
             data["strategy_profiles"] = {
@@ -1598,7 +1795,10 @@ class ContextBuilder:
             from skills.learning_card_store import LearningCardStore
             card_store = LearningCardStore(self._memory_dir / "findings")
             ranked = card_store.ranked_for_prompt(
-                limit=10, bot_id=bot_id, workflow=agent_type,
+                limit=10,
+                bot_id=bot_id,
+                workflow=agent_type,
+                tags=retrieval_profile.get("tags", []),
             )
             if ranked:
                 card_store.load().record_retrieval([c.card_id for c in ranked])
@@ -1608,10 +1808,24 @@ class ContextBuilder:
         except Exception:
             logger.debug("Learning card loading skipped (store not available)")
 
+        playbooks_text = ""
+        playbooks = self.load_generated_playbooks(
+            workflow=agent_type,
+            tags=retrieval_profile.get("tags", []),
+        )
+        if playbooks:
+            playbooks_text = "\n\n".join(playbook["text"] for playbook in playbooks)
+            metadata["_generated_playbook_ids"] = [playbook["playbook_id"] for playbook in playbooks]
+
         return PromptPackage(
             system_prompt=self.build_system_prompt(),
             corrections=self.load_corrections(),
             context_files=self.list_policy_files(),
-            metadata={**metadata, "_learning_cards_text": learning_cards_text},
+            metadata={
+                **metadata,
+                "_learning_cards_text": learning_cards_text,
+                "_generated_playbooks_text": playbooks_text,
+                "_retrieval_profile": retrieval_profile,
+            },
             data=data,
         )

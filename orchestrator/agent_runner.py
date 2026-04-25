@@ -126,7 +126,8 @@ class AgentRunner:
                     provider=AgentProvider.CLAUDE_MAX,
                     model=default_model,
                 )
-            )
+            ),
+            findings_dir=(Path(runs_dir).parent / "memory" / "findings"),
         )
         self._preferences.set_provider_status_resolver(self.get_provider_statuses)
 
@@ -291,7 +292,7 @@ class AgentRunner:
         if self._run_index is None:
             return
         try:
-            _meta = prompt_package.metadata if prompt_package else {}
+            _meta = self._run_index_metadata(prompt_package)
             self._run_index.index_run(
                 run_id=run_id,
                 agent_type=agent_type,
@@ -303,9 +304,54 @@ class AgentRunner:
                 success=result.success,
                 duration_ms=result.duration_ms,
                 cost_usd=result.cost_usd,
+                metadata=_meta,
             )
         except Exception:
             logger.debug("Failed to index run %s", run_id)
+
+    def refresh_run_index(
+        self,
+        run_id: str,
+        agent_type: str,
+        run_dir: Path,
+        *,
+        provider: str = "",
+        model: str = "",
+        prompt_package: "PromptPackage | None" = None,
+        success: bool = True,
+        duration_ms: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """Refresh a run index entry after handlers persist extra artifacts."""
+        if self._run_index is None:
+            return
+        try:
+            _meta = self._run_index_metadata(prompt_package)
+            self._run_index.index_run(
+                run_id=run_id,
+                agent_type=agent_type,
+                run_dir=run_dir,
+                provider=provider,
+                model=model,
+                bot_ids=_meta.get("bot_ids", ""),
+                date=_meta.get("date", ""),
+                success=success,
+                duration_ms=duration_ms,
+                cost_usd=cost_usd,
+                metadata=_meta,
+            )
+        except Exception:
+            logger.debug("Failed to refresh run index for %s", run_id)
+
+    @staticmethod
+    def _run_index_metadata(prompt_package: "PromptPackage | None") -> dict:
+        """Keep RunIndex metadata compact and exclude injected prompt blocks."""
+        if prompt_package is None:
+            return {}
+        metadata = dict(prompt_package.metadata or {})
+        metadata.pop("_learning_cards_text", None)
+        metadata.pop("_generated_playbooks_text", None)
+        return metadata
 
     def _record_cost(self, result: AgentResult, agent_type: str, run_id: str) -> None:
         if self._cost_tracker is None:

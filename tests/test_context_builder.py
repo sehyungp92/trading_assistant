@@ -899,7 +899,10 @@ class TestBotAwareCardRetrieval:
             mock_instance.ranked_for_prompt.return_value = []
             ctx.base_package(bot_id="bot_a", agent_type="daily_analysis")
             mock_instance.ranked_for_prompt.assert_called_once_with(
-                limit=10, bot_id="bot_a", workflow="daily_analysis",
+                limit=10,
+                bot_id="bot_a",
+                workflow="daily_analysis",
+                tags=["workflow:daily_analysis", "bot:bot_a"],
             )
 
     def test_base_package_defaults_bot_id_to_empty(self, tmp_path: Path):
@@ -919,7 +922,10 @@ class TestBotAwareCardRetrieval:
             mock_instance.ranked_for_prompt.return_value = []
             ctx.base_package(agent_type="weekly_analysis")
             mock_instance.ranked_for_prompt.assert_called_once_with(
-                limit=10, bot_id="", workflow="weekly_analysis",
+                limit=10,
+                bot_id="",
+                workflow="weekly_analysis",
+                tags=["workflow:weekly_analysis"],
             )
 
     def test_wfo_assembler_passes_bot_id(self, tmp_path: Path):

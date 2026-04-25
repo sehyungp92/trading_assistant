@@ -112,6 +112,47 @@ class LearningCycle:
                 "Recalibrated %d categories", len(synthesis.discard),
             )
 
+        benchmark_case_count = 0
+        provider_scores_count = 0
+        generated_playbooks_count = 0
+        harness_results_count = 0
+
+        benchmark_suite = None
+
+        try:
+            from skills.benchmark_compiler import BenchmarkCompiler
+
+            benchmark_compiler = BenchmarkCompiler(findings_dir, runs_dir=self._runs_dir)
+            benchmark_suite = benchmark_compiler.compile()
+            benchmark_case_count = benchmark_compiler.save_suite(benchmark_suite)
+        except Exception:
+            logger.exception("Failed to compile benchmark suite")
+
+        try:
+            from skills.provider_route_scorer import ProviderRouteScorer
+
+            provider_scores = ProviderRouteScorer(findings_dir).recompute()
+            provider_scores_count = len(provider_scores)
+        except Exception:
+            logger.exception("Failed to recompute provider route scores")
+
+        try:
+            from skills.harness_eval_runner import HarnessEvalRunner
+
+            if benchmark_suite is not None:
+                harness_results = HarnessEvalRunner(findings_dir).evaluate_and_save(benchmark_suite)
+                harness_results_count = len(harness_results)
+        except Exception:
+            logger.exception("Failed to run harness evaluation")
+
+        try:
+            from skills.playbook_generator import PlaybookGenerator
+
+            generated_playbooks = PlaybookGenerator(self._memory_dir).generate()
+            generated_playbooks_count = len(generated_playbooks)
+        except Exception:
+            logger.exception("Failed to generate advisory playbooks")
+
         # 5. Select next experiments (max 2 per bot) and record them
         selected_experiments = self._select_next_experiments()
         self._record_selected_experiments(selected_experiments)
@@ -179,8 +220,9 @@ class LearningCycle:
             self._log_calibration_summary(week_start)
 
         logger.info(
-            "Learning cycle complete: net_improvement=%s, composite_deltas=%s",
-            net_improvement, composite_delta,
+            "Learning cycle complete: net_improvement=%s, composite_deltas=%s, benchmarks=%d, provider_scores=%d, harness_results=%d, playbooks=%d",
+            net_improvement, composite_delta, benchmark_case_count, provider_scores_count,
+            harness_results_count, generated_playbooks_count,
         )
 
         return entry

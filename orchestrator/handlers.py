@@ -70,6 +70,7 @@ class Handlers:
         reliability_tracker: object | None = None,
         structural_experiment_tracker: object | None = None,
         strategy_registry: object | None = None,
+        run_index: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -103,6 +104,7 @@ class Handlers:
         self._reliability_tracker = reliability_tracker
         self._structural_experiment_tracker = structural_experiment_tracker
         self._strategy_registry = strategy_registry
+        self._run_index = run_index
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -252,6 +254,7 @@ class Handlers:
                 memory_dir=self._memory_dir,
                 bot_configs=self._bot_configs,
                 strategy_registry=self._strategy_registry,
+                run_index=self._run_index,
             )
             package = assembler.assemble(
                 triage_report=triage_report,
@@ -296,7 +299,27 @@ class Handlers:
                     logger.info("Fallback markdown extraction used for %s — structured block was missing", run_id)
 
                 # Validate and annotate response
-                final_report, validation = self._validate_and_annotate(parsed, date)
+                final_report, validation = self._validate_and_annotate(
+                    parsed,
+                    date,
+                    provider=result.provider,
+                    model=result.effective_model,
+                    run_id=run_id,
+                    agent_type="daily_analysis",
+                    bot_ids=package.metadata.get("bot_ids", ""),
+                )
+                self._persist_validator_notes(result.run_dir or (self._runs_dir / run_id), validation)
+                self._refresh_run_index_entry(
+                    run_id=run_id,
+                    agent_type="daily_analysis",
+                    run_dir=result.run_dir or (self._runs_dir / run_id),
+                    provider=result.provider,
+                    model=result.effective_model,
+                    prompt_package=package,
+                    success=result.success,
+                    duration_ms=result.duration_ms,
+                    cost_usd=result.cost_usd,
+                )
 
                 # Fallback: if validation failed but we have suggestions, record them unvalidated
                 if validation is None and parsed.suggestions:
@@ -308,7 +331,13 @@ class Handlers:
                     logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
-                agent_suggestion_ids = self._record_agent_suggestions(validation, run_id, parsed)
+                agent_suggestion_ids = self._record_agent_suggestions(
+                    validation, run_id, parsed,
+                    provider=result.provider, model=result.effective_model,
+                )
+
+                # Record learning card feedback from validation signal
+                self._record_learning_card_feedback_targeted(validation, package)
 
                 # Run autonomous pipeline on recorded suggestions
                 await self._run_autonomous_pipeline(agent_suggestion_ids, run_id)
@@ -642,6 +671,7 @@ class Handlers:
                 runs_dir=self._runs_dir,
                 bot_configs=self._bot_configs,
                 strategy_registry=self._strategy_registry,
+                run_index=self._run_index,
             )
             package = assembler.assemble(
                 triage_report=weekly_triage_report,
@@ -909,7 +939,27 @@ class Handlers:
                     logger.info("Fallback markdown extraction used for %s — structured block was missing", run_id)
 
                 # Validate and annotate response
-                final_report, validation = self._validate_and_annotate(parsed, week_start)
+                final_report, validation = self._validate_and_annotate(
+                    parsed,
+                    week_start,
+                    provider=result.provider,
+                    model=result.effective_model,
+                    run_id=run_id,
+                    agent_type="weekly_analysis",
+                    bot_ids=package.metadata.get("bot_ids", ""),
+                )
+                self._persist_validator_notes(result.run_dir or (self._runs_dir / run_id), validation)
+                self._refresh_run_index_entry(
+                    run_id=run_id,
+                    agent_type="weekly_analysis",
+                    run_dir=result.run_dir or (self._runs_dir / run_id),
+                    provider=result.provider,
+                    model=result.effective_model,
+                    prompt_package=package,
+                    success=result.success,
+                    duration_ms=result.duration_ms,
+                    cost_usd=result.cost_usd,
+                )
 
                 # Fallback: if validation failed but we have suggestions, record them unvalidated
                 if validation is None and (parsed.suggestions or parsed.portfolio_proposals):
@@ -922,7 +972,13 @@ class Handlers:
                     logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
-                weekly_agent_ids = self._record_agent_suggestions(validation, run_id, parsed)
+                weekly_agent_ids = self._record_agent_suggestions(
+                    validation, run_id, parsed,
+                    provider=result.provider, model=result.effective_model,
+                )
+
+                # Record learning card feedback from validation signal
+                self._record_learning_card_feedback_targeted(validation, package)
 
                 # Record approved portfolio proposals
                 self._record_portfolio_proposals(validation, run_id)
@@ -1947,7 +2003,16 @@ class Handlers:
 
     # --- Private helpers ---
 
-    def _validate_and_annotate(self, parsed, date_or_week: str):
+    def _validate_and_annotate(
+        self,
+        parsed,
+        date_or_week: str,
+        provider: str = "",
+        model: str = "",
+        run_id: str = "",
+        agent_type: str = "",
+        bot_ids: str | list[str] | None = None,
+    ):
         """Run response validation and return annotated report text + validation result.
 
         Returns:
@@ -1997,6 +2062,7 @@ class Handlers:
                         "title": b.suggestion.title,
                         "reason": b.reason,
                         "bot_id": b.suggestion.bot_id,
+                        "category": getattr(b.suggestion, "category", "") or "",
                     }
                     for b in validation.blocked_suggestions
                 ]
@@ -2005,6 +2071,11 @@ class Handlers:
                     "approved_count": len(validation.approved_suggestions),
                     "blocked_count": len(validation.blocked_suggestions),
                     "blocked_details": blocked_details,
+                    "provider": provider,
+                    "model": model,
+                    "run_id": run_id,
+                    "agent_type": agent_type,
+                    "bot_ids": bot_ids or "",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 with open(log_path, "a", encoding="utf-8") as f:
@@ -2016,6 +2087,127 @@ class Handlers:
         except Exception:
             logger.warning("Response validation failed — using raw report")
             return parsed.raw_report, None
+
+    def _persist_validator_notes(self, run_dir: Path, validation_result) -> None:
+        """Persist validator notes as a run artifact for RunIndex FTS."""
+        if validation_result is None:
+            return
+        notes = getattr(validation_result, "validator_notes", "") or ""
+        if not notes:
+            return
+        try:
+            Path(run_dir).mkdir(parents=True, exist_ok=True)
+            (Path(run_dir) / "validator_notes.md").write_text(
+                notes,
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.error("Failed to persist validator notes for %s", run_dir, exc_info=True)
+
+    def _refresh_run_index_entry(
+        self,
+        *,
+        run_id: str,
+        agent_type: str,
+        run_dir: Path,
+        provider: str = "",
+        model: str = "",
+        prompt_package=None,
+        success: bool = True,
+        duration_ms: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """Refresh RunIndex after handlers persist parsed output and validator notes."""
+        try:
+            self._agent_runner.refresh_run_index(
+                run_id=run_id,
+                agent_type=agent_type,
+                run_dir=Path(run_dir),
+                provider=provider,
+                model=model,
+                prompt_package=prompt_package,
+                success=success,
+                duration_ms=duration_ms,
+                cost_usd=cost_usd,
+            )
+        except Exception:
+            logger.debug("Failed to refresh RunIndex entry for %s", run_id)
+
+    def _record_learning_card_feedback(
+        self, validation_result, prompt_package,
+    ) -> None:
+        """Compatibility shim for older callers; delegates to targeted feedback."""
+        self._record_learning_card_feedback_targeted(validation_result, prompt_package)
+
+    def _record_learning_card_feedback_targeted(
+        self, validation_result, prompt_package,
+    ) -> None:
+        """Record feedback only for retrieved cards that match validated tags."""
+        if validation_result is None:
+            return
+        card_ids = (prompt_package.metadata or {}).get("_learning_card_ids")
+        if not card_ids:
+            return
+
+        approved_tags = self._feedback_structured_tags(validation_result.approved_suggestions)
+        blocked_tags = self._feedback_structured_tags(
+            [b.suggestion for b in validation_result.blocked_suggestions],
+            reasons=[b.reason for b in validation_result.blocked_suggestions],
+        )
+        if not approved_tags and not blocked_tags:
+            return
+
+        try:
+            from skills.learning_card_store import LearningCardStore
+
+            store = LearningCardStore(self._memory_dir / "findings")
+            index = store.load()
+            for card_id in card_ids:
+                card = index.get(card_id)
+                if card is None:
+                    continue
+                card_tags = set(card.tags)
+                matched_approved = bool(card_tags & approved_tags)
+                matched_blocked = bool(card_tags & blocked_tags)
+                if matched_approved and not matched_blocked:
+                    index.record_feedback(card_id, True)
+                elif matched_blocked and not matched_approved:
+                    index.record_feedback(card_id, False)
+            store.save(index)
+        except Exception:
+            logger.error("Failed to record targeted learning card feedback", exc_info=True)
+
+    @staticmethod
+    def _feedback_structured_tags(suggestions: list, reasons: list[str] | None = None) -> set[str]:
+        tags: set[str] = set()
+        for suggestion in suggestions or []:
+            category = str(getattr(suggestion, "category", "") or "").strip()
+            if category:
+                tag = Handlers._feedback_tag("category", category)
+                if tag:
+                    tags.add(tag)
+        for reason in reasons or []:
+            tag = Handlers._feedback_tag("reason", reason)
+            if tag:
+                tags.add(tag)
+        return tags
+
+    @staticmethod
+    def _feedback_tag(prefix: str, value: str) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        chars: list[str] = []
+        prev_sep = False
+        for char in text:
+            if char.isalnum():
+                chars.append(char)
+                prev_sep = False
+            elif not prev_sep:
+                chars.append("_")
+                prev_sep = True
+        slug = "".join(chars).strip("_")
+        return f"{prefix}:{slug}" if slug else ""
 
     def _record_predictions(self, date_or_week: str, predictions: list) -> None:
         """Record structured predictions from a parsed response."""
@@ -2521,6 +2713,7 @@ class Handlers:
 
     def _record_agent_suggestions(
         self, validation_result, run_id: str, parsed=None,
+        provider: str = "", model: str = "",
     ) -> dict[str, str]:
         """Record approved suggestions from validation into SuggestionTracker.
 
@@ -2616,6 +2809,10 @@ class Handlers:
 
             # Merge validation evidence into detection_context
             detection_ctx = {}
+            if provider:
+                detection_ctx["source_provider"] = provider
+            if model:
+                detection_ctx["source_model"] = model
             if validation_evidence:
                 detection_ctx["validation_evidence"] = validation_evidence
             if val_result and val_result.requires_review:

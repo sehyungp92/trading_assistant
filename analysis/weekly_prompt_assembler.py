@@ -278,6 +278,7 @@ class WeeklyPromptAssembler:
         runs_dir: Path,
         bot_configs: dict | None = None,
         strategy_registry=None,
+        run_index: object | None = None,
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -287,7 +288,7 @@ class WeeklyPromptAssembler:
         self.runs_dir = runs_dir
         self.bot_configs = bot_configs
         self.strategy_registry = strategy_registry
-        self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir)
+        self._ctx = ContextBuilder(memory_dir, curated_dir=curated_dir, run_index=run_index)
 
     def assemble(self, triage_report=None, session_store=None) -> PromptPackage:
         """Build the complete weekly prompt package.

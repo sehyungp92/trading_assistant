@@ -260,6 +260,54 @@ class TestModelNormalization:
         sel = AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="   ")
         assert sel.model is None
 
+
+class TestLearnedRoutingOverride:
+    def _write_scores(self, findings: Path, entries: list[dict]) -> None:
+        findings.mkdir(parents=True, exist_ok=True)
+        with (findings / "provider_route_scores.jsonl").open("w", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry) + "\n")
+
+    def test_overrides_when_evidence_is_strong(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.72,
+                "sample_count": 7,
+            },
+        ])
+        mgr = AgentPreferencesManager(findings_dir=findings)
+
+        selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
+
+        assert selection.provider == AgentProvider.CODEX_PRO
+        assert selection.model == "gpt-5.4"
+
+    def test_does_not_override_without_requested_baseline_evidence(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [{
+            "workflow": "daily_analysis",
+            "provider": "codex_pro",
+            "model": "gpt-5.4",
+            "composite_score": 0.72,
+            "sample_count": 7,
+        }])
+        mgr = AgentPreferencesManager(findings_dir=findings)
+
+        selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
+
+        assert selection.provider == AgentProvider.CLAUDE_MAX
+
     def test_stripped_model_preserved(self):
         sel = AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="  opus  ")
         assert sel.model == "opus"

@@ -31,6 +31,101 @@ def _normalize_lessons(raw) -> list[str]:
     return [l for l in (raw or []) if isinstance(l, str) and l.strip()]
 
 
+def _slugify_tag(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    chars: list[str] = []
+    prev_sep = False
+    for char in text:
+        if char.isalnum():
+            chars.append(char)
+            prev_sep = False
+        elif not prev_sep:
+            chars.append("_")
+            prev_sep = True
+    return "".join(chars).strip("_")
+
+
+def _structured_tag(prefix: str, value: str) -> str:
+    slug = _slugify_tag(value)
+    return f"{prefix}:{slug}" if slug else ""
+
+
+def _infer_workflow(entry: dict) -> str:
+    workflow = str(entry.get("source_workflow", "") or "").strip()
+    if workflow:
+        return workflow
+    run_id = str(
+        entry.get("source_run_id")
+        or entry.get("run_id")
+        or entry.get("source_report_id")
+        or ""
+    ).strip().lower()
+    prefixes = {
+        "daily": "daily_analysis",
+        "weekly": "weekly_analysis",
+        "wfo": "wfo",
+        "triage": "triage",
+        "discovery": "discovery_analysis",
+        "reasoning": "outcome_reasoning",
+    }
+    for prefix, inferred in prefixes.items():
+        if run_id.startswith(prefix):
+            return inferred
+    return ""
+
+
+def _dedupe_tags(tags: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for tag in tags:
+        normalized = str(tag or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _augment_tags(
+    entry: dict,
+    *,
+    raw_tags: list[str] | None = None,
+    categories: list[str] | None = None,
+    reasons: list[str] | None = None,
+    regimes: list[str] | None = None,
+    workflow: str = "",
+    bot_id: str = "",
+) -> list[str]:
+    tags = list(raw_tags or [])
+    for category in categories or []:
+        category = str(category or "").strip()
+        if category:
+            tags.append(category)
+            structured = _structured_tag("category", category)
+            if structured:
+                tags.append(structured)
+    for reason in reasons or []:
+        structured = _structured_tag("reason", str(reason))
+        if structured:
+            tags.append(structured)
+    for regime in regimes or []:
+        structured = _structured_tag("regime", str(regime))
+        if structured:
+            tags.append(structured)
+    workflow_tag = _structured_tag("workflow", workflow or _infer_workflow(entry))
+    if workflow_tag:
+        tags.append(workflow_tag)
+    bot_tag = _structured_tag(
+        "bot",
+        bot_id or entry.get("bot_id", "") or entry.get("target_bot", ""),
+    )
+    if bot_tag:
+        tags.append(bot_tag)
+    return _dedupe_tags(tags)
+
+
 class LearningCardStore:
     """JSONL-backed store for learning cards."""
 
@@ -113,13 +208,14 @@ class LearningCardStore:
     @staticmethod
     def card_from_correction(entry: dict) -> LearningCard:
         """Create a card from a corrections.jsonl entry."""
+        categories = [c for c in entry.get("categories", []) if c]
         return LearningCard(
             card_type=CardType.CORRECTION,
             source_id=entry.get("id", entry.get("correction_id", "")),
             bot_id=entry.get("bot_id", ""),
             title=entry.get("summary", entry.get("description", "Correction"))[:120],
             content=entry.get("description", entry.get("summary", "")),
-            tags=entry.get("categories", []),
+            tags=_augment_tags(entry, raw_tags=categories, categories=categories),
             confidence=0.8,
             impact_score=0.3,
             **LearningCardStore._extract_provenance(entry),
@@ -130,6 +226,8 @@ class LearningCardStore:
         """Create a card from an outcomes.jsonl entry."""
         verdict = entry.get("verdict", "unknown")
         impact = 0.5 if verdict == "positive" else (-0.3 if verdict == "negative" else 0.0)
+        category = entry.get("category", "")
+        regimes = [entry.get("before_regime", ""), entry.get("after_regime", "")]
         return LearningCard(
             card_type=CardType.OUTCOME,
             source_id=entry.get("suggestion_id", ""),
@@ -137,7 +235,12 @@ class LearningCardStore:
             title=f"Outcome: {entry.get('category', 'unknown')} — {verdict}",
             content=entry.get("explanation", ""),
             evidence_summary=entry.get("evidence_base", ""),
-            tags=[entry.get("category", "")],
+            tags=_augment_tags(
+                entry,
+                raw_tags=[verdict],
+                categories=[category],
+                regimes=regimes,
+            ),
             confidence=0.7 if entry.get("measurement_quality", "").lower() in ("high", "medium") else 0.3,
             impact_score=impact,
             **LearningCardStore._extract_provenance(entry),
@@ -147,13 +250,14 @@ class LearningCardStore:
     def card_from_hypothesis(entry: dict) -> LearningCard:
         """Create a card from a hypothesis record."""
         effectiveness = entry.get("effectiveness", 0.0)
+        category = entry.get("category", "")
         return LearningCard(
             card_type=CardType.HYPOTHESIS,
             source_id=entry.get("hypothesis_id", entry.get("id", "")),
             bot_id=entry.get("bot_id", ""),
             title=entry.get("title", entry.get("symptom", "Hypothesis"))[:120],
             content=entry.get("description", entry.get("solution", "")),
-            tags=[entry.get("category", "")],
+            tags=_augment_tags(entry, categories=[category]),
             confidence=min(max(effectiveness, 0.0), 1.0),
             impact_score=effectiveness,
             observation_count=entry.get("proposal_count", 1),
@@ -170,7 +274,7 @@ class LearningCardStore:
             title=entry.get("title", entry.get("pattern", "Discovery"))[:120],
             content=entry.get("description", entry.get("details", "")),
             evidence_summary=entry.get("evidence", ""),
-            tags=entry.get("tags", []),
+            tags=_augment_tags(entry, raw_tags=entry.get("tags", [])),
             confidence=entry.get("confidence", 0.5),
             **LearningCardStore._extract_provenance(entry),
         )
@@ -178,13 +282,15 @@ class LearningCardStore:
     @staticmethod
     def card_from_validator_block(entry: dict) -> LearningCard:
         """Create a 'do not repeat' card from a validation_patterns entry."""
+        category = entry.get("category", "")
+        reason = entry.get("reason", "")
         return LearningCard(
             card_type=CardType.VALIDATOR_BLOCK,
             source_id=entry.get("pattern_id", entry.get("category", "")),
             bot_id=entry.get("bot_id", ""),
             title=f"BLOCKED: {entry.get('category', 'unknown')} — {entry.get('reason', 'blocked')}",
             content=entry.get("reason", entry.get("description", "")),
-            tags=[entry.get("category", "")],
+            tags=_augment_tags(entry, categories=[category], reasons=[reason]),
             confidence=0.9,
             impact_score=-0.5,
             observation_count=entry.get("block_count", 1),
@@ -202,12 +308,22 @@ class LearningCardStore:
         for d in entry.get("blocked_details", []):
             title_raw = d.get("title", "unknown")
             source_hash = hashlib.sha256(title_raw.encode()).hexdigest()[:8]
+            category = d.get("category", "")
+            reason = d.get("reason", "")
             cards.append(LearningCard(
                 card_type=CardType.VALIDATOR_BLOCK,
                 source_id=f"vlog:{entry.get('date', '')}:{source_hash}",
                 bot_id=d.get("bot_id", ""),
                 title=f"BLOCKED: {title_raw}"[:120],
                 content=d.get("reason", ""),
+                tags=_augment_tags(
+                    entry,
+                    categories=[category],
+                    reasons=[reason],
+                    workflow=entry.get("agent_type", ""),
+                    bot_id=d.get("bot_id", ""),
+                ),
+                source_workflow=entry.get("agent_type", "") or _infer_workflow(entry),
                 confidence=0.9,
                 impact_score=-0.5,
                 **LearningCardStore._extract_provenance(entry),
@@ -218,6 +334,7 @@ class LearningCardStore:
     def card_from_outcome_reasoning(entry: dict) -> LearningCard:
         """Create a card from an outcome_reasonings.jsonl entry."""
         lessons = _normalize_lessons(entry.get("lessons_learned", []))
+        category = entry.get("category", "")
         return LearningCard(
             card_type=CardType.SYNTHESIS,
             source_id=entry.get("suggestion_id", entry.get("id", "")),
@@ -226,8 +343,10 @@ class LearningCardStore:
             content=entry.get("mechanism", "") + (
                 "\n" + "; ".join(lessons) if lessons else ""
             ),
-            tags=[entry.get("category", "")] + (
-                ["transferable"] if entry.get("transferable") else []
+            tags=_augment_tags(
+                entry,
+                raw_tags=(["transferable"] if entry.get("transferable") else []),
+                categories=[category],
             ),
             confidence=entry.get("revised_confidence", 0.5),
             impact_score=0.4 if entry.get("genuine_effect", True) else -0.3,
@@ -238,13 +357,14 @@ class LearningCardStore:
     def card_from_recalibration(entry: dict) -> LearningCard:
         """Create a card from a recalibrations.jsonl entry."""
         revised = entry.get("revised_confidence", 0.5)
+        category = entry.get("category", "")
         return LearningCard(
             card_type=CardType.RECALIBRATION,
             source_id=entry.get("suggestion_id", entry.get("id", "")),
             bot_id=entry.get("bot_id", ""),
             title=f"Recalibration: {entry.get('category', 'unknown')} → {revised:.0%}"[:120],
             content="; ".join(_normalize_lessons(entry.get("lessons_learned", []))) or "Confidence recalibrated",
-            tags=[entry.get("category", "")],
+            tags=_augment_tags(entry, categories=[category]),
             confidence=revised,
             impact_score=0.3,
             **LearningCardStore._extract_provenance(entry),
@@ -262,7 +382,7 @@ class LearningCardStore:
                 f"\nConfounders: {', '.join(entry.get('confounders', []))}"
                 if entry.get("confounders") else ""
             ),
-            tags=["spurious"],
+            tags=_augment_tags(entry, raw_tags=["spurious"]),
             confidence=0.7,
             impact_score=-0.3,
             **LearningCardStore._extract_provenance(entry),
@@ -283,13 +403,16 @@ class LearningCardStore:
             content_parts.append(f"Win rate delta 7d: {entry['win_rate_delta_7d']:+.2%}")
         if entry.get("regime_matched") is not None:
             content_parts.append(f"Regime matched: {entry['regime_matched']}")
+        raw_tags = ["transfer", verdict]
+        if entry.get("regime_matched") is False:
+            raw_tags.append("regime_mismatch")
         return LearningCard(
             card_type=CardType.TRANSFER_RESULT,
             source_id=f"transfer:{entry.get('pattern_id', '')}:{entry.get('target_bot', '')}",
             bot_id=entry.get("target_bot", ""),
             title=f"Transfer {verdict}: {entry.get('pattern_id', '')} \u2192 {entry.get('target_bot', '')}"[:120],
             content="; ".join(content_parts) if content_parts else f"Transfer {verdict}",
-            tags=["transfer", verdict],
+            tags=_augment_tags(entry, raw_tags=raw_tags, bot_id=entry.get("target_bot", "")),
             confidence=confidence,
             impact_score=impact,
             **LearningCardStore._extract_provenance(entry),
@@ -299,6 +422,7 @@ class LearningCardStore:
     def card_from_retrospective(entry: dict) -> LearningCard:
         """Create a card from a retrospective_synthesis.jsonl entry."""
         content_parts = []
+        categories: list[str] = []
         for item in entry.get("what_worked", []):
             title = item.get("title", item) if isinstance(item, dict) else str(item)
             content_parts.append(f"Worked: {title}")
@@ -308,6 +432,8 @@ class LearningCardStore:
         for item in entry.get("discard", []):
             reason = item.get("reason", item) if isinstance(item, dict) else str(item)
             content_parts.append(f"Discard: {reason}")
+            if isinstance(item, dict) and item.get("category"):
+                categories.append(item["category"])
         lessons = _normalize_lessons(entry.get("lessons_learned", []))
         for lesson in lessons:
             content_parts.append(f"Lesson: {lesson}")
@@ -317,7 +443,13 @@ class LearningCardStore:
             bot_id="",
             title=f"Retrospective {entry.get('week_start', '')} \u2192 {entry.get('week_end', '')}"[:120],
             content="\n".join(content_parts) if content_parts else "Weekly retrospective",
-            tags=["retrospective"],
+            tags=_augment_tags(
+                entry,
+                raw_tags=["retrospective"],
+                categories=categories,
+                workflow="weekly_analysis",
+            ),
+            source_workflow="weekly_analysis",
             confidence=0.8,
             impact_score=0.3,
             **LearningCardStore._extract_provenance(entry),

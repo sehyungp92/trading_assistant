@@ -112,6 +112,16 @@ class InvocationBuilder:
                 + "\n</learning-memory>"
             )
 
+        playbooks_text = package.metadata.get("_generated_playbooks_text", "")
+        if playbooks_text:
+            parts.append(
+                "\n---\n\n<generated-playbooks>\n"
+                "[System note: These are advisory investigation playbooks derived "
+                "from repeated, recent evidence. They never override approval gates.]\n\n"
+                + playbooks_text
+                + "\n</generated-playbooks>"
+            )
+
         data_keys = sorted(package.data.keys())
         if data_keys:
             file_lines = [f"- {key}.json" for key in data_keys]
@@ -265,4 +275,3 @@ class InvocationBuilder:
         if "haiku" in lowered or "air" in lowered:
             return "haiku"
         return "sonnet"
-
