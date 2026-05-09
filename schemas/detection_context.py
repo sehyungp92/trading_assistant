@@ -15,10 +15,11 @@ class DetectionContext(BaseModel):
     """Records the threshold context at the time a strategy suggestion was produced."""
 
     detector_name: str  # e.g. "alpha_decay", "filter_cost"
-    bot_id: str
-    threshold_name: str  # e.g. "decay_threshold", "filter_cost_threshold"
-    threshold_value: float  # the threshold used at detection time
-    observed_value: float  # the actual observed value that triggered detection
+    bot_id: str = ""
+    threshold_name: str = ""  # e.g. "decay_threshold", "filter_cost_threshold"
+    threshold_value: float = 0.0  # the threshold used at detection time
+    observed_value: float = 0.0  # the actual observed value that triggered detection
+    sample_size: int = 0  # trade/observation count backing the detection (0 = unknown)
     detected_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

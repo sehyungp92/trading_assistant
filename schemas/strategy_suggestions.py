@@ -43,6 +43,8 @@ class StrategySuggestion(BaseModel):
     simulation_assumptions: list[str] = []
     requires_human_judgment: bool = False
     detection_context: DetectionContext | None = None
+    engine: str = ""  # engine tag if targeting specific engine (e.g., "REVERSAL")
+    regime_condition: str = ""  # regime name if regime-conditional (e.g., "volatile")
 
 
 class RefinementReport(BaseModel):

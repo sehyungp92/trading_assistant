@@ -385,6 +385,13 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     suggestion_tracker = SuggestionTracker(store_dir=db_path / "memory" / "findings")
 
+    # ProposalLedger — unified record of every proposal the system produces.
+    # Sits alongside SuggestionTracker; handlers write into both so existing
+    # consumers (autonomous pipeline, approval flow) keep working unchanged.
+    from skills.proposal_ledger import ProposalLedger
+
+    proposal_ledger = ProposalLedger(store_dir=db_path / "memory" / "findings")
+
     # Autonomous pipeline (feature-flagged)
     autonomous_pipeline = None
     approval_tracker = None
@@ -606,6 +613,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         structural_experiment_tracker=structural_experiment_tracker,
         strategy_registry=config.strategy_registry,
         run_index=run_index,
+        proposal_ledger=proposal_ledger,
+        calibration_tracker=calibration_tracker,
     )
 
     # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)
@@ -924,16 +933,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             except Exception:
                 logger.exception("Evening report dispatch failed")
 
-    # AutoOutcomeMeasurer — runs weekly to measure suggestion outcomes
-    from skills.auto_outcome_measurer import AutoOutcomeMeasurer
-    from schemas.suggestion_tracking import SuggestionStatus
-
-    outcome_measurer = AutoOutcomeMeasurer(
-        curated_dir=curated_dir,
-        findings_dir=db_path / "memory" / "findings",
-        calibration_tracker=calibration_tracker,
-    )
-
     # HypothesisLibrary — shared for outcome linking
     from skills.hypothesis_library import HypothesisLibrary
 
@@ -942,6 +941,18 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     # Wire hypothesis_library into approval_handler (created before library)
     if approval_handler is not None:
         approval_handler._hypothesis_library = hypothesis_library
+
+    # AutoOutcomeMeasurer — runs weekly to measure suggestion outcomes
+    from skills.auto_outcome_measurer import AutoOutcomeMeasurer
+    from schemas.suggestion_tracking import SuggestionStatus
+
+    outcome_measurer = AutoOutcomeMeasurer(
+        curated_dir=curated_dir,
+        findings_dir=db_path / "memory" / "findings",
+        calibration_tracker=calibration_tracker,
+        hypothesis_library=hypothesis_library,
+        proposal_ledger=proposal_ledger,
+    )
 
     async def _measure_outcomes(scheduled_for: datetime | None = None) -> None:
         """Measure outcomes of deployed suggestions and link to hypotheses."""
@@ -1302,6 +1313,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.exception("Learning cycle failed")
 
+    # PlaybookGenerator — evidence-backed advisory playbooks
+    from skills.playbook_generator import PlaybookGenerator
+
+    playbook_generator = PlaybookGenerator(memory_dir=db_path / "memory")
+
     # MemoryConsolidator — rebuilds index.json and consolidates old findings
     consolidator = MemoryConsolidator(
         findings_dir=db_path / "memory" / "findings",
@@ -1332,63 +1348,70 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.warning("Learning card ingestion after consolidation failed", exc_info=True)
 
+        # Retire ineffective playbooks
+        try:
+            retired = playbook_generator.retire_ineffective()
+            if retired:
+                logger.info("Retired %d ineffective playbooks", retired)
+        except Exception:
+            logger.warning("Playbook retirement failed", exc_info=True)
+
     # Experiment check function (for scheduler)
     async def _check_experiments() -> None:
         """Check active experiments for auto-conclusion."""
-        if experiment_manager is None:
-            return
-        try:
-            active = experiment_manager.get_active()
-            for exp in active:
-                if experiment_manager.check_auto_conclusion(exp.experiment_id):
-                    result = experiment_manager.analyze_experiment(exp.experiment_id)
-                    experiment_manager.conclude_experiment(exp.experiment_id, result)
-                    logger.info(
-                        "Auto-concluded experiment %s: %s",
-                        exp.experiment_id, result.recommendation,
-                    )
-                    event_stream.broadcast("experiment_concluded", {
-                        "experiment_id": exp.experiment_id,
-                        "recommendation": result.recommendation,
-                        "winner": result.winner,
-                        "p_value": result.p_value,
-                    })
-                    # Escalate: link back to suggestion and hypothesis
-                    if result.recommendation == "adopt_treatment":
-                        if getattr(exp, "suggestion_id", None) and suggestion_tracker:
+        if experiment_manager is not None:
+            try:
+                active = experiment_manager.get_active()
+                for exp in active:
+                    if experiment_manager.check_auto_conclusion(exp.experiment_id):
+                        result = experiment_manager.analyze_experiment(exp.experiment_id)
+                        experiment_manager.conclude_experiment(exp.experiment_id, result)
+                        logger.info(
+                            "Auto-concluded experiment %s: %s",
+                            exp.experiment_id, result.recommendation,
+                        )
+                        event_stream.broadcast("experiment_concluded", {
+                            "experiment_id": exp.experiment_id,
+                            "recommendation": result.recommendation,
+                            "winner": result.winner,
+                            "p_value": result.p_value,
+                        })
+                        # Escalate: link back to suggestion and hypothesis
+                        if result.recommendation == "adopt_treatment":
+                            if getattr(exp, "source_suggestion_id", None) and suggestion_tracker:
+                                try:
+                                    suggestion_tracker.accept(exp.source_suggestion_id)
+                                    logger.info(
+                                        "Auto-accepted suggestion %s (experiment %s passed)",
+                                        exp.source_suggestion_id, exp.experiment_id,
+                                    )
+                                except Exception:
+                                    logger.warning("Failed to auto-accept suggestion %s", exp.source_suggestion_id)
+                            if getattr(exp, "hypothesis_id", None):
+                                try:
+                                    hypothesis_library.record_outcome(exp.hypothesis_id, positive=True)
+                                    logger.info(
+                                        "Recorded positive outcome for hypothesis %s",
+                                        exp.hypothesis_id,
+                                    )
+                                except Exception:
+                                    logger.warning("Failed to record hypothesis outcome %s", exp.hypothesis_id)
+                        elif result.recommendation == "keep_control":
+                            if getattr(exp, "hypothesis_id", None):
+                                try:
+                                    hypothesis_library.record_outcome(exp.hypothesis_id, positive=False)
+                                except Exception:
+                                    pass
+                        if telegram_adapter is not None:
                             try:
-                                suggestion_tracker.accept(exp.suggestion_id)
-                                logger.info(
-                                    "Auto-accepted suggestion %s (experiment %s passed)",
-                                    exp.suggestion_id, exp.experiment_id,
-                                )
+                                from comms.telegram_renderer import TelegramRenderer
+                                renderer = TelegramRenderer()
+                                text = renderer.render_experiment_result(exp, result)
+                                await telegram_adapter.send_message(text)
                             except Exception:
-                                logger.warning("Failed to auto-accept suggestion %s", exp.suggestion_id)
-                        if getattr(exp, "hypothesis_id", None):
-                            try:
-                                hypothesis_library.record_outcome(exp.hypothesis_id, positive=True)
-                                logger.info(
-                                    "Recorded positive outcome for hypothesis %s",
-                                    exp.hypothesis_id,
-                                )
-                            except Exception:
-                                logger.warning("Failed to record hypothesis outcome %s", exp.hypothesis_id)
-                    elif result.recommendation == "keep_control":
-                        if getattr(exp, "hypothesis_id", None):
-                            try:
-                                hypothesis_library.record_outcome(exp.hypothesis_id, positive=False)
-                            except Exception:
-                                pass
-                    if telegram_adapter is not None:
-                        try:
-                            from comms.telegram_renderer import TelegramRenderer
-                            renderer = TelegramRenderer()
-                            text = renderer.render_experiment_result(exp, result)
-                            await telegram_adapter.send_message(text)
-                        except Exception:
-                            logger.warning("Failed to send experiment result notification")
-        except Exception:
-            logger.exception("Experiment check failed")
+                                logger.warning("Failed to send experiment result notification")
+            except Exception:
+                logger.exception("Experiment check failed")
 
         # Evaluate mature structural experiments
         try:
@@ -1712,7 +1735,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         pr_review_check_fn=_pr_review_job if approval_tracker else None,
         deployment_check_fn=_deployment_check_job if deployment_monitor else None,
         threshold_learning_fn=_threshold_learning_job if threshold_learner else None,
-        experiment_check_fn=_experiment_check_job if experiment_manager else None,
+        experiment_check_fn=_experiment_check_job,
         reliability_verification_fn=_verify_reliability,
         discovery_fn=_discovery_analysis,
         learning_cycle_fn=_run_learning_cycle,
@@ -1725,6 +1748,15 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             await queue.initialize()
             await registry.initialize()
             await scheduled_run_store.initialize()
+
+            # Recover events stranded in 'processing' from a prior crash so they
+            # don't sit invisible until the next periodic recovery tick.
+            try:
+                recovered = await queue.recover_stale(timeout_seconds=300)
+                if recovered:
+                    logger.info("Startup: recovered %d stale events", recovered)
+            except Exception:
+                logger.warning("Startup recover_stale failed", exc_info=True)
 
             # Validate bot timezones (fail fast on invalid IANA zones)
             for bid, cfg in (config.bot_configs or {}).items():
@@ -1742,11 +1774,32 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     logger.warning("Failed to start %s adapter", type(adapter).__name__)
 
             # Start Telegram update polling (for callback queries and slash commands)
+            app.state.telegram_healthy = True
             if telegram_adapter is not None and telegram_adapter._callback_router is not None:
                 try:
                     await telegram_adapter.start_polling()
                 except Exception:
-                    logger.warning("Failed to start Telegram polling")
+                    logger.error("Failed to start Telegram polling — feedback loop disabled", exc_info=True)
+                    app.state.telegram_healthy = False
+                    # Surface to operators via remaining channels (Discord, email).
+                    try:
+                        from schemas.notifications import NotificationPayload, NotificationPriority
+                        degraded_payload = NotificationPayload(
+                            notification_type="telegram_polling_failure",
+                            priority=NotificationPriority.CRITICAL,
+                            title="Telegram polling offline",
+                            body=(
+                                "Telegram polling failed at startup — suggestion "
+                                "approve/reject feedback is offline until restart."
+                            ),
+                        )
+                        await dispatcher.dispatch(
+                            degraded_payload,
+                            notification_prefs,
+                            _utc_now().hour,
+                        )
+                    except Exception:
+                        logger.exception("Failed to dispatch Telegram degradation alert")
 
             # Start audit trail consumer
             audit_consumer.start(event_stream)
@@ -1784,9 +1837,18 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         occurrence.scheduled_for.isoformat(),
                     )
                     try:
-                        await scheduled_job_runner.run(
-                            occurrence.spec,
-                            scheduled_for=occurrence.scheduled_for,
+                        await asyncio.wait_for(
+                            scheduled_job_runner.run(
+                                occurrence.spec,
+                                scheduled_for=occurrence.scheduled_for,
+                            ),
+                            timeout=600,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Scheduled catch-up timed out after 600s for %s (%s) — moving on",
+                            occurrence.spec.job_key,
+                            occurrence.spec.scope_key,
                         )
                     except Exception:
                         logger.warning(
@@ -1895,9 +1957,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     @app.get("/health")
     async def health():
         scheduler_ok = hasattr(app.state, "scheduler") and app.state.scheduler is not None
+        telegram_healthy = getattr(app.state, "telegram_healthy", True)
+        all_ok = scheduler_ok and telegram_healthy
         return {
-            "status": "ok" if scheduler_ok else "degraded",
+            "status": "ok" if all_ok else "degraded",
             "scheduler": "running" if scheduler_ok else "unavailable",
+            "telegram_healthy": telegram_healthy,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 

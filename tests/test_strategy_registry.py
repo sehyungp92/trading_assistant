@@ -242,7 +242,7 @@ class TestFullYAMLFile:
         return load_strategy_registry(_REAL_YAML)
 
     def test_loads_all_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies) == 17
+        assert len(full_registry.strategies) == 20
 
     def test_swing_bot_has_6_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("swing_multi_01")) == 6

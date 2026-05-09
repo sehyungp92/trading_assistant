@@ -43,6 +43,13 @@ _CURATED_FILES = [
     "param_outcome_correlation.json",
     "portfolio_context.json",
     "market_conditions.json",
+    "engine_decomposition.json",
+    "ablation_analysis.json",
+    "exit_tier_analysis.json",
+    "funding_analysis.json",
+    "grade_analysis.json",
+    "confluence_analysis.json",
+    "leverage_analysis.json",
 ]
 
 # Portfolio-level curated files (loaded from curated/{date}/portfolio/)
@@ -138,6 +145,32 @@ If strategy_profiles data is present:
 - For mean_reversion_pullback archetype: high win rate + low payoff is expected —
   flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
 
+## ENGINE-LEVEL ANALYSIS
+If engine_decomposition data is present, it shows per-engine metrics with regime
+breakdowns for strategies with multiple sub-engines (e.g., Downturn's REVERSAL,
+BREAKDOWN, FADE). When this data is available:
+- Identify which engines underperform in which regimes
+- Compare engine win rates, profit factors, and exit efficiency
+- Proposals targeting a specific engine MUST include `engine` field in structured output
+- If one engine dominates losses, consider whether it should be disabled in certain regimes
+
+## ABLATION ANALYSIS
+If ablation_analysis data is present, it shows statistical comparisons of boolean
+flag on/off states from strategy_params_at_entry. When this data is available:
+- Review `flags_with_signal` — these are flags with statistically significant (p < 0.10)
+  performance differences between enabled and disabled states
+- Proposals to toggle a flag MUST reference the statistical evidence (p-value, PnL delta)
+- Include `ablation_flag` field in structured output for flag toggle suggestions
+- Do NOT suggest toggling safety-critical flags (circuit breakers, position limits)
+
+## EXIT TIER ANALYSIS
+If exit_tier_analysis data is present, it shows TP tier hit rates based on actual
+MFE (maximum favorable excursion) data. When this data is available:
+- Evaluate whether TP targets match actual MFE distributions
+- If a tier has < 20% hit rate, it may be set too aggressively
+- If optimal_target differs significantly from current_target, propose adjustment
+- Reference stop_placement data when discussing stop levels
+
 ## MACRO REGIME CONTEXT
 If macro_regime_analysis data is present (in portfolio curated files):
 - Current macro regime (G=Recovery, R=Reflation, S=Infl Hedge, D=Defensive)
@@ -227,6 +260,31 @@ Always emit it, even if arrays are empty.
 }}
 -->"""
 
+_CRYPTO_DAILY_SUPPLEMENT = """
+## CRYPTO PERPETUAL ANALYSIS
+This bot trades crypto perpetual futures. Apply the following crypto-specific guidance:
+
+**Funding analysis**: Evaluate funding_analysis data — is funding cost eroding edge?
+Compare per-direction (longs pay positive funding, shorts receive in positive-rate regimes).
+Suggest time-stop tightening if avg_funding_per_hour is high relative to expected R.
+
+**Grade performance**: Compare A vs B grade outcomes in grade_analysis data. Is the grade
+differential justified by performance? Flag if B-grade expectancy is negative with 20+ trades.
+
+**Confluence quality**: Review confluence_analysis factor-level data. Which confluences have
+highest lift? Suggest raising minimums if clear breakpoints exist in by_count data.
+
+**24/7 market**: Do NOT reference market open/close, pre-market, or extended hours. Crypto
+trades continuously. Use Asia/EU/US liquidity overlap windows (00-04/07-11/13-17 UTC) for
+time-of-day analysis instead.
+
+**Leverage awareness**: If leverage_analysis data is present, assess liquidation proximity.
+Flag any near_liquidation events as critical safety concerns.
+
+**Multi-strategy coordination**: Note max_concurrent and correlated risk limits. Flag if
+same-direction trades across strategies caused concentrated losses.
+"""
+
 # Legacy instructions kept for backward compatibility (used when no triage is provided)
 _INSTRUCTIONS = _FOCUSED_INSTRUCTIONS.format(
     routine_summary="(No triage data — review all bots manually)",
@@ -292,7 +350,10 @@ class DailyPromptAssembler:
     def _build_instructions(self, triage_report=None) -> str:
         """Build instructions from triage report or use fallback."""
         if triage_report is None:
-            return _INSTRUCTIONS
+            instructions = _INSTRUCTIONS
+            if self.strategy_registry and self._has_crypto_strategies():
+                instructions += _CRYPTO_DAILY_SUPPLEMENT
+            return instructions
 
         # Format significant events
         event_lines = []
@@ -309,11 +370,28 @@ class DailyPromptAssembler:
             question_lines.append(f"{i}. {q}")
         questions_text = "\n".join(question_lines)
 
-        return _FOCUSED_INSTRUCTIONS.format(
+        instructions = _FOCUSED_INSTRUCTIONS.format(
             routine_summary=triage_report.routine_summary,
             significant_events=events_text,
             focus_questions=questions_text,
         )
+
+        # Append crypto supplement if any bot has crypto perpetual strategies
+        if self.strategy_registry and self._has_crypto_strategies():
+            instructions += _CRYPTO_DAILY_SUPPLEMENT
+
+        return instructions
+
+    def _has_crypto_strategies(self) -> bool:
+        """Check if any bot in scope has crypto perpetual strategies."""
+        if not self.strategy_registry or not hasattr(self.strategy_registry, "strategies"):
+            return False
+        bot_set = set(self.bots)
+        for _sid, profile in self.strategy_registry.strategies.items():
+            if getattr(profile, "asset_class", "") == "crypto_perpetual":
+                if not bot_set or getattr(profile, "bot_id", "") in bot_set:
+                    return True
+        return False
 
     def _build_task_prompt(self) -> str:
         bot_list = ", ".join(self.bots)

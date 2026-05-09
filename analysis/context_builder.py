@@ -162,7 +162,7 @@ class ContextBuilder:
                 rec = json.loads(line)
                 if rec.get("status") == "rejected":
                     rejected.append(rec)
-        return rejected
+        return _apply_temporal_window(rejected)
 
     _QUALITY_RANK = {"high": 3, "medium": 2, "low": 1, "insufficient": 0}
 
@@ -212,7 +212,7 @@ class ContextBuilder:
                 reliable.append(entry)
             else:
                 low_quality.append(entry)
-        return reliable, low_quality
+        return _apply_temporal_window(reliable), _apply_temporal_window(low_quality)
 
     def load_allocation_history(self) -> list[dict]:
         """Load allocation history from findings/allocation_history.jsonl.
@@ -571,7 +571,7 @@ class ContextBuilder:
                     patterns.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
-        return patterns
+        return _apply_temporal_window(patterns)
 
     def load_forecast_meta(self) -> dict:
         """Load forecast meta-analysis from findings/forecast_history.jsonl.
@@ -648,6 +648,45 @@ class ContextBuilder:
                 if status in active_statuses:
                     active.append(rec)
         return _apply_temporal_window(active, max_entries=30)
+
+    def load_recent_proposal_outcomes(
+        self, bot_id: str = "", days: int = 30, max_entries: int = 30,
+    ) -> list[dict]:
+        """Load recent ProposalLedger outcomes (lightweight summary view).
+
+        Returns one dict per proposal with measured outcome inside ``days`` window.
+        Filters by ``bot_id`` when provided. Empty list if the ledger file is
+        missing or malformed.
+        """
+        try:
+            from skills.proposal_ledger import ProposalLedger
+
+            ledger = ProposalLedger(self._memory_dir / "findings")
+            recs = ledger.list_recent(days=days)
+        except Exception:
+            return []
+
+        out: list[dict] = []
+        for rec in recs:
+            if bot_id and rec.candidate.bot_id != bot_id:
+                continue
+            if not rec.outcomes:
+                continue
+            latest = rec.outcomes[-1]
+            out.append({
+                "proposal_id": rec.candidate.proposal_id,
+                "bot_id": rec.candidate.bot_id,
+                "source": rec.candidate.source.value,
+                "kind": rec.candidate.kind.value,
+                "title": rec.candidate.title,
+                "verdict": latest.verdict,
+                "objective_delta": latest.objective_delta,
+                "measured_at": latest.measured_at.isoformat()
+                    if hasattr(latest.measured_at, "isoformat")
+                    else str(latest.measured_at),
+            })
+        out.sort(key=lambda r: r["measured_at"], reverse=True)
+        return out[:max_entries]
 
     def load_category_scorecard(self) -> dict:
         """Load category-level suggestion success rates."""
@@ -1079,7 +1118,7 @@ class ContextBuilder:
             for line in path.read_text(encoding="utf-8").strip().splitlines():
                 if line.strip():
                     entries.append(json.loads(line))
-            return entries
+            return _apply_temporal_window(entries)
         except Exception:
             return []
 
@@ -1173,6 +1212,31 @@ class ContextBuilder:
                     "searched_at": entry.get("searched_at", ""),
                 })
             return reports[-lookback_n:]
+        except Exception:
+            return []
+
+    def load_regime_parameter_analysis(self, bot_id: str = "") -> list[dict]:
+        """Extract regime-conditional parameter analyses from search reports.
+
+        Reads the same search_reports.jsonl as load_search_reports() but
+        extracts the regime_analysis field where regime_sensitivity > 0.3.
+        """
+        path = self._memory_dir / "findings" / "search_reports.jsonl"
+        if not path.exists():
+            return []
+        try:
+            results: list[dict] = []
+            for line in path.read_text(encoding="utf-8").strip().splitlines():
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                if bot_id and entry.get("bot_id") != bot_id:
+                    continue
+                regime = entry.get("regime_analysis")
+                if not regime or regime.get("regime_sensitivity", 0) <= 0.3:
+                    continue
+                results.append(regime)
+            return results[-10:]  # Last 10 significant analyses
         except Exception:
             return []
 
@@ -1314,6 +1378,90 @@ class ContextBuilder:
 
         return "SELF-ASSESSMENT (auto-synthesized from learning data):\n\n" + "\n\n".join(signals)
 
+    def load_engine_decomposition(self, bot_id: str = "") -> dict:
+        """Load engine-level metrics decomposition from curated data.
+
+        Finds the most recent engine_decomposition.json for the given bot_id.
+        """
+        if not self._curated_dir:
+            return {}
+        try:
+            curated = Path(self._curated_dir)
+            date_dirs = sorted(
+                [d for d in curated.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                reverse=True,
+            )
+            for date_dir in date_dirs[:7]:
+                if bot_id:
+                    candidate = date_dir / bot_id / "engine_decomposition.json"
+                    if candidate.exists():
+                        return json.loads(candidate.read_text(encoding="utf-8"))
+                else:
+                    for bot_dir in date_dir.iterdir():
+                        if bot_dir.is_dir():
+                            candidate = bot_dir / "engine_decomposition.json"
+                            if candidate.exists():
+                                return json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def load_ablation_analysis(self, bot_id: str = "") -> dict:
+        """Load ablation flag analysis from curated data.
+
+        Finds the most recent ablation_analysis.json for the given bot_id.
+        """
+        if not self._curated_dir:
+            return {}
+        try:
+            curated = Path(self._curated_dir)
+            date_dirs = sorted(
+                [d for d in curated.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                reverse=True,
+            )
+            for date_dir in date_dirs[:7]:
+                if bot_id:
+                    candidate = date_dir / bot_id / "ablation_analysis.json"
+                    if candidate.exists():
+                        return json.loads(candidate.read_text(encoding="utf-8"))
+                else:
+                    for bot_dir in date_dir.iterdir():
+                        if bot_dir.is_dir():
+                            candidate = bot_dir / "ablation_analysis.json"
+                            if candidate.exists():
+                                return json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def load_exit_tier_analysis(self, bot_id: str = "") -> dict:
+        """Load exit tier hit-rate analysis from curated data.
+
+        Finds the most recent exit_tier_analysis.json for the given bot_id.
+        """
+        if not self._curated_dir:
+            return {}
+        try:
+            curated = Path(self._curated_dir)
+            date_dirs = sorted(
+                [d for d in curated.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                reverse=True,
+            )
+            for date_dir in date_dirs[:7]:
+                if bot_id:
+                    candidate = date_dir / bot_id / "exit_tier_analysis.json"
+                    if candidate.exists():
+                        return json.loads(candidate.read_text(encoding="utf-8"))
+                else:
+                    for bot_dir in date_dir.iterdir():
+                        if bot_dir.is_dir():
+                            candidate = bot_dir / "exit_tier_analysis.json"
+                            if candidate.exists():
+                                return json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
     def load_macro_regime_context(self) -> dict:
         """Load latest macro regime state from curated portfolio data.
 
@@ -1388,6 +1536,15 @@ class ContextBuilder:
         "coordination_rules",
         "portfolio_risk_config",
         "last_week_synthesis",
+        # Engine-level decomposition and ablation analysis
+        "engine_decomposition",
+        "ablation_analysis",
+        "exit_tier_analysis",
+        # Crypto perpetual analysis
+        "funding_analysis",
+        "grade_analysis",
+        "confluence_analysis",
+        "leverage_analysis",
         # Learning signals — high value for improvement
         "active_suggestions",
         "rejected_suggestions",
@@ -1407,6 +1564,7 @@ class ContextBuilder:
         "optimization_allocation",
         "search_signal_summary",
         "search_reports",
+        "regime_parameter_analysis",
         "hypothesis_track_record",
         "discoveries",
         "strategy_ideas",
@@ -1454,6 +1612,14 @@ class ContextBuilder:
             "archetype_expectations",
             "coordination_rules",
             "portfolio_risk_config",
+            "engine_decomposition",
+            "ablation_analysis",
+            "exit_tier_analysis",
+            "funding_analysis",
+            "grade_analysis",
+            "confluence_analysis",
+            "leverage_analysis",
+            "regime_parameter_analysis",
             "outcome_reasonings",
             "recalibrations",
             "discoveries",
@@ -1480,6 +1646,7 @@ class ContextBuilder:
             "backtest_reliability",
             "regime_config_history",
             "search_reports",
+            "regime_parameter_analysis",
             "search_signal_summary",
             "optimization_allocation",
             "active_experiments",
@@ -1584,6 +1751,9 @@ class ContextBuilder:
         active_suggestions = self.load_active_suggestions()
         if active_suggestions:
             data["active_suggestions"] = active_suggestions
+        recent_proposal_outcomes = self.load_recent_proposal_outcomes(bot_id=bot_id)
+        if recent_proposal_outcomes:
+            data["recent_proposal_outcomes"] = recent_proposal_outcomes
         category_scorecard = self.load_category_scorecard()
         if category_scorecard:
             data["category_scorecard"] = category_scorecard
@@ -1668,10 +1838,10 @@ class ContextBuilder:
         strategy_ideas = self.load_strategy_ideas()
         if strategy_ideas:
             data["strategy_ideas"] = strategy_ideas
-        search_reports = self.load_search_reports()
+        search_reports = self.load_search_reports(bot_id=bot_id)
         if search_reports:
             data["search_reports"] = search_reports
-        backtest_reliability = self.load_backtest_reliability()
+        backtest_reliability = self.load_backtest_reliability(bot_id=bot_id)
         if backtest_reliability:
             data["backtest_reliability"] = backtest_reliability
         portfolio_outcomes = self.load_portfolio_outcomes()
@@ -1716,6 +1886,20 @@ class ContextBuilder:
                 }
             if strategy_registry.portfolio.heat_cap_R > 0:
                 data["portfolio_risk_config"] = strategy_registry.portfolio.model_dump(mode="json")
+
+        # Engine-level decomposition, ablation analysis, exit tier analysis
+        engine_decomposition = self.load_engine_decomposition(bot_id=bot_id)
+        if engine_decomposition:
+            data["engine_decomposition"] = engine_decomposition
+        ablation_analysis = self.load_ablation_analysis(bot_id=bot_id)
+        if ablation_analysis:
+            data["ablation_analysis"] = ablation_analysis
+        exit_tier_analysis = self.load_exit_tier_analysis(bot_id=bot_id)
+        if exit_tier_analysis:
+            data["exit_tier_analysis"] = exit_tier_analysis
+        regime_param_analysis = self.load_regime_parameter_analysis(bot_id=bot_id)
+        if regime_param_analysis:
+            data["regime_parameter_analysis"] = regime_param_analysis
 
         # Select workflow-aware priority list (falls back to default)
         active_priority = self._WORKFLOW_PRIORITIES.get(

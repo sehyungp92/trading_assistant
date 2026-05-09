@@ -15,13 +15,13 @@ structural_context_paths:
 verification_commands:
   - pytest tests -q
 strategies:
-  - kmp
-  - kpr
-  - pcim
-  - nulrimok
+  - KMP
+  - KPR
+  - PCIM
+  - NULRIMOK
 parameters:
   - param_name: quality_min_threshold
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.quality_min_threshold
@@ -31,7 +31,7 @@ parameters:
     category: entry_signal
     is_safety_critical: false
   - param_name: or_range_max
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.or_range_max
@@ -41,7 +41,7 @@ parameters:
     category: entry_signal
     is_safety_critical: false
   - param_name: rsi_min
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.rsi_min
@@ -51,7 +51,7 @@ parameters:
     category: entry_signal
     is_safety_critical: false
   - param_name: rsi_max
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.rsi_max
@@ -61,7 +61,7 @@ parameters:
     category: entry_signal
     is_safety_critical: false
   - param_name: volume_ratio_min
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.volume_ratio_min
@@ -71,7 +71,7 @@ parameters:
     category: filter_threshold
     is_safety_critical: false
   - param_name: atr_filter_mult
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.atr_filter_mult
@@ -81,7 +81,7 @@ parameters:
     category: filter_threshold
     is_safety_critical: false
   - param_name: max_spread_pct
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.max_spread_pct
@@ -91,7 +91,7 @@ parameters:
     category: filter_threshold
     is_safety_critical: false
   - param_name: max_positions
-    strategy_id: kmp
+    strategy_id: KMP
     param_type: YAML_FIELD
     file_path: strategy_kmp/config/switches.yaml
     yaml_key: kmp.max_positions
@@ -101,6 +101,7 @@ parameters:
     category: risk_management
     is_safety_critical: true
   - param_name: base_risk_pct
+    strategy_id: ""
     param_type: PYTHON_CONSTANT
     file_path: config/risk.py
     python_path: BASE_RISK_PCT
@@ -110,6 +111,7 @@ parameters:
     category: risk_management
     is_safety_critical: true
   - param_name: daily_stop_r
+    strategy_id: ""
     param_type: PYTHON_CONSTANT
     file_path: config/risk.py
     python_path: DAILY_STOP_R
@@ -119,6 +121,7 @@ parameters:
     category: risk_management
     is_safety_critical: true
   - param_name: heat_cap_r
+    strategy_id: ""
     param_type: PYTHON_CONSTANT
     file_path: config/risk.py
     python_path: HEAT_CAP_R

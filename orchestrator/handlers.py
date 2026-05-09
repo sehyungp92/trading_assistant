@@ -71,6 +71,8 @@ class Handlers:
         structural_experiment_tracker: object | None = None,
         strategy_registry: object | None = None,
         run_index: object | None = None,
+        proposal_ledger: object | None = None,
+        calibration_tracker: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -105,6 +107,8 @@ class Handlers:
         self._structural_experiment_tracker = structural_experiment_tracker
         self._strategy_registry = strategy_registry
         self._run_index = run_index
+        self._proposal_ledger = proposal_ledger
+        self._calibration_tracker = calibration_tracker
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -334,6 +338,7 @@ class Handlers:
                 agent_suggestion_ids = self._record_agent_suggestions(
                     validation, run_id, parsed,
                     provider=result.provider, model=result.effective_model,
+                    source="llm_daily",
                 )
 
                 # Record learning card feedback from validation signal
@@ -502,10 +507,12 @@ class Handlers:
             # Load recent suggestions per bot for anti-oscillation
             _recent_suggestions: list[dict] = []
             if self._suggestion_tracker:
-                for bid in portfolio_summary.bot_summaries:
-                    _recent_suggestions.extend(
-                        self._suggestion_tracker.get_recent_by_bot(bid, weeks=4)
-                    )
+                grouped = self._suggestion_tracker.get_recent_grouped(
+                    list(portfolio_summary.bot_summaries.keys()),
+                    weeks=4,
+                )
+                for items in grouped.values():
+                    _recent_suggestions.extend(items)
 
             # Load convergence report for oscillation dampening
             _convergence_report: dict = {}
@@ -1146,6 +1153,104 @@ class Handlers:
                 title=f"WFO {bot_id} — {report.recommendation.value.upper()}",
                 body=result.response[:2000] if result.success else markdown[:2000],
             )
+
+            # Record WFO ADOPT/TEST_FURTHER recommendations as suggestions
+            if (
+                self._suggestion_tracker
+                and report.recommendation != WFORecommendation.REJECT
+            ):
+                try:
+                    from schemas.suggestion_tracking import SuggestionRecord, SuggestionStatus
+                    # data_end already in scope from handle_wfo (line 1043)
+                    raw_id = f"wfo:{bot_id}:{data_end}:{report.recommendation.value}"
+                    suggestion_id = hashlib.sha256(raw_id.encode()).hexdigest()[:16]
+                    robustness_score = 0.0
+                    if hasattr(report, "robustness") and report.robustness is not None:
+                        robustness_score = getattr(report.robustness, "robustness_score", 0.0)
+                    confidence = min(robustness_score / 100.0, 1.0)
+                    suggested_params = getattr(report, "suggested_params", None) or {}
+                    affected_params = list(suggested_params.keys())
+                    title = f"WFO {report.recommendation.value}: {bot_id}"
+                    proposal_id = self._ledger_write_candidate(
+                        source="wfo",
+                        kind_hint="parameter_change",
+                        bot_id=bot_id,
+                        title=title,
+                        description=getattr(report, "recommendation_reasoning", "") or "",
+                        suggestion_id=suggestion_id,
+                        run_id=run_id,
+                        evaluation_method="wfo",
+                        affected_parameters=affected_params,
+                    )
+                    record = SuggestionRecord(
+                        suggestion_id=suggestion_id,
+                        bot_id=bot_id,
+                        tier="parameter",
+                        category="wfo_optimization",
+                        title=title,
+                        description=getattr(report, "recommendation_reasoning", "") or "",
+                        confidence=confidence,
+                        status=SuggestionStatus.PROPOSED,
+                        source_report_id=run_id,
+                        proposal_id=proposal_id or None,
+                        implementation_context={
+                            "current_params": getattr(report, "current_params", None) or {},
+                            "suggested_params": suggested_params,
+                            "robustness_score": robustness_score,
+                            "safety_flags": [f.value if hasattr(f, "value") else str(f) for f in (getattr(report, "safety_flags", None) or [])],
+                        },
+                    )
+                    self._suggestion_tracker.record(record)
+
+                    # Record an evaluation event reflecting the WFO recommendation
+                    decision = (
+                        "approve"
+                        if report.recommendation == WFORecommendation.ADOPT
+                        else "experiment"
+                    )
+                    self._ledger_write_evaluation(
+                        proposal_id=proposal_id,
+                        method="wfo",
+                        decision=decision,
+                        decision_reason=getattr(report, "recommendation_reasoning", "") or "",
+                        objective_score=float(robustness_score),
+                        confidence=confidence,
+                        summary=f"WFO recommendation: {report.recommendation.value}",
+                    )
+
+                    # Feed prediction side of calibration loop (outcome side already
+                    # wired in auto_outcome_measurer). getattr keeps tests using
+                    # Handlers.__new__() resilient.
+                    calibration_tracker = getattr(self, "_calibration_tracker", None)
+                    if calibration_tracker is not None:
+                        try:
+                            calibration_tracker.record_prediction(
+                                suggestion_id=suggestion_id,
+                                bot_id=bot_id,
+                                param_category="wfo_optimization",
+                                predicted_improvement=float(robustness_score),
+                                predicted_routing=(
+                                    "adopt"
+                                    if report.recommendation == WFORecommendation.ADOPT
+                                    else "experiment"
+                                ),
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to record WFO calibration prediction for %s",
+                                suggestion_id, exc_info=True,
+                            )
+
+                    if self._event_stream:
+                        self._event_stream.broadcast("wfo_suggestion_recorded", {
+                            "suggestion_id": suggestion_id,
+                            "bot_id": bot_id,
+                            "recommendation": report.recommendation.value,
+                        })
+                    logger.info("Recorded WFO suggestion %s for %s", suggestion_id, bot_id)
+                except Exception:
+                    logger.warning("Failed to record WFO suggestion for %s", bot_id, exc_info=True)
+
             finished_at = datetime.now(timezone.utc)
             self._record_run(
                 run_id,
@@ -1432,6 +1537,18 @@ class Handlers:
                             d["date"] = date
                             d["discovered_at"] = datetime.now(timezone.utc).isoformat()
                             f.write(json.dumps(d) + "\n")
+                            # Mirror into the unified proposal ledger so weekly
+                            # learning sees discoveries as comparable proposals.
+                            self._ledger_write_candidate(
+                                source="discovery",
+                                kind_hint="structural_change",
+                                bot_id=d.get("bot_id", "") or "",
+                                title=d.get("pattern_description", "")[:120] or "discovery",
+                                description=d.get("testable_hypothesis", "") or "",
+                                run_id=run_id,
+                                evaluation_method="discovery_review",
+                                lifecycle_stage=d.get("lifecycle_stage", "") or "",
+                            )
 
                     # Add novel hypotheses to hypothesis library
                     try:
@@ -1470,6 +1587,16 @@ class Handlers:
                             idea["run_id"] = run_id
                             idea["status"] = "proposed"
                             f.write(json.dumps(idea) + "\n")
+                            self._ledger_write_candidate(
+                                source="discovery",
+                                kind_hint="new_strategy",
+                                bot_id=idea.get("bot_id", "") or "",
+                                title=idea.get("title", "") or desc[:80] or "strategy_idea",
+                                description=desc,
+                                run_id=run_id,
+                                evaluation_method="experiment",
+                                lifecycle_stage=idea.get("lifecycle_stage", "") or "",
+                            )
 
                     # High-confidence ideas → structural experiment records
                     if self._structural_experiment_tracker is not None:
@@ -2066,11 +2193,34 @@ class Handlers:
                     }
                     for b in validation.blocked_suggestions
                 ]
+                blocked_proposal_details = [
+                    {
+                        "title": getattr(b.proposal, "title", ""),
+                        "reason": b.reason,
+                        "bot_id": getattr(b.proposal, "bot_id", "") or "",
+                        "hypothesis_id": getattr(b.proposal, "hypothesis_id", "") or "",
+                    }
+                    for b in validation.blocked_structural_proposals
+                ]
+                blocked_portfolio_details = [
+                    {
+                        "title": getattr(b.proposal, "title", "")
+                        or getattr(b.proposal, "proposal_type", ""),
+                        "reason": b.reason,
+                    }
+                    for b in validation.blocked_portfolio_proposals
+                ]
                 entry = {
                     "date": date_or_week,
                     "approved_count": len(validation.approved_suggestions),
                     "blocked_count": len(validation.blocked_suggestions),
                     "blocked_details": blocked_details,
+                    "approved_proposal_count": len(validation.approved_structural_proposals),
+                    "blocked_proposal_count": len(validation.blocked_structural_proposals),
+                    "blocked_proposal_details": blocked_proposal_details,
+                    "approved_portfolio_count": len(validation.approved_portfolio_proposals),
+                    "blocked_portfolio_count": len(validation.blocked_portfolio_proposals),
+                    "blocked_portfolio_details": blocked_portfolio_details,
                     "provider": provider,
                     "model": model,
                     "run_id": run_id,
@@ -2469,6 +2619,16 @@ class Handlers:
             detection_ctx["current_config"] = getattr(proposal, "current_config", {})
             detection_ctx["proposed_config"] = getattr(proposal, "proposed_config", {})
 
+            ledger_proposal_id = self._ledger_write_candidate(
+                source="portfolio",
+                kind_hint="portfolio_change",
+                bot_id="PORTFOLIO",
+                title=f"Portfolio: {ptype_str}",
+                description=getattr(proposal, "evidence_summary", "") or "",
+                suggestion_id=suggestion_id,
+                run_id=run_id,
+                evaluation_method="approval",
+            )
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id="PORTFOLIO",
@@ -2479,6 +2639,7 @@ class Handlers:
                 description=getattr(proposal, "evidence_summary", "") or "",
                 confidence=float(getattr(proposal, "confidence", 0.5) or 0.5),
                 detection_context=detection_ctx if detection_ctx else None,
+                proposal_id=ledger_proposal_id or None,
             )
             recorded = self._suggestion_tracker.record(record)
             if recorded is not False:
@@ -2602,6 +2763,126 @@ class Handlers:
         )
         return family_trades
 
+    def _ledger_write_candidate(
+        self,
+        *,
+        source: str,
+        kind_hint: str,
+        bot_id: str,
+        title: str,
+        description: str = "",
+        suggestion_id: str = "",
+        experiment_id: str = "",
+        deployment_id: str = "",
+        hypothesis_id: str = "",
+        run_id: str = "",
+        detector_name: str = "",
+        evaluation_method: str = "",
+        lifecycle_stage: str = "",
+        affected_parameters: list[str] | None = None,
+        affected_files: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+    ) -> str:
+        """Write a ProposalCandidate to the unified ledger.
+
+        Returns the proposal_id (empty string if no ledger configured). This
+        helper centralizes ledger writes so each proposal-producing handler
+        site can insert one consistent record.
+        """
+        # Use getattr for resilience: tests sometimes construct via __new__
+        # without going through __init__.
+        ledger = getattr(self, "_proposal_ledger", None)
+        if not ledger:
+            return ""
+        try:
+            from schemas.proposal_ledger import (
+                ProposalCandidate,
+                ProposalKind,
+                ProposalSource,
+            )
+            from skills.proposal_ledger import make_proposal_id
+        except Exception:
+            logger.debug("ProposalLedger schemas unavailable", exc_info=True)
+            return ""
+
+        try:
+            src = ProposalSource(source)
+        except ValueError:
+            src = ProposalSource.DETERMINISTIC
+
+        kind_map = {
+            "parameter": ProposalKind.PARAMETER_CHANGE,
+            "filter": ProposalKind.PARAMETER_CHANGE,
+            "parameter_change": ProposalKind.PARAMETER_CHANGE,
+            "strategy_variant": ProposalKind.STRUCTURAL_CHANGE,
+            "hypothesis": ProposalKind.STRUCTURAL_CHANGE,
+            "structural": ProposalKind.STRUCTURAL_CHANGE,
+            "structural_change": ProposalKind.STRUCTURAL_CHANGE,
+            "new_strategy": ProposalKind.NEW_STRATEGY,
+            "portfolio": ProposalKind.PORTFOLIO_CHANGE,
+            "portfolio_change": ProposalKind.PORTFOLIO_CHANGE,
+            "search_space_change": ProposalKind.SEARCH_SPACE_CHANGE,
+            "instrumentation_request": ProposalKind.INSTRUMENTATION_REQUEST,
+            "bug_fix": ProposalKind.BUG_FIX,
+        }
+        kind = kind_map.get(kind_hint.lower(), ProposalKind.PARAMETER_CHANGE)
+
+        proposal_id = make_proposal_id(src, bot_id, kind, title or "untitled")
+        candidate = ProposalCandidate(
+            proposal_id=proposal_id,
+            source=src,
+            kind=kind,
+            bot_id=bot_id,
+            title=title or "untitled",
+            description=description or "",
+            hypothesis_id=hypothesis_id or "",
+            suggestion_id=suggestion_id or "",
+            experiment_id=experiment_id or "",
+            deployment_id=deployment_id or "",
+            linked_run_id=run_id or "",
+            evaluation_method=evaluation_method or "",
+            lifecycle_stage=lifecycle_stage or "",
+            linked_diagnostics=[detector_name] if detector_name else [],
+            affected_parameters=affected_parameters or [],
+            affected_files=affected_files or [],
+            acceptance_criteria=acceptance_criteria or [],
+        )
+        try:
+            ledger.record_candidate(candidate)
+        except Exception:
+            logger.warning("Failed to record proposal candidate", exc_info=True)
+        return proposal_id
+
+    def _ledger_write_evaluation(
+        self,
+        proposal_id: str,
+        method: str,
+        decision: str,
+        decision_reason: str = "",
+        objective_score: float = 0.0,
+        confidence: float = 0.0,
+        summary: str = "",
+    ) -> None:
+        ledger = getattr(self, "_proposal_ledger", None)
+        if not ledger or not proposal_id:
+            return
+        try:
+            from schemas.proposal_ledger import ProposalEvaluation
+            ledger.record_evaluation(
+                proposal_id,
+                ProposalEvaluation(
+                    proposal_id=proposal_id,
+                    method=method,
+                    decision=decision,
+                    decision_reason=decision_reason,
+                    objective_score=objective_score,
+                    confidence=confidence,
+                    summary=summary,
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to record proposal evaluation", exc_info=True)
+
     def _record_suggestions(
         self, suggestions: list, run_id: str,
         category_scorecard=None,
@@ -2684,11 +2965,30 @@ class Handlers:
             if description:
                 expected_impact = description[:200]
 
+            tier_val = str(tier.value) if hasattr(tier, "value") else str(tier)
+            detector_name = ""
+            if isinstance(det_ctx, BaseModel):
+                detector_name = getattr(det_ctx, "detector_name", "") or ""
+            elif isinstance(det_ctx, dict):
+                detector_name = det_ctx.get("detector_name", "") or ""
+            proposal_id = self._ledger_write_candidate(
+                source="deterministic",
+                kind_hint=tier_val,
+                bot_id=bot_id,
+                title=title,
+                description=description,
+                suggestion_id=suggestion_id,
+                run_id=run_id,
+                detector_name=detector_name,
+                evaluation_method="parameter_search" if tier_val in ("parameter", "filter") else "approval",
+                affected_parameters=[target_param] if target_param else [],
+            )
+
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
                 title=title,
-                tier=str(tier.value) if hasattr(tier, "value") else str(tier),
+                tier=tier_val,
                 category=category_str,
                 source_report_id=run_id,
                 description=description,
@@ -2697,6 +2997,7 @@ class Handlers:
                 proposed_value=proposed_value,
                 expected_impact=expected_impact,
                 detection_context=det_ctx_dict,
+                proposal_id=proposal_id or None,
             )
 
             recorded = self._suggestion_tracker.record(record)
@@ -2714,11 +3015,14 @@ class Handlers:
     def _record_agent_suggestions(
         self, validation_result, run_id: str, parsed=None,
         provider: str = "", model: str = "",
+        source: str = "llm_weekly",
     ) -> dict[str, str]:
         """Record approved suggestions from validation into SuggestionTracker.
 
         Maps AgentSuggestion → SuggestionRecord with deterministic IDs and hypothesis linking.
-        Only approved (not blocked) suggestions are recorded.
+        Only approved (not blocked) suggestions are recorded. ``source`` controls
+        the ProposalSource label written to the unified ledger — daily handlers
+        should pass ``"llm_daily"``.
 
         Returns a mapping of suggestion_id → title.
         """
@@ -2831,6 +3135,24 @@ class Handlers:
             _raw_ei = getattr(suggestion, "expected_impact", None)
             agent_expected_impact = str(_raw_ei) if isinstance(_raw_ei, str) else ""
 
+            agent_hypothesis_id = (
+                structural_context.get("hypothesis_id")
+                if structural_context is not None
+                else None
+            )
+            ledger_proposal_id = self._ledger_write_candidate(
+                source=source,
+                kind_hint="structural_change" if tier in ("strategy_variant", "hypothesis") else tier,
+                bot_id=bot_id,
+                title=title,
+                description=suggestion.evidence_summary or "",
+                suggestion_id=suggestion_id,
+                run_id=run_id,
+                hypothesis_id=agent_hypothesis_id or "",
+                evaluation_method="approval",
+                affected_parameters=[agent_target_param] if agent_target_param else [],
+            )
+
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -2843,12 +3165,9 @@ class Handlers:
                 target_param=agent_target_param,
                 proposed_value=agent_proposed_value,
                 expected_impact=agent_expected_impact,
-                hypothesis_id=(
-                    structural_context.get("hypothesis_id")
-                    if structural_context is not None
-                    else None
-                ),
+                hypothesis_id=agent_hypothesis_id,
                 implementation_context=structural_context,
+                proposal_id=ledger_proposal_id or None,
                 detection_context=detection_ctx if detection_ctx else None,
             )
 
@@ -2908,6 +3227,22 @@ class Handlers:
             recorded = self._structural_experiment_tracker.record_experiment(experiment)
             if recorded:
                 logger.info("Recorded structural experiment %s: %s", exp_id, proposal.title)
+                self._ledger_write_candidate(
+                    source="structural",
+                    kind_hint="structural_change",
+                    bot_id=proposal.bot_id or "",
+                    title=proposal.title or "",
+                    description=proposal.description or "",
+                    suggestion_id=proposal.linked_suggestion_id or "",
+                    experiment_id=exp_id,
+                    hypothesis_id=proposal.hypothesis_id or "",
+                    run_id=run_id,
+                    evaluation_method="experiment",
+                    acceptance_criteria=[
+                        f"{c.metric}{c.comparator}{c.threshold}"
+                        for c in valid_criteria
+                    ],
+                )
 
     async def _run_autonomous_pipeline(self, suggestion_ids: dict[str, str], run_id: str) -> None:
         """Run the autonomous pipeline on newly recorded suggestions (if enabled)."""
@@ -3257,21 +3592,39 @@ class Handlers:
             if bot_dir.is_dir():
                 trades_file = bot_dir / "trades.jsonl"
                 if trades_file.exists():
+                    total = 0
+                    dropped = 0
                     for line in trades_file.read_text(encoding="utf-8").splitlines():
-                        if line.strip():
-                            try:
-                                trades.append(TradeEvent(**json.loads(line)))
-                            except Exception:
-                                pass
+                        if not line.strip():
+                            continue
+                        total += 1
+                        try:
+                            trades.append(TradeEvent(**json.loads(line)))
+                        except Exception:
+                            dropped += 1
+                    if dropped:
+                        logger.warning(
+                            "Dropped %d/%d malformed trade records from %s",
+                            dropped, total, trades_file,
+                        )
 
                 missed_file = bot_dir / "missed.jsonl"
                 if missed_file.exists():
+                    total = 0
+                    dropped = 0
                     for line in missed_file.read_text(encoding="utf-8").splitlines():
-                        if line.strip():
-                            try:
-                                missed.append(MissedOpportunityEvent(**json.loads(line)))
-                            except Exception:
-                                pass
+                        if not line.strip():
+                            continue
+                        total += 1
+                        try:
+                            missed.append(MissedOpportunityEvent(**json.loads(line)))
+                        except Exception:
+                            dropped += 1
+                    if dropped:
+                        logger.warning(
+                            "Dropped %d/%d malformed missed-opportunity records from %s",
+                            dropped, total, missed_file,
+                        )
 
             current += timedelta(days=1)
 
@@ -3362,6 +3715,15 @@ class Handlers:
                 simulation_results or {},
             ),
             "orderbook_stats": self._aggregate_orderbook_stats(week_start, week_end, bot_ids),
+            "exit_sweep": self._extract_per_bot_sim(
+                simulation_results or {}, "exit_sweep_", bot_ids,
+            ),
+            "filter_sensitivity": self._extract_per_bot_sim(
+                simulation_results or {}, "filter_sensitivity_", bot_ids,
+            ),
+            "counterfactual": self._extract_per_bot_sim(
+                simulation_results or {}, "counterfactual_", bot_ids,
+            ),
         }
 
         # Load macro regime data from most recent portfolio curated file
@@ -3410,6 +3772,20 @@ class Handlers:
         )
         evidence["portfolio_context"] = self._aggregate_curated_file(
             "portfolio_context.json", week_start, week_end, bot_ids,
+        )
+
+        # Crypto perpetual curated files (only present for crypto bots)
+        evidence["funding_data"] = self._aggregate_curated_file(
+            "funding_analysis.json", week_start, week_end, bot_ids,
+        )
+        evidence["grade_data"] = self._aggregate_curated_file(
+            "grade_analysis.json", week_start, week_end, bot_ids,
+        )
+        evidence["confluence_data"] = self._aggregate_curated_file(
+            "confluence_analysis.json", week_start, week_end, bot_ids,
+        )
+        evidence["leverage_data"] = self._aggregate_curated_file(
+            "leverage_analysis.json", week_start, week_end, bot_ids,
         )
 
         return {key: value for key, value in evidence.items() if value}
@@ -3767,6 +4143,31 @@ class Handlers:
             if bot_id and isinstance(pairs, list) and pairs:
                 interactions[bot_id] = pairs
         return interactions
+
+    @staticmethod
+    def _extract_per_bot_sim(
+        simulation_results: dict, prefix: str, bot_ids: list[str],
+    ) -> dict[str, dict]:
+        """Extract per-bot simulator outputs from the weekly results dict.
+
+        The weekly handler stores sim outputs as ``{f"{prefix}{bot_id}": dict}``;
+        this helper rebuilds the per-bot mapping that ``StrategyEngine.build_report``
+        expects.
+        """
+        out: dict[str, dict] = {}
+        if not simulation_results or not prefix:
+            return out
+        wanted = set(bot_ids)
+        for key, value in simulation_results.items():
+            if not isinstance(key, str) or not key.startswith(prefix):
+                continue
+            if not isinstance(value, dict):
+                continue
+            bot_id = key[len(prefix):]
+            if wanted and bot_id not in wanted:
+                continue
+            out[bot_id] = value
+        return out
 
     def _aggregate_orderbook_stats(
         self, week_start: str, week_end: str, bot_ids: list[str],

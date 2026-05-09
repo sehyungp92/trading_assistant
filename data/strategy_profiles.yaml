@@ -210,6 +210,18 @@ strategies:
     allocation:
       base_risk_pct: 0.020
     macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
+    entry_types: [CLASS_M, CLASS_F, CLASS_T]
+    exit_profile:
+      tiers:
+        - tier_name: TP1
+          tier_type: take_profit
+          r_target: 2.5
+          partial_pct: 1.0
+      has_chandelier: true
+      regime_multipliers:
+        trending_up: 1.0
+        trending_down: 1.0
+        volatile: 0.8
 
   "NQDTC_v2.1":
     display_name: "NQ Day Trade Channel v2.1"
@@ -270,6 +282,25 @@ strategies:
     sub_engines: [REVERSAL, BREAKDOWN, FADE]
     regime_model: "composite_with_vol_state"
     key_metadata_fields: [engine_tag, composite_regime_at_entry, vol_state_at_entry, in_correction_window, predator_present, signal_class]
+    exit_profile:
+      tiers:
+        - tier_name: TP0
+          tier_type: take_profit
+          r_target: 1.0
+          partial_pct: 0.50
+        - tier_name: TP1
+          tier_type: take_profit
+          r_target: 2.0
+          partial_pct: 0.30
+        - tier_name: TP2
+          tier_type: take_profit
+          r_target: 3.0
+          partial_pct: 0.20
+      has_chandelier: true
+      regime_multipliers:
+        trending_down: 1.0
+        volatile: 0.8
+        ranging: 0.6
     analysis_focus:
       - engine_performance_comparison
       - composite_regime_accuracy
@@ -354,6 +385,122 @@ strategies:
       base_risk_pct: 0.020
     macro_regime_sensitivity: {}
 
+  # --- crypto_trader (BTC/ETH/SOL perpetual futures, Hyperliquid) ---
+
+  MomentumPullback_M15:
+    display_name: "Momentum Pullback M15"
+    bot_id: crypto_trader
+    family: crypto
+    archetype: momentum_pullback_crypto
+    asset_class: crypto_perpetual
+    symbols: [BTC, ETH, SOL]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 3.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.0075
+    macro_regime_sensitivity: {}
+    entry_types: [PULLBACK_LONG, PULLBACK_SHORT]
+    key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, adx_entry]
+    analysis_focus:
+      - confluence_vs_outcome
+      - funding_cost_vs_hold_duration
+      - grade_selectivity
+      - time_of_day_liquidity
+    exit_profile:
+      tiers:
+        - tier_name: TP1
+          tier_type: take_profit
+          r_target: 1.2
+          partial_pct: 0.16
+        - tier_name: TP2
+          tier_type: take_profit
+          r_target: 2.5
+          partial_pct: 0.20
+      has_chandelier: false
+      regime_multipliers: {}
+
+  InstitutionalAnchor_H1:
+    display_name: "Institutional Anchor H1"
+    bot_id: crypto_trader
+    family: crypto
+    archetype: institutional_anchor
+    asset_class: crypto_perpetual
+    symbols: [BTC, ETH, SOL]
+    preferred_regimes: [trending_up, trending_down]
+    adverse_regimes: [ranging]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 3.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.0075
+    macro_regime_sensitivity: {}
+    entry_types: [ON_CLOSE_LONG, ON_CLOSE_SHORT, ON_BREAKOUT_LONG, ON_BREAKOUT_SHORT]
+    key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, h1_adx]
+    analysis_focus:
+      - confluence_vs_outcome
+      - funding_cost_vs_hold_duration
+      - grade_selectivity
+      - entry_method_comparison
+    exit_profile:
+      tiers:
+        - tier_name: TP1
+          tier_type: take_profit
+          r_target: 1.0
+          partial_pct: 0.30
+        - tier_name: TP2
+          tier_type: take_profit
+          r_target: 2.0
+          partial_pct: 0.40
+      has_chandelier: false
+      regime_multipliers: {}
+
+  VolumeProfileBreakout_M30:
+    display_name: "Volume Profile Breakout M30"
+    bot_id: crypto_trader
+    family: crypto
+    archetype: volume_profile_breakout
+    asset_class: crypto_perpetual
+    symbols: [BTC, ETH, SOL]
+    preferred_regimes: [compression]
+    adverse_regimes: [trending_up, trending_down]
+    holding_period: multi_day
+    risk:
+      unit_risk_dollars: 0.0
+      daily_stop_R: 3.0
+      max_heat_R: 3.00
+      tp_ratio: 2.0
+    allocation:
+      base_risk_pct: 0.0075
+    macro_regime_sensitivity: {}
+    entry_types: [BREAKOUT_LONG, BREAKOUT_SHORT]
+    key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, volume_surge]
+    analysis_focus:
+      - balance_zone_quality
+      - failed_breakout_rate
+      - funding_cost_vs_hold_duration
+      - grade_selectivity
+    exit_profile:
+      tiers:
+        - tier_name: TP1
+          tier_type: take_profit
+          r_target: 0.8
+          partial_pct: 0.30
+        - tier_name: TP2
+          tier_type: take_profit
+          r_target: 2.0
+          partial_pct: 0.40
+      has_chandelier: false
+      regime_multipliers: {}
+
 coordination:
   signals:
     - trigger: {strategy: ATRSS, event: ENTRY_FILL}
@@ -395,6 +542,7 @@ portfolio:
     stock: 0.3333
     momentum: 0.3333
     k_stock: 0.0  # separate capital pool (KRW), not allocated from USD portfolio
+    crypto: 0.0  # separate capital pool (USDC), not allocated from USD portfolio
   drawdown_tiers:
     - [0.08, 1.00]
     - [0.12, 0.50]
@@ -467,3 +615,18 @@ archetype_expectations:
     expected_payoff_ratio: [0.8, 1.5]
     regime_sensitivity: medium
     typical_holding_bars: [5, 156]
+  momentum_pullback_crypto:
+    expected_win_rate: [0.35, 0.50]
+    expected_payoff_ratio: [1.5, 2.5]
+    regime_sensitivity: high
+    typical_holding_bars: [4, 40]
+  institutional_anchor:
+    expected_win_rate: [0.35, 0.50]
+    expected_payoff_ratio: [1.5, 2.5]
+    regime_sensitivity: high
+    typical_holding_bars: [4, 48]
+  volume_profile_breakout:
+    expected_win_rate: [0.30, 0.45]
+    expected_payoff_ratio: [1.5, 3.0]
+    regime_sensitivity: high
+    typical_holding_bars: [2, 24]

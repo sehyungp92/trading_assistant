@@ -281,28 +281,12 @@ class TestTransferFromReasoning:
         assert len(targets) == 0
 
 
-# ── Context builder strategy ideas ──
+# ── Context builder spurious outcomes ──
+# (strategy_ideas base-package loading is covered by
+# tests/test_ground_truth.py::TestContextInjection::test_strategy_ideas_in_base_package)
+
 
 class TestContextBuilderStrategyIdeas:
-    def test_strategy_ideas_loaded_into_base_package(self, tmp_path: Path):
-        from analysis.context_builder import ContextBuilder
-
-        memory_dir = tmp_path / "memory"
-        (memory_dir / "findings").mkdir(parents=True)
-        (memory_dir / "policies" / "v1").mkdir(parents=True)
-
-        ideas_path = memory_dir / "findings" / "strategy_ideas.jsonl"
-        idea = {
-            "idea_id": "i1", "title": "Test",
-            "status": "proposed", "timestamp": "2026-02-01T00:00:00+00:00",
-        }
-        ideas_path.write_text(json.dumps(idea) + "\n")
-
-        ctx = ContextBuilder(memory_dir)
-        pkg = ctx.base_package()
-        assert "strategy_ideas" in pkg.data
-        assert len(pkg.data["strategy_ideas"]) == 1
-
     def test_spurious_outcomes_loaded(self, tmp_path: Path):
         from analysis.context_builder import ContextBuilder
 

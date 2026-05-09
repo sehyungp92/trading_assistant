@@ -60,6 +60,13 @@ class DeploymentRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
+    # Lineage / attribution fields (populated by writers; consumed by causal evaluator)
+    affected_population: list[str] = Field(default_factory=list)  # event_id refs
+    variant_id: Optional[str] = None
+    parameter_set_id: Optional[str] = None
+    strategy_version: Optional[str] = None
+    config_version: Optional[str] = None
+
     @property
     def post_deploy_metrics(self) -> DeploymentMetricsSnapshot | None:
         """Backward-compat: return latest post-deploy snapshot."""

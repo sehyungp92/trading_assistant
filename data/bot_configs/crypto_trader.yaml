@@ -1,0 +1,435 @@
+bot_id: crypto_trader
+repo_url: git@github.com:user/crypto_trader.git
+repo_dir: /repos/crypto_trader
+default_branch: main
+allowed_edit_paths:
+  - config/*
+  - strategy/*
+  - tests/*
+  - docs/*
+structural_context_paths:
+  - config/*
+  - strategy/*
+  - backtest/*
+verification_commands:
+  - pytest tests -q
+strategies:
+  - MomentumPullback_M15
+  - InstitutionalAnchor_H1
+  - VolumeProfileBreakout_M30
+parameters:
+  # === MomentumPullback_M15 — Crypto Momentum Pullback ===
+  - param_name: ema_fast
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.ema_fast
+    current_value: 20
+    valid_range: [8, 50]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: ema_mid
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.ema_mid
+    current_value: 50
+    valid_range: [20, 100]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: ema_slow
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.ema_slow
+    current_value: 200
+    valid_range: [100, 300]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: adx_period
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.adx_period
+    current_value: 14
+    valid_range: [7, 28]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_a
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.min_confluences_a
+    current_value: 2
+    valid_range: [1, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_b
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.min_confluences_b
+    current_value: 1
+    valid_range: [0, 3]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_a
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.min_room_a
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_b
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: entry.min_room_b
+    current_value: 1.6
+    valid_range: [0.8, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: risk_pct_a
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: risk.risk_pct_a
+    current_value: 0.0075
+    valid_range: [0.002, 0.015]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_pct_b
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: risk.risk_pct_b
+    current_value: 0.004
+    valid_range: [0.001, 0.01]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_major
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: risk.max_leverage_major
+    current_value: 5.0
+    valid_range: [1.0, 10.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_alt
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: risk.max_leverage_alt
+    current_value: 4.0
+    valid_range: [1.0, 8.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_concurrent
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: risk.max_concurrent
+    current_value: 3
+    valid_range: [1, 5]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+  - param_name: tp1_r
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: exit.tp1_r
+    current_value: 1.0
+    valid_range: [0.5, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_r
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: exit.tp2_r
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: soft_time_stop
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: exit.soft_time_stop
+    current_value: 12
+    valid_range: [4, 24]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: hard_time_stop
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: exit.hard_time_stop
+    current_value: 20
+    valid_range: [8, 48]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: funding_extreme
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: filters.funding_extreme
+    current_value: 0.01
+    valid_range: [0.005, 0.03]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: true
+  - param_name: atr_expansion_mult
+    strategy_id: MomentumPullback_M15
+    param_type: PYTHON_CONSTANT
+    file_path: config/momentum_pullback.toml
+    python_path: filters.atr_expansion_mult
+    current_value: 2.5
+    valid_range: [1.5, 4.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === InstitutionalAnchor_H1 — Institutional Anchor ===
+  - param_name: min_4h_conditions
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.min_4h_conditions
+    current_value: 2
+    valid_range: [1, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: h1_adx_threshold
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.h1_adx_threshold
+    current_value: 20.0
+    valid_range: [10.0, 35.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_a
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.min_confluences_a
+    current_value: 2
+    valid_range: [1, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_b
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.min_confluences_b
+    current_value: 1
+    valid_range: [0, 3]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: risk_pct_a
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: risk.risk_pct_a
+    current_value: 0.0075
+    valid_range: [0.002, 0.015]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_pct_b
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: risk.risk_pct_b
+    current_value: 0.004
+    valid_range: [0.001, 0.01]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: tp1_r
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: exit.tp1_r
+    current_value: 1.0
+    valid_range: [0.5, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_r
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: exit.tp2_r
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: entry_on_close
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.entry_on_close
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: require_volume
+    strategy_id: InstitutionalAnchor_H1
+    param_type: PYTHON_CONSTANT
+    file_path: config/institutional_anchor.toml
+    python_path: entry.require_volume
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === VolumeProfileBreakout_M30 — Volume Profile Breakout ===
+  - param_name: volume_bins
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.volume_bins
+    current_value: 50
+    valid_range: [20, 100]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: lookback_bars
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.lookback_bars
+    current_value: 36
+    valid_range: [12, 72]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: balance_min_bars
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.balance_min_bars
+    current_value: 4
+    valid_range: [2, 12]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: balance_min_touches
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.balance_min_touches
+    current_value: 2
+    valid_range: [1, 5]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: balance_atr_width
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.balance_atr_width
+    current_value: 1.2
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: volume_surge_mult
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: entry.volume_surge_mult
+    current_value: 1.3
+    valid_range: [1.0, 2.5]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: tp1_r
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: exit.tp1_r
+    current_value: 0.8
+    valid_range: [0.4, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_r
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: exit.tp2_r
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: quick_exit_bars
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: exit.quick_exit_bars
+    current_value: 4
+    valid_range: [2, 10]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: invalidation_reentry_atr
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: exit.invalidation_reentry_atr
+    current_value: 1.2
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: risk_pct_a
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: risk.risk_pct_a
+    current_value: 0.0075
+    valid_range: [0.002, 0.015]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_pct_b
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: PYTHON_CONSTANT
+    file_path: config/volume_profile_breakout.toml
+    python_path: risk.risk_pct_b
+    current_value: 0.004
+    valid_range: [0.001, 0.01]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true

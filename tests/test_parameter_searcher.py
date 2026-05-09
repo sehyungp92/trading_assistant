@@ -20,6 +20,7 @@ from schemas.wfo_results import SimulationMetrics
 from skills.backtest_simulator import BacktestSimulator
 from skills.config_registry import ConfigRegistry
 from skills.cost_model import CostModel
+from schemas.regime_conditional import RegimeParameterAnalysis
 from skills.parameter_searcher import (
     ParameterSearcher,
     _APPROVE_IMPROVEMENT,
@@ -27,6 +28,7 @@ from skills.parameter_searcher import (
     _EXPERIMENT_IMPROVEMENT,
     _EXPERIMENT_ROBUSTNESS,
     _MAX_CANDIDATES,
+    _REGIME_SENSITIVITY_THRESHOLD,
     _SAFETY_CRITICAL_IMPROVEMENT,
 )
 from tests.factories import make_trade
@@ -462,3 +464,263 @@ class TestCompositeScore:
         score = ParameterSearcher._composite_score(candidate, baseline)
         # er_imp = 1.0 (neutral due to negative baseline), others = 1.0
         assert abs(score - 0.889) < 0.01
+
+
+# ─── Regime-Conditional Search Tests ─────────────────────────────────
+
+def _make_regime_trades(
+    n_per_regime: int = 20,
+    regimes: list[str] | None = None,
+    param_name: str = "signal_strength_min",
+    param_values: dict[str, float] | None = None,
+    pnl_by_regime: dict[str, float] | None = None,
+) -> list[TradeEvent]:
+    """Create trades with strategy_params_at_entry for regime analysis.
+
+    param_values maps regime → param value used in that regime's trades.
+    pnl_by_regime maps regime → avg pnl for that regime's trades.
+    """
+    if regimes is None:
+        regimes = ["trending", "ranging", "volatile"]
+    if param_values is None:
+        param_values = {r: 0.5 for r in regimes}
+    if pnl_by_regime is None:
+        pnl_by_regime = {r: 10.0 for r in regimes}
+
+    trades: list[TradeEvent] = []
+    for regime in regimes:
+        pval = param_values.get(regime, 0.5)
+        avg_pnl = pnl_by_regime.get(regime, 10.0)
+        for i in range(n_per_regime):
+            pnl = avg_pnl if i % 3 != 0 else -abs(avg_pnl) * 0.5
+            trades.append(make_trade(
+                trade_id=f"t_{regime}_{i}",
+                pair="BTC/USD",
+                entry_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                exit_time=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+                entry_price=50000.0,
+                position_size=0.1,
+                pnl=pnl,
+                pnl_pct=pnl / 50000.0,
+                entry_signal_strength=0.8,
+                market_regime=regime,
+                strategy_params_at_entry={param_name: pval},
+            ))
+    return trades
+
+
+class TestSearchWithRegimeAnalysis:
+    """Tests for search_with_regime_analysis() method."""
+
+    def test_regime_analysis_attached(self):
+        """Report should have regime_analysis as a RegimeParameterAnalysis."""
+        def ok_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=50, win_count=25, loss_count=25,
+                net_pnl=100, sharpe_ratio=1.0, calmar_ratio=1.5,
+                profit_factor=1.5, pnl_by_regime={"trending": 50},
+            )
+
+        searcher = _make_searcher(simulate_fn=ok_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        trades = _make_regime_trades(n_per_regime=20, param_name="signal_strength_min")
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert report.regime_analysis is not None
+        assert isinstance(report.regime_analysis, RegimeParameterAnalysis)
+        assert report.regime_analysis.param_name == "signal_strength_min"
+
+    def test_low_sensitivity_no_enrichment(self):
+        """When sensitivity <= threshold, summary is not enriched with regime info."""
+        def ok_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=50, win_count=25, loss_count=25,
+                net_pnl=100, sharpe_ratio=1.0, calmar_ratio=1.5,
+                profit_factor=1.5, pnl_by_regime={"trending": 50},
+            )
+
+        searcher = _make_searcher(simulate_fn=ok_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # All regimes use same param value → sensitivity = 0
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.5, "ranging": 0.5, "volatile": 0.5},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert "Regime sensitivity:" not in report.exploration_summary
+
+    def test_high_sensitivity_enriches_summary(self):
+        """When sensitivity > threshold, regime info appended to summary."""
+        def ok_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=50, win_count=25, loss_count=25,
+                net_pnl=100, sharpe_ratio=1.0, calmar_ratio=1.5,
+                profit_factor=1.5, pnl_by_regime={"trending": 50},
+            )
+
+        searcher = _make_searcher(simulate_fn=ok_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # Values must align with the regime analyzer's grid (11 points from 0.1 to 1.0,
+        # step=0.09): [0.1, 0.19, 0.28, 0.37, 0.46, 0.55, 0.64, 0.73, 0.82, 0.91, 1.0]
+        # stdev([0.1, 1.0, 0.55]) / 0.9 = 0.5 >> 0.3
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.1, "ranging": 1.0, "volatile": 0.55},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert report.regime_analysis is not None
+        assert report.regime_analysis.regime_sensitivity > _REGIME_SENSITIVITY_THRESHOLD
+        assert "Regime sensitivity:" in report.exploration_summary
+
+    def test_discard_override_to_experiment(self):
+        """Flat DISCARD + high sensitivity + positive regime → EXPERIMENT."""
+        def bad_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=3, sharpe_ratio=-0.5,
+                win_count=1, loss_count=2, net_pnl=-100,
+            )
+
+        searcher = _make_searcher(simulate_fn=bad_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # Values must align with the regime analyzer's grid (step=0.09):
+        # [0.1, 0.19, 0.28, 0.37, 0.46, 0.55, 0.64, 0.73, 0.82, 0.91, 1.0]
+        # stdev([0.1, 1.0, 0.55]) / 0.9 = 0.5 >> 0.3
+        # Trending: positive avg_pnl, 20 trades, optimal=0.1 != current 0.5
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.1, "ranging": 1.0, "volatile": 0.55},
+            pnl_by_regime={"trending": 20.0, "ranging": -5.0, "volatile": 0.0},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        # Flat search returns DISCARD (all candidates fail safety with total_trades=3),
+        # regime analysis overrides: trending has avg_pnl>0, count>=15, optimal!=current
+        assert report.regime_analysis is not None
+        assert report.regime_analysis.regime_sensitivity > _REGIME_SENSITIVITY_THRESHOLD
+        assert report.routing == SearchRouting.EXPERIMENT
+        assert "DISCARD→EXPERIMENT" in report.exploration_summary
+
+    def test_discard_no_override_no_strong_regime(self):
+        """DISCARD stays when no regime has positive avg_pnl."""
+        def bad_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=3, sharpe_ratio=-0.5,
+                win_count=1, loss_count=2, net_pnl=-100,
+            )
+
+        searcher = _make_searcher(simulate_fn=bad_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # Grid-aligned values; all regimes have negative avg_pnl → no rescue
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.1, "ranging": 1.0, "volatile": 0.55},
+            pnl_by_regime={"trending": -10.0, "ranging": -5.0, "volatile": -8.0},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert report.routing == SearchRouting.DISCARD
+
+    def test_approve_not_downgraded(self):
+        """APPROVE routing is never downgraded by regime analysis."""
+        def good_simulate(trades, missed, params, cost_multiplier=1.0):
+            val = params.get("signal_strength_min", 0.5)
+            sharpe = 2.0 if val >= 0.65 else 1.0
+            calmar = 3.0 if val >= 0.65 else 1.5
+            pf = 3.0 if val >= 0.65 else 1.5
+            wr = 0.7 if val >= 0.65 else 0.5
+            return SimulationMetrics(
+                total_trades=50, win_count=int(50 * wr),
+                loss_count=50 - int(50 * wr),
+                net_pnl=sharpe * 100, sharpe_ratio=sharpe,
+                calmar_ratio=calmar, profit_factor=pf,
+                pnl_by_regime={"trending": 80, "ranging": 20, "volatile": 10, "quiet": 5},
+            )
+
+        searcher = _make_searcher(simulate_fn=good_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # Grid-aligned values with high sensitivity
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.1, "ranging": 1.0, "volatile": 0.55},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert report.routing == SearchRouting.APPROVE
+
+    def test_experiment_not_changed(self):
+        """EXPERIMENT routing stays EXPERIMENT (not overridden)."""
+        def marginal_simulate(trades, missed, params, cost_multiplier=1.0):
+            val = params.get("signal_strength_min", 0.5)
+            sharpe = 1.02 if val != 0.5 else 1.0
+            calmar = 1.52 if val != 0.5 else 1.5
+            pf = 1.52 if val != 0.5 else 1.5
+            return SimulationMetrics(
+                total_trades=50, win_count=25, loss_count=25,
+                net_pnl=100, sharpe_ratio=sharpe,
+                calmar_ratio=calmar, profit_factor=pf,
+                pnl_by_regime={"trending": 80, "ranging": 20, "volatile": 10, "quiet": 5},
+            )
+
+        searcher = _make_searcher(simulate_fn=marginal_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        # Grid-aligned values with high sensitivity
+        trades = _make_regime_trades(
+            n_per_regime=20,
+            param_values={"trending": 0.1, "ranging": 1.0, "volatile": 0.55},
+        )
+        report = searcher.search_with_regime_analysis(
+            "s1", "bot1", param, 0.7, trades, [],
+        )
+        assert report.routing == SearchRouting.EXPERIMENT
+
+    def test_empty_trades_no_crash(self):
+        """Empty trade list → DISCARD with no regime analysis crash."""
+        searcher = _make_searcher()
+        param = _make_param()
+        report = searcher.search_with_regime_analysis("s1", "bot1", param, 0.7, [], [])
+        assert report.routing == SearchRouting.DISCARD
+        assert report.regime_analysis is not None
+        assert report.regime_analysis.regime_sensitivity == 0.0
+
+    def test_regime_analyzer_crash_returns_flat_result(self):
+        """If RegimeParameterAnalyzer.analyze() throws, flat result is still returned."""
+        def ok_simulate(trades, missed, params, cost_multiplier=1.0):
+            return SimulationMetrics(
+                total_trades=50, win_count=25, loss_count=25,
+                net_pnl=100, sharpe_ratio=1.0, calmar_ratio=1.5,
+                profit_factor=1.5, pnl_by_regime={"trending": 50},
+            )
+
+        searcher = _make_searcher(simulate_fn=ok_simulate)
+        param = _make_param(current=0.5, valid_range=(0.1, 1.0))
+        trades = _make_regime_trades(n_per_regime=20)
+
+        # Monkey-patch the analyzer to throw
+        import skills.parameter_searcher as ps_mod
+        original_cls = ps_mod.RegimeParameterAnalyzer
+
+        class CrashingAnalyzer:
+            def analyze(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        ps_mod.RegimeParameterAnalyzer = CrashingAnalyzer
+        try:
+            report = searcher.search_with_regime_analysis(
+                "s1", "bot1", param, 0.7, trades, [],
+            )
+            # Flat search result preserved, regime_analysis absent
+            assert report.regime_analysis is None
+            assert report.routing in (
+                SearchRouting.APPROVE, SearchRouting.EXPERIMENT, SearchRouting.DISCARD,
+            )
+            assert report.exploration_summary  # flat summary still present
+        finally:
+            ps_mod.RegimeParameterAnalyzer = original_cls

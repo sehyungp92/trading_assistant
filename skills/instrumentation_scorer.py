@@ -71,6 +71,27 @@ _CAPABILITY_FIELDS: dict[str, list[str]] = {
     "drawdown_analysis": [
         "max_drawdown_pct",
     ],
+    "indicator_snapshots": [
+        "indicator_snapshot", "indicator_snapshots",
+    ],
+    "filter_decisions": [
+        "filter_decision", "filter_decisions",
+    ],
+    "parameter_tracking": [
+        "parameter_change", "parameter_changes",
+    ],
+    "order_book_analysis": [
+        "orderbook_stats", "order_book", "orderbook",
+    ],
+    "sizing_analysis": [
+        "sizing_analysis", "position_size", "sizing_inputs",
+    ],
+    "portfolio_context": [
+        "portfolio_context", "portfolio_correlation",
+    ],
+    "fill_quality": [
+        "fill_quality", "execution_quality",
+    ],
 }
 
 # Curated files expected per day per bot
@@ -86,6 +107,14 @@ _OPTIONAL_FILES = [
     "regime_analysis.json",
     "factor_attribution.json",
     "exit_efficiency.json",
+    "indicator_snapshots.json",
+    "filter_decisions.json",
+    "parameter_changes.json",
+    "orderbook_stats.json",
+    "sizing_analysis.json",
+    "portfolio_context.json",
+    "fill_quality.json",
+    "signal_health.json",
 ]
 
 

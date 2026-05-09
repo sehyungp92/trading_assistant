@@ -20,6 +20,9 @@ class StrategyArchetype(str, Enum):
     BEAR_REGIME_SWING = "bear_regime_swing"
     MULTI_ENGINE_BEAR = "multi_engine_bear"
     MEAN_REVERSION_PULLBACK = "mean_reversion_pullback"
+    MOMENTUM_PULLBACK_CRYPTO = "momentum_pullback_crypto"
+    INSTITUTIONAL_ANCHOR = "institutional_anchor"
+    VOLUME_PROFILE_BREAKOUT = "volume_profile_breakout"
 
 
 class HoldingPeriod(str, Enum):
@@ -88,6 +91,23 @@ class PortfolioConfig(BaseModel):
     drawdown_tiers: list[list[float]] = []
 
 
+class ExitTier(BaseModel):
+    """A single TP/exit tier in a strategy's exit profile."""
+
+    tier_name: str = ""
+    tier_type: str = ""  # "take_profit", "trailing_stop", "time_stop"
+    r_target: float = 0.0
+    partial_pct: float = 1.0  # fraction of position to exit
+
+
+class ExitProfile(BaseModel):
+    """Exit configuration for a strategy — TP tiers, trailing stops, etc."""
+
+    tiers: list[ExitTier] = []
+    has_chandelier: bool = False
+    regime_multipliers: dict[str, float] = {}  # regime -> multiplier on trailing
+
+
 class StrategyProfile(BaseModel):
     display_name: str = ""
     bot_id: str = ""
@@ -106,6 +126,7 @@ class StrategyProfile(BaseModel):
     key_metadata_fields: list[str] = []
     analysis_focus: list[str] = []
     macro_regime_sensitivity: dict[str, str] = {}  # G/R/S/D → full/reduced/minimal/disabled
+    exit_profile: ExitProfile | None = None
 
 
 class StrategyRegistry(BaseModel):

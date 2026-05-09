@@ -15,6 +15,7 @@ from schemas.autonomous_pipeline import (
     ParameterDefinition,
     RepoRiskTier,
 )
+from schemas.experiments import ExperimentType
 from schemas.parameter_search import SearchRouting
 from skills.approval_tracker import ApprovalTracker
 from skills.config_registry import ConfigRegistry
@@ -147,7 +148,7 @@ class AutonomousPipeline:
         if self._parameter_searcher:
             # NEW PATH: neighborhood search
             trades, missed = self._load_trade_data(bot_id)
-            report = self._parameter_searcher.search(
+            report = self._parameter_searcher.search_with_regime_analysis(
                 suggestion_id, bot_id, param, proposed_value, trades, missed,
             )
             self._persist_search_report(report)
@@ -200,7 +201,7 @@ class AutonomousPipeline:
             search_summary_json = json.dumps({
                 "baseline_composite": round(report.baseline_composite, 4),
                 "best_composite": round(report.best_composite, 4),
-                "robustness_score": round(getattr(report, "robustness_score", 0.0), 4),
+                "robustness_score": round(report.best_robustness_score, 4),
                 "exploration_summary": report.exploration_summary or "",
                 "search_routing": report.routing.value,
             })
@@ -497,6 +498,13 @@ class AutonomousPipeline:
                     bot_id, len(bot_active), suggestion_id,
                 )
                 return None
+        # Determine experiment type: ABLATION for boolean params, PARAMETER_AB for others
+        is_ablation = (
+            param.value_type == "bool"
+            or getattr(param, "category", "") == "ablation"
+        )
+        experiment_type = ExperimentType.ABLATION if is_ablation else ExperimentType.PARAMETER_AB
+
         config = self._experiment_config_generator.generate_from_suggestion(
             suggestion_id=suggestion_id,
             bot_id=bot_id,
@@ -505,6 +513,7 @@ class AutonomousPipeline:
             proposed_value=report.best_value,
             title=suggestion.get("title", ""),
         )
+        config.experiment_type = experiment_type
 
         # Persist DRAFT experiment via ExperimentManager so it survives
         # beyond the ApprovalRequest string reference

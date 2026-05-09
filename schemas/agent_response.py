@@ -6,11 +6,38 @@ ParsedAnalysis. This enables programmatic tracking, validation, and feedback.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from schemas.autonomous_pipeline import FileChange
+
+logger = logging.getLogger(__name__)
+
+
+# Shared mapping from suggestion category → suggestion tier.
+# Used in _record_agent_suggestions (handlers.py) and suggestion_scorer.py.
+CATEGORY_TO_TIER: dict[str, str] = {
+    "exit_timing": "parameter",
+    "filter_threshold": "filter",
+    "stop_loss": "parameter",
+    "signal": "parameter",
+    "structural": "hypothesis",
+    "position_sizing": "parameter",
+    "regime_gate": "filter",
+    "portfolio_allocation": "portfolio",
+    "portfolio_risk_cap": "portfolio",
+    "portfolio_coordination": "portfolio",
+    "portfolio_drawdown_tier": "portfolio",
+}
+
+# Categories accepted by AgentSuggestion. Empty string = unspecified (allowed for
+# backward compatibility with prompts that don't require it). "uncategorized" is
+# the canonical bucket for values the model emits that aren't in CATEGORY_TO_TIER.
+_KNOWN_SUGGESTION_CATEGORIES: frozenset[str] = frozenset(
+    list(CATEGORY_TO_TIER) + ["", "uncategorized"]
+)
 
 
 class AgentPrediction(BaseModel):
@@ -36,6 +63,22 @@ class AgentSuggestion(BaseModel):
     evidence_summary: str = ""
     proposed_value: Optional[float] = None  # numeric value for parameter suggestions
     target_param: Optional[str] = None  # parameter name this suggestion targets
+    engine: str = ""  # engine tag if suggestion targets specific engine (e.g., "REVERSAL")
+    ablation_flag: str = ""  # flag name if ablation toggle (e.g., "fade_oscillation_gate")
+    regime_condition: str = ""  # regime name if regime-conditional (e.g., "volatile")
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _normalize_category(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        s = str(v).strip()
+        if s in _KNOWN_SUGGESTION_CATEGORIES:
+            return s
+        logger.warning(
+            "AgentSuggestion: unknown category %r — mapping to 'uncategorized'", s,
+        )
+        return "uncategorized"
 
 
 class StructuralProposal(BaseModel):
@@ -55,23 +98,6 @@ class StructuralProposal(BaseModel):
     acceptance_criteria: list[dict] = Field(default_factory=list)
 
 
-# Shared mapping from suggestion category → suggestion tier.
-# Used in _record_agent_suggestions (handlers.py) and suggestion_scorer.py.
-CATEGORY_TO_TIER: dict[str, str] = {
-    "exit_timing": "parameter",
-    "filter_threshold": "filter",
-    "stop_loss": "parameter",
-    "signal": "parameter",
-    "structural": "hypothesis",
-    "position_sizing": "parameter",
-    "regime_gate": "filter",
-    "portfolio_allocation": "portfolio",
-    "portfolio_risk_cap": "portfolio",
-    "portfolio_coordination": "portfolio",
-    "portfolio_drawdown_tier": "portfolio",
-}
-
-
 class ParsedAnalysis(BaseModel):
     """Result of parsing Claude's structured output block."""
 
@@ -83,3 +109,4 @@ class ParsedAnalysis(BaseModel):
     parse_success: bool = True
     fallback_used: bool = False
     raw_structured: Optional[dict] = None  # Full parsed JSON from STRUCTURED_OUTPUT block
+    dropped_counts: dict[str, int] = Field(default_factory=dict)

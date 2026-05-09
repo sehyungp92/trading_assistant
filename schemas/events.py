@@ -26,6 +26,10 @@ class ExitReason(str, Enum):
     TRAILING = "TRAILING"
     TIMEOUT = "TIMEOUT"
     MANUAL = "MANUAL"
+    FUNDING_ADVERSE = "FUNDING_ADVERSE"
+    BREAKEVEN = "BREAKEVEN"
+    TIME_STOP = "TIME_STOP"
+    INVALIDATION = "INVALIDATION"
 
 
 class EventMetadata(BaseModel):
@@ -70,6 +74,8 @@ class MarketSnapshot(BaseModel):
 
 class TradeEvent(BaseModel):
     """A completed trade emitted by a bot."""
+
+    model_config = {"extra": "ignore"}
 
     trade_id: str
     bot_id: str
@@ -155,13 +161,33 @@ class TradeEvent(BaseModel):
     portfolio_state_at_entry: dict | None = None
     # Comprehensive market condition dict from bot (supplements atr_at_entry, volume_24h, etc.)
     market_conditions_at_entry: dict | None = None
+
+    # Crypto perpetual fields (populated by bots that trade leveraged perpetuals)
+    funding_paid: float = 0.0  # cumulative funding cost during trade hold
+    setup_grade: str = ""  # A/B/C or A+/A/B from bot's confluence scoring
+    confluences: list[str] = []  # list of confluence factors that fired at entry
+    bias_direction: str = ""  # bullish/bearish/neutral from higher-TF analysis
+    entry_method: str = ""  # on_close/on_breakout/limit_entry
+
     # Post-exit move percentages (backfilled by bot, supplements post_exit_1h_price/4h_price)
     post_exit_1h_move_pct: float | None = None
     post_exit_4h_move_pct: float | None = None
     post_exit_backfill_status: str = ""  # pending | partial | complete
 
+    # Deployment / experiment lineage (optional — populated when a change is in flight)
+    deployment_id: str | None = None
+    experiment_id: str | None = None
+    variant_id: str | None = None
+    parameter_set_id: str | None = None
+    strategy_version: str | None = None
+    config_version: str | None = None
+    signal_generation_version: str | None = None
+    code_sha: str | None = None
+
 
 class MissedOpportunityEvent(BaseModel):
+    model_config = {"extra": "ignore"}
+
     event_metadata: Optional[EventMetadata] = None
     market_snapshot: Optional[MarketSnapshot] = None
     bot_id: str
@@ -185,6 +211,16 @@ class MissedOpportunityEvent(BaseModel):
     block_reason: str = ""  # freetext explanation (vs blocked_by = filter name)
     backfill_status: str = ""  # e.g. "completed", "pending", "failed"
     simulation_confidence: float = 0.0  # counterfactual sim confidence (vs confidence = signal confidence)
+
+    # Deployment / experiment lineage (optional — populated when a change is in flight)
+    deployment_id: str | None = None
+    experiment_id: str | None = None
+    variant_id: str | None = None
+    parameter_set_id: str | None = None
+    strategy_version: str | None = None
+    config_version: str | None = None
+    signal_generation_version: str | None = None
+    code_sha: str | None = None
 
 
 class DailySnapshot(BaseModel):

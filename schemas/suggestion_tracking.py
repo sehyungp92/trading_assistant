@@ -52,6 +52,7 @@ class SuggestionRecord(BaseModel):
     expected_impact: str = ""
     detection_context: Optional[dict] = None
     implementation_context: Optional[dict] = None
+    proposal_id: Optional[str] = None  # cross-link to ProposalLedger
 
 
 class SuggestionOutcome(BaseModel):

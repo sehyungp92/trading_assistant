@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from schemas.generated_playbook import GeneratedPlaybook, PlaybookStatus
+from schemas.generated_playbook import GeneratedPlaybook, PlaybookStatus, PlaybookTracking
 
 
 class PlaybookGenerator:
@@ -99,6 +99,16 @@ class PlaybookGenerator:
             if self._is_safe(playbook):
                 playbooks.append(playbook)
 
+        # Exclude playbooks that were previously retired via tracking
+        tracking = self._load_tracking()
+        quarantined_ids = {
+            pid for pid, t in tracking.items()
+            if (t.positive_outcomes + t.negative_outcomes) >= 5
+            and t.effectiveness_rate < 0.3
+        }
+        if quarantined_ids:
+            playbooks = [p for p in playbooks if p.playbook_id not in quarantined_ids]
+
         self._write_playbooks(playbooks)
         return playbooks
 
@@ -176,6 +186,97 @@ class PlaybookGenerator:
             return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             return None
+
+    # --- Playbook outcome tracking (separate file from manifest) ---
+
+    @property
+    def _tracking_path(self) -> Path:
+        return self._playbooks_dir / "playbook_tracking.jsonl"
+
+    def _load_tracking(self) -> dict[str, PlaybookTracking]:
+        """Load tracking records keyed by playbook_id."""
+        if not self._tracking_path.exists():
+            return {}
+        result: dict[str, PlaybookTracking] = {}
+        for line in self._tracking_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = PlaybookTracking.model_validate_json(line)
+                result[record.playbook_id] = record
+            except Exception:
+                continue
+        return result
+
+    def _save_tracking(self, tracking: dict[str, PlaybookTracking]) -> None:
+        """Rewrite tracking JSONL."""
+        self._playbooks_dir.mkdir(parents=True, exist_ok=True)
+        with self._tracking_path.open("w", encoding="utf-8") as f:
+            for record in tracking.values():
+                f.write(record.model_dump_json() + "\n")
+
+    def record_usage(self, playbook_id: str) -> None:
+        """Record that a playbook was used."""
+        tracking = self._load_tracking()
+        entry = tracking.get(playbook_id, PlaybookTracking(playbook_id=playbook_id))
+        entry.usage_count += 1
+        entry.last_used_at = datetime.now(timezone.utc)
+        tracking[playbook_id] = entry
+        self._save_tracking(tracking)
+
+    def record_outcome(self, playbook_id: str, positive: bool) -> None:
+        """Record a positive or negative outcome for a playbook."""
+        tracking = self._load_tracking()
+        entry = tracking.get(playbook_id, PlaybookTracking(playbook_id=playbook_id))
+        if positive:
+            entry.positive_outcomes += 1
+        else:
+            entry.negative_outcomes += 1
+        tracking[playbook_id] = entry
+        self._save_tracking(tracking)
+
+    def retire_ineffective(self, min_uses: int = 5, min_effectiveness: float = 0.3) -> int:
+        """Quarantine playbooks with enough usage data and poor effectiveness.
+
+        Returns the number of playbooks retired.
+        """
+        tracking = self._load_tracking()
+        if not tracking:
+            return 0
+
+        # Load current manifest
+        playbooks: list[GeneratedPlaybook] = []
+        if self._manifest_path.exists():
+            for line in self._manifest_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    playbooks.append(GeneratedPlaybook.model_validate_json(line))
+                except Exception:
+                    continue
+
+        retired = 0
+        for playbook in playbooks:
+            entry = tracking.get(playbook.playbook_id)
+            if entry is None:
+                continue
+            total_outcomes = entry.positive_outcomes + entry.negative_outcomes
+            if total_outcomes >= min_uses and entry.effectiveness_rate < min_effectiveness:
+                playbook.status = PlaybookStatus.QUARANTINED
+                retired += 1
+
+        if retired:
+            # Rewrite manifest with updated statuses
+            with self._manifest_path.open("w", encoding="utf-8") as f:
+                for playbook in playbooks:
+                    f.write(playbook.model_dump_json() + "\n")
+            # Clean up .md files for quarantined playbooks
+            for playbook in playbooks:
+                if playbook.status == PlaybookStatus.QUARANTINED:
+                    md_path = self._playbooks_dir / f"{playbook.playbook_id}.md"
+                    md_path.unlink(missing_ok=True)
+
+        return retired
 
     @staticmethod
     def _load_jsonl(path: Path) -> list[dict]:

@@ -492,11 +492,14 @@ class TestContextInjection:
     def test_strategy_ideas_in_base_package(self, memory_dir: Path):
         from analysis.context_builder import ContextBuilder
 
+        # Use a recent timestamp so the 90-day temporal window in
+        # load_strategy_ideas does not filter the entry out as the suite ages.
+        recent_ts = datetime.now(timezone.utc).isoformat()
         ideas_path = memory_dir / "findings" / "strategy_ideas.jsonl"
         idea = {
             "idea_id": "idea1", "title": "Regime-Filtered ORB",
             "status": "proposed",
-            "timestamp": "2026-02-01T00:00:00+00:00",
+            "timestamp": recent_ts,
         }
         ideas_path.write_text(json.dumps(idea) + "\n")
 
@@ -508,11 +511,12 @@ class TestContextInjection:
     def test_retired_strategy_ideas_excluded(self, memory_dir: Path):
         from analysis.context_builder import ContextBuilder
 
+        recent_ts = datetime.now(timezone.utc).isoformat()
         ideas_path = memory_dir / "findings" / "strategy_ideas.jsonl"
         active = {"idea_id": "a1", "title": "Active", "status": "proposed",
-                  "timestamp": "2026-02-01T00:00:00+00:00"}
+                  "timestamp": recent_ts}
         retired = {"idea_id": "r1", "title": "Retired", "status": "retired",
-                   "timestamp": "2026-02-01T00:00:00+00:00"}
+                   "timestamp": recent_ts}
         ideas_path.write_text(
             json.dumps(active) + "\n" + json.dumps(retired) + "\n"
         )

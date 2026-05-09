@@ -213,6 +213,25 @@ If strategy_profiles and archetype_expectations data are present:
   to identify which engines perform best in each regime/vol state combination.
 - For strategies with `entry_types`, compare entry type win rates and payoff ratios.
 - Reference the strategy's `analysis_focus` list for priority analytical dimensions.
+
+## ENGINE-LEVEL WEEKLY ANALYSIS
+When engine_decomposition data spans multiple days, aggregate across the week:
+- Identify engines with declining win rate or profit factor trends over 7 days
+- Flag regime-engine combinations where trade count is sufficient but performance is poor
+- Proposals targeting a specific engine MUST include `engine` field in structured output
+
+## ABLATION FLAG TRENDS
+When ablation_analysis data is present across multiple days:
+- Look for flags where the on/off performance gap is consistent across the week
+- Flag ablation results with strong statistical significance (p < 0.05)
+- Safety-critical flags (stop-loss, circuit breakers, risk caps) require manual review —
+  do NOT propose toggling them autonomously
+
+## EXIT TIER OPTIMIZATION
+When exit_tier_analysis data is present:
+- Compare actual MFE distributions against configured TP tier targets
+- Identify tiers with very low hit rates (< 20%) that may need lowering
+- Identify tiers where lowering the target would capture significantly more trades
 - For mean_reversion_pullback archetype: high win rate + low payoff is expected —
   flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
 
@@ -255,6 +274,25 @@ Always emit it, even if arrays are empty.
   ]
 }}
 -->"""
+
+_CRYPTO_WEEKLY_SUPPLEMENT = """
+## CRYPTO PERPETUAL WEEKLY ANALYSIS
+This bot trades crypto perpetual futures. Apply the following weekly-specific guidance:
+
+**Funding trend**: Week-over-week funding cost trajectory. Is it growing? If funding_pct_of_gross
+exceeded 15% any day this week, flag as a structural cost concern.
+
+**Grade calibration**: Rolling 7-day A vs B performance. Is the grade split still justified?
+If B-grade trades lost money on aggregate this week, recommend disabling B entries.
+
+**Cross-strategy correlation**: If all 3 strategies lost on the same days, the issue is macro/
+regime, not per-strategy tuning. Do NOT suggest parameter changes when the root cause is regime
+or market conditions — suggest regime gate changes instead.
+
+**Crypto evidence requirements**: Parameter changes on leveraged instruments require more
+evidence (leverage amplifies both signal and noise). Minimum 30 trades per grade/confluence
+bucket before drawing conclusions. For leverage and risk_pct changes, require 60+ days of data.
+"""
 
 # Legacy instructions for when no triage is provided
 _WEEKLY_INSTRUCTIONS = _FOCUSED_WEEKLY_INSTRUCTIONS.format(
@@ -316,7 +354,10 @@ class WeeklyPromptAssembler:
     def _build_instructions(self, triage_report=None) -> str:
         """Build instructions from triage report or use fallback."""
         if triage_report is None:
-            return _WEEKLY_INSTRUCTIONS
+            instructions = _WEEKLY_INSTRUCTIONS
+            if self.strategy_registry and self._has_crypto_strategies():
+                instructions += _CRYPTO_WEEKLY_SUPPLEMENT
+            return instructions
 
         # Format anomalies
         anomaly_lines = []
@@ -340,12 +381,29 @@ class WeeklyPromptAssembler:
             disc_lines.append(f"{i}. {q}")
         disc_text = "\n".join(disc_lines)
 
-        return _FOCUSED_WEEKLY_INSTRUCTIONS.format(
+        instructions = _FOCUSED_WEEKLY_INSTRUCTIONS.format(
             computed_summary=triage_report.computed_summary,
             anomalies=anomalies_text,
             retrospective_questions=retro_text,
             discovery_questions=disc_text,
         )
+
+        # Append crypto supplement if any bot has crypto perpetual strategies
+        if self.strategy_registry and self._has_crypto_strategies():
+            instructions += _CRYPTO_WEEKLY_SUPPLEMENT
+
+        return instructions
+
+    def _has_crypto_strategies(self) -> bool:
+        """Check if any bot in scope has crypto perpetual strategies."""
+        if not self.strategy_registry or not hasattr(self.strategy_registry, "strategies"):
+            return False
+        bot_set = set(self.bots)
+        for _sid, profile in self.strategy_registry.strategies.items():
+            if getattr(profile, "asset_class", "") == "crypto_perpetual":
+                if not bot_set or getattr(profile, "bot_id", "") in bot_set:
+                    return True
+        return False
 
     def _build_task_prompt(self) -> str:
         bot_list = ", ".join(self.bots)

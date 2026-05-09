@@ -113,6 +113,38 @@ class ExitStrategySimulator:
             stop_price = (entry - stop_dist) if is_long else (entry + stop_dist)
             return self._best_exit(trade, stop_price, is_long)
 
+        elif strategy.strategy_type == ExitStrategyType.TRAILING_STOP:
+            trail_pct = strategy.params.get("trail_pct", 2.0) / 100
+            # Sequential trailing stop: process snapshots in time order
+            snapshots = [p for p in [post_1h, post_4h] if p is not None]
+            if is_long:
+                peak = entry
+                trail_stop = entry * (1 - trail_pct)
+                for p in snapshots:
+                    if p <= trail_stop:
+                        return (trail_stop - entry) * trade.position_size
+                    if p > peak:
+                        peak = p
+                        trail_stop = peak * (1 - trail_pct)
+                # Check MAE against final trail level
+                if trade.mae_price is not None and trade.mae_price <= trail_stop:
+                    return (trail_stop - entry) * trade.position_size
+                last = snapshots[-1] if snapshots else trade.exit_price
+                return (last - entry) * trade.position_size
+            else:
+                trough = entry
+                trail_stop = entry * (1 + trail_pct)
+                for p in snapshots:
+                    if p >= trail_stop:
+                        return (entry - trail_stop) * trade.position_size
+                    if p < trough:
+                        trough = p
+                        trail_stop = trough * (1 + trail_pct)
+                if trade.mae_price is not None and trade.mae_price >= trail_stop:
+                    return (entry - trail_stop) * trade.position_size
+                last = snapshots[-1] if snapshots else trade.exit_price
+                return (entry - last) * trade.position_size
+
         return trade.pnl  # fallback
 
     def _best_exit(self, trade: TradeEvent, stop_price: float, is_long: bool) -> float:

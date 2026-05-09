@@ -91,6 +91,8 @@ class ResponseValidator:
         prediction_accuracy: dict | None = None,
         recalibrations: list[dict] | None = None,
         current_macro_regime: str = "",
+        strategy_registry: object | None = None,
+        safety_critical_params: set[str] | None = None,
     ) -> None:
         self._rejected = rejected_suggestions or []
         self._forecast_meta = forecast_meta or {}
@@ -98,6 +100,8 @@ class ResponseValidator:
         self._hypothesis_track_record = hypothesis_track_record or {}
         self._prediction_accuracy = prediction_accuracy or {}
         self._current_macro_regime = current_macro_regime
+        self._strategy_registry = strategy_registry  # StrategyRegistry or None
+        self._safety_critical_params: set[str] = safety_critical_params or set()
         # Build recalibration index: (bot_id, category) → mean revised_confidence
         self._recalib_by_key: dict[tuple[str, str], float] = {}
         if recalibrations:
@@ -128,6 +132,40 @@ class ResponseValidator:
                     reason=f"Similar to rejected suggestion: {rejection_match}",
                 ))
                 continue
+
+            # 1b. Safety-critical ablation check
+            if suggestion.ablation_flag and suggestion.ablation_flag in self._safety_critical_params:
+                blocked.append(BlockedSuggestion(
+                    suggestion=suggestion,
+                    reason=(
+                        f"Safety-critical ablation flag '{suggestion.ablation_flag}' "
+                        f"cannot be toggled autonomously — requires manual review"
+                    ),
+                ))
+                continue
+
+            # 1c. Engine existence check
+            if suggestion.engine and self._strategy_registry:
+                engine_valid = self._validate_engine(suggestion)
+                if not engine_valid:
+                    blocked.append(BlockedSuggestion(
+                        suggestion=suggestion,
+                        reason=(
+                            f"Engine '{suggestion.engine}' not found in strategy "
+                            f"sub_engines for bot '{suggestion.bot_id}'"
+                        ),
+                    ))
+                    continue
+
+            # 1d. Crypto safety gates
+            if self._strategy_registry and self._is_crypto_bot(suggestion.bot_id):
+                crypto_block = self._check_crypto_safety_gates(suggestion)
+                if crypto_block:
+                    blocked.append(BlockedSuggestion(
+                        suggestion=suggestion,
+                        reason=crypto_block,
+                    ))
+                    continue
 
             # 2. Category track record check
             score = self._scorecard.get_score(suggestion.bot_id, suggestion.category)
@@ -602,6 +640,91 @@ class ResponseValidator:
                 approved.append(proposal)
 
         return approved, blocked
+
+    def _validate_engine(self, suggestion: AgentSuggestion) -> bool:
+        """Check if the engine tag in a suggestion exists in the strategy's sub_engines.
+
+        Returns True if valid (or if we can't check), False if definitively invalid.
+        """
+        registry = self._strategy_registry
+        if not registry or not suggestion.engine:
+            return True
+
+        bot_id = suggestion.bot_id
+        engine_upper = suggestion.engine.upper()
+
+        # Check all strategies for this bot
+        strategies_for_bot = {}
+        if hasattr(registry, "strategies_for_bot"):
+            strategies_for_bot = registry.strategies_for_bot(bot_id)
+        elif hasattr(registry, "strategies"):
+            strategies_for_bot = {
+                sid: p for sid, p in registry.strategies.items()
+                if getattr(p, "bot_id", "") == bot_id
+            }
+
+        if not strategies_for_bot:
+            return True  # Can't verify — allow through
+
+        for _sid, profile in strategies_for_bot.items():
+            sub_engines = getattr(profile, "sub_engines", []) or []
+            for eng in sub_engines:
+                if eng.upper() == engine_upper:
+                    return True
+
+        return False
+
+    def _is_crypto_bot(self, bot_id: str) -> bool:
+        """Check if bot_id is associated with crypto perpetual strategies."""
+        registry = self._strategy_registry
+        if not registry or not hasattr(registry, "strategies"):
+            return False
+        for _sid, profile in registry.strategies.items():
+            if (
+                getattr(profile, "bot_id", "") == bot_id
+                and getattr(profile, "asset_class", "") == "crypto_perpetual"
+            ):
+                return True
+        return False
+
+    def _check_crypto_safety_gates(self, suggestion: AgentSuggestion) -> str | None:
+        """Apply crypto-specific safety gates. Returns block reason or None."""
+        target = (suggestion.target_param or "").lower()
+
+        # Gate 1: Leverage cap changes require 60d evidence + high confidence
+        if target in ("max_leverage_major", "max_leverage_alt"):
+            evidence = suggestion.evidence_summary or ""
+            conf = suggestion.confidence
+            # Check for evidence_days mention in evidence text
+            has_sufficient_evidence = "60" in evidence or "90" in evidence
+            if conf < 0.9 or not has_sufficient_evidence:
+                return (
+                    f"Leverage cap change on '{target}' requires confidence >= 0.9 "
+                    f"and 60+ days of evidence (got confidence={conf:.2f})"
+                )
+
+        # Gate 2: Funding threshold loosening requires evidence of blocked profitable trades
+        if target == "funding_extreme":
+            proposed = suggestion.proposed_value
+            if proposed is not None:
+                evidence = (suggestion.evidence_summary or "").lower()
+                if "blocked" not in evidence and "profitable" not in evidence:
+                    return (
+                        "Changing funding_extreme threshold requires evidence "
+                        "of profitable trades blocked by the current threshold"
+                    )
+
+        # Gate 3: Risk-pct on crypto always treated as safety-critical (10% threshold)
+        if target in ("risk_pct_a", "risk_pct_b"):
+            # Enforce that crypto risk_pct suggestions have strong evidence
+            conf = suggestion.confidence
+            if conf < 0.7:
+                return (
+                    f"Crypto perpetual risk_pct change requires confidence >= 0.7 "
+                    f"(got {conf:.2f}) — leverage amplifies risk sizing errors"
+                )
+
+        return None
 
     def _check_portfolio_guardrails(self, proposal) -> str | None:
         """Check a single portfolio proposal against all hard guardrails.

@@ -3,132 +3,181 @@ repo_url: git@github.com:user/stock_trader.git
 repo_dir: /repos/stock_trader
 default_branch: main
 allowed_edit_paths:
-  - strategies/iaric/config/*
-  - strategies/us_orb/config/*
   - config/*
+  - strategies/*
   - tests/*
   - docs/*
-  - README.md
 structural_context_paths:
-  - strategies/iaric/*
-  - strategies/us_orb/*
   - config/*
+  - strategies/*
   - tests/*
 verification_commands:
   - pytest tests -q
 strategies:
-  - iaric
-  - us_orb
+  - IARIC_v1
+  - ALCB_v1
+  - US_ORB_v1
 parameters:
-  # --- IARIC strategy ---
-  - param_name: signal_quality_threshold
-    strategy_id: iaric
-    param_type: YAML_FIELD
-    file_path: strategies/iaric/config/params.yaml
-    yaml_key: iaric.signal_quality_threshold
-    current_value: 0.6
-    valid_range: [0.0, 1.0]
+  # === IARIC_v1 — Institutional Accumulation Reversal ===
+  - param_name: tier_a_min
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.tier_a_min
+    current_value: 0.65
+    valid_range: [0.40, 0.90]
     value_type: float
     category: entry_signal
     is_safety_critical: false
-  - param_name: atr_multiplier_tp
-    strategy_id: iaric
-    param_type: YAML_FIELD
-    file_path: strategies/iaric/config/params.yaml
-    yaml_key: iaric.atr_multiplier_tp
-    current_value: 2.0
+  - param_name: tier_b_min
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.tier_b_min
+    current_value: 0.40
+    valid_range: [0.20, 0.65]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: partial_r_multiple
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.partial_r_multiple
+    current_value: 1.5
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: partial_exit_fraction
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.partial_exit_fraction
+    current_value: 0.50
+    valid_range: [0.20, 0.80]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: time_stop_minutes
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.time_stop_minutes
+    current_value: 45
+    valid_range: [15, 120]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: base_risk_fraction
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.base_risk_fraction
+    current_value: 0.008
+    valid_range: [0.003, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: daily_stop_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.daily_stop_r
+    current_value: 2.75
     valid_range: [1.0, 5.0]
     value_type: float
-    category: exit_rule
-    is_safety_critical: false
-  - param_name: atr_multiplier_sl
-    strategy_id: iaric
-    param_type: YAML_FIELD
-    file_path: strategies/iaric/config/params.yaml
-    yaml_key: iaric.atr_multiplier_sl
-    current_value: 1.0
-    valid_range: [0.5, 3.0]
-    value_type: float
-    category: exit_rule
-    is_safety_critical: false
-  - param_name: max_positions
-    strategy_id: iaric
-    param_type: YAML_FIELD
-    file_path: strategies/iaric/config/params.yaml
-    yaml_key: iaric.max_positions
-    current_value: 5
-    valid_range: [1, 20]
-    value_type: int
     category: risk_management
     is_safety_critical: true
-  - param_name: base_risk_pct
-    strategy_id: iaric
-    param_type: YAML_FIELD
-    file_path: strategies/iaric/config/params.yaml
-    yaml_key: iaric.base_risk_pct
-    current_value: 0.02
-    valid_range: [0.005, 0.05]
+  - param_name: heat_cap_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.heat_cap_r
+    current_value: 6.0
+    valid_range: [2.0, 10.0]
     value_type: float
     category: risk_management
     is_safety_critical: true
-  # --- US_ORB strategy ---
-  - param_name: orb_window_minutes
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.orb_window_minutes
-    current_value: 15
-    valid_range: [5, 30]
-    value_type: int
-    category: entry_signal
-    is_safety_critical: false
-  - param_name: breakout_atr_mult
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.breakout_atr_mult
-    current_value: 0.5
-    valid_range: [0.1, 2.0]
+  - param_name: avwap_band_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.avwap_band_pct
+    current_value: 0.005
+    valid_range: [0.001, 0.02]
     value_type: float
     category: entry_signal
     is_safety_critical: false
-  - param_name: atr_multiplier_tp
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.atr_multiplier_tp
-    current_value: 1.5
-    valid_range: [0.5, 4.0]
+  - param_name: panic_flush_drop_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.panic_flush_drop_pct
+    current_value: 0.03
+    valid_range: [0.01, 0.10]
     value_type: float
-    category: exit_rule
+    category: entry_signal
     is_safety_critical: false
-  - param_name: atr_multiplier_sl
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.atr_multiplier_sl
-    current_value: 1.0
-    valid_range: [0.5, 3.0]
+
+  # === ALCB_v1 — Accumulation Breakout ===
+  - param_name: min_containment
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.min_containment
+    current_value: 0.80
+    valid_range: [0.50, 0.95]
     value_type: float
-    category: exit_rule
+    category: filter_threshold
     is_safety_critical: false
-  - param_name: max_positions
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.max_positions
-    current_value: 3
-    valid_range: [1, 10]
-    value_type: int
-    category: risk_management
-    is_safety_critical: true
-  - param_name: base_risk_pct
-    strategy_id: us_orb
-    param_type: YAML_FIELD
-    file_path: strategies/us_orb/config/params.yaml
-    yaml_key: us_orb.base_risk_pct
-    current_value: 0.015
-    valid_range: [0.005, 0.04]
+  - param_name: atr_ratio_low
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.atr_ratio_low
+    current_value: 0.75
+    valid_range: [0.30, 1.20]
     value_type: float
-    category: risk_management
-    is_safety_critical: true
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: atr_ratio_high
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.atr_ratio_high
+    current_value: 1.20
+    valid_range: [0.80, 2.00]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: max_friction_to_risk
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_friction_to_risk
+    current_value: 0.10
+    valid_range: [0.03, 0.25]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: allow_adrs
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.allow_adrs
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: allow_biotech
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.allow_biotech
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false

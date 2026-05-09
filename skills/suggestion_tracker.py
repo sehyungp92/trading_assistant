@@ -155,13 +155,24 @@ class SuggestionTracker:
 
     def get_recent_by_bot(self, bot_id: str, weeks: int = 4) -> list[dict]:
         """Return non-rejected suggestions for bot_id within time window."""
+        return self.get_recent_grouped([bot_id], weeks=weeks).get(bot_id, [])
+
+    def get_recent_grouped(
+        self, bot_ids: list[str], weeks: int = 4,
+    ) -> dict[str, list[dict]]:
+        """Return non-rejected suggestions grouped by bot_id within time window.
+
+        Reads suggestions.jsonl once and groups in memory — replaces N+1 callers
+        that loop ``get_recent_by_bot`` per bot.
+        """
         from datetime import timedelta
 
         cutoff = datetime.now(timezone.utc) - timedelta(weeks=weeks)
-        suggestions = self.load_all()
-        result: list[dict] = []
-        for s in suggestions:
-            if s.get("bot_id") != bot_id:
+        wanted = set(bot_ids)
+        result: dict[str, list[dict]] = {bid: [] for bid in wanted}
+        for s in self.load_all():
+            bid = s.get("bot_id")
+            if bid not in wanted:
                 continue
             if s.get("status") == SuggestionStatus.REJECTED.value:
                 continue
@@ -175,7 +186,7 @@ class SuggestionTracker:
                         continue
                 except (ValueError, TypeError):
                     pass
-            result.append(s)
+            result[bid].append(s)
         return result
 
     def _update_status(

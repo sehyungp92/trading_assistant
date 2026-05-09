@@ -175,7 +175,7 @@ class TestDiscoveryPromptAssembler:
     def test_instructions_contain_21_automated_detectors(self, tmp_path):
         asm = self._make_assembler(tmp_path)
         pkg = asm.assemble()
-        assert "21 automated detectors" in pkg.instructions
+        assert "25 automated detectors" in pkg.instructions
 
     def test_instructions_contain_anti_patterns(self, tmp_path):
         asm = self._make_assembler(tmp_path)

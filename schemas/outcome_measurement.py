@@ -78,6 +78,10 @@ class OutcomeMeasurement(BaseModel):
     noise_estimate: float = 0.0
     significance_score: float = 0.0  # effect_size / (noise * sqrt(1/n_before + 1/n_after))
 
+    # Cross-links into proposal/hypothesis graph (optional)
+    proposal_id: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pnl_delta(self) -> float:

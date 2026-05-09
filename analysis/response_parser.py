@@ -20,15 +20,20 @@ from schemas.agent_response import (
 logger = logging.getLogger(__name__)
 
 
-def _safe_parse_list(items: list, model_class: type) -> list:
-    """Parse each item individually, skipping invalid ones for partial recovery."""
+def _safe_parse_list(items: list, model_class: type) -> tuple[list, int]:
+    """Parse each item individually, skipping invalid ones for partial recovery.
+
+    Returns (parsed, dropped_count).
+    """
     result = []
+    dropped = 0
     for i, item in enumerate(items):
         try:
             result.append(model_class(**item) if isinstance(item, dict) else item)
         except Exception as exc:
+            dropped += 1
             logger.warning("Skipping invalid item %d in %s: %s", i, model_class.__name__, exc)
-    return result
+    return result, dropped
 
 _BLOCK_PATTERN = re.compile(
     r"<!--\s*STRUCTURED_OUTPUT\s*\n(.*?)\n\s*-->",
@@ -40,17 +45,28 @@ _JSON_FENCE_PATTERN = re.compile(r"```json\s*\n(.*?)\n\s*```", re.DOTALL)
 
 
 def _extract_structured_json(response: str) -> dict | None:
-    """Try comment-block first, then fenced JSON.  Returns parsed dict or None."""
+    """Try comment-block first, then fenced JSON. Returns parsed dict or None.
+
+    When multiple blocks are present, scan all matches in document order and
+    return the *last* block that parses to a dict — later output supersedes
+    earlier output when the model emits a correction.
+    """
     for pattern in (_BLOCK_PATTERN, _JSON_FENCE_PATTERN):
-        match = pattern.search(response)
-        if not match:
-            continue
-        try:
-            data = json.loads(match.group(1).strip())
+        last_valid: dict | None = None
+        total = 0
+        for match in pattern.finditer(response):
+            total += 1
+            try:
+                data = json.loads(match.group(1).strip())
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning("Failed to parse structured output JSON: %s", exc)
+                continue
             if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Failed to parse structured output JSON: %s", exc)
+                last_valid = data
+        if last_valid is not None:
+            if total > 1:
+                logger.info("Multiple structured blocks found; using the last valid one (of %d)", total)
+            return last_valid
     return None
 
 
@@ -147,19 +163,37 @@ def parse_response(response: str) -> ParsedAnalysis:
         fallback_used = True
         logger.info("Used fallback markdown extraction for structured output")
 
-    predictions = _safe_parse_list(data.get("predictions", []), AgentPrediction)
-    suggestions = _safe_parse_list(data.get("suggestions", []), AgentSuggestion)
-    structural_proposals = _safe_parse_list(data.get("structural_proposals", []), StructuralProposal)
+    raw_predictions = data.get("predictions", [])
+    raw_suggestions = data.get("suggestions", [])
+    raw_structural = data.get("structural_proposals", [])
+    predictions, predictions_dropped = _safe_parse_list(raw_predictions, AgentPrediction)
+    suggestions, suggestions_dropped = _safe_parse_list(raw_suggestions, AgentSuggestion)
+    structural_proposals, structural_dropped = _safe_parse_list(raw_structural, StructuralProposal)
 
     # Parse portfolio proposals if present
     portfolio_proposals: list = []
+    portfolio_dropped = 0
     raw_portfolio = data.get("portfolio_proposals", [])
     if raw_portfolio:
         try:
             from schemas.portfolio_proposal import PortfolioProposal
-            portfolio_proposals = _safe_parse_list(raw_portfolio, PortfolioProposal)
+            portfolio_proposals, portfolio_dropped = _safe_parse_list(raw_portfolio, PortfolioProposal)
         except Exception as exc:
             logger.warning("Failed to parse portfolio_proposals: %s", exc)
+
+    dropped_counts: dict[str, int] = {}
+    for label, total, dropped in (
+        ("predictions", len(raw_predictions), predictions_dropped),
+        ("suggestions", len(raw_suggestions), suggestions_dropped),
+        ("structural_proposals", len(raw_structural), structural_dropped),
+        ("portfolio_proposals", len(raw_portfolio), portfolio_dropped),
+    ):
+        if dropped:
+            dropped_counts[label] = dropped
+            logger.warning(
+                "response_parser: %s parsed=%d total=%d dropped=%d",
+                label, total - dropped, total, dropped,
+            )
 
     return ParsedAnalysis(
         predictions=predictions,
@@ -170,4 +204,5 @@ def parse_response(response: str) -> ParsedAnalysis:
         parse_success=True,
         fallback_used=fallback_used,
         raw_structured=data,
+        dropped_counts=dropped_counts,
     )

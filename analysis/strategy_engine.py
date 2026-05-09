@@ -30,6 +30,13 @@ from schemas.weekly_metrics import (
     StrategyWeeklySummary,
 )
 
+# Minimum trade count under which per-bot detectors produce statistical noise.
+# Bots with fewer trades than this in a week are excluded from per-bot detector
+# calls in build_report so a 1-2 trade sample doesn't generate actionable
+# suggestions. Detectors that already enforce their own min_trades (e.g.
+# detect_time_of_day_patterns, detect_grade_selectivity) keep their own gates.
+_MIN_EVIDENCE_TRADES = 5
+
 
 class StrategyEngine:
     """Deterministic strategy suggestion generator."""
@@ -50,6 +57,9 @@ class StrategyEngine:
             "bear_regime_swing": {"decay_threshold": 0.50},
             "multi_engine_bear": {"decay_threshold": 0.55},
             "mean_reversion_pullback": {"decay_threshold": 0.80},
+            "momentum_pullback_crypto": {"decay_threshold": 0.50},
+            "institutional_anchor": {"decay_threshold": 0.50},
+            "volume_profile_breakout": {"decay_threshold": 0.45},
         },
         "exit_timing": {
             "trend_follow": {"efficiency_threshold": 0.20},
@@ -62,6 +72,14 @@ class StrategyEngine:
             "bear_regime_swing": {"efficiency_threshold": 0.25},
             "multi_engine_bear": {"efficiency_threshold": 0.35},
             "mean_reversion_pullback": {"efficiency_threshold": 0.45},
+            "momentum_pullback_crypto": {"efficiency_threshold": 0.25},
+            "institutional_anchor": {"efficiency_threshold": 0.20},
+            "volume_profile_breakout": {"efficiency_threshold": 0.30},
+        },
+        "funding_impact": {
+            "momentum_pullback_crypto": {"cost_threshold": 0.15},
+            "institutional_anchor": {"cost_threshold": 0.20},
+            "volume_profile_breakout": {"cost_threshold": 0.10},
         },
     }
 
@@ -94,6 +112,10 @@ class StrategyEngine:
         "detect_drawdown_tier_miscalibration": "stop_loss",
         "detect_coordination_gaps": "position_sizing",
         "detect_heat_cap_utilization": "position_sizing",
+        "funding_impact": "filter_threshold",
+        "grade_selectivity": "signal",
+        "confluence_quality": "filter_threshold",
+        "leverage_utilization": "position_sizing",
     }
 
     # Keywords indicating direction of change
@@ -1464,6 +1486,214 @@ class StrategyEngine:
                 threshold_name="crowding_win_rate_gap",
                 threshold_value=0.10,
                 observed_value=wr_gap,
+                sample_size=int(crowding_count),
+            ),
+        )]
+
+    def detect_better_exit_strategies(
+        self,
+        bot_id: str,
+        exit_sweep: dict,
+        edge_threshold_pct: float = 0.10,
+        min_trades: int = 20,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Emit a suggestion if a sweep variant beats the live exit by >= edge_threshold_pct net PnL.
+
+        Consumes ``ExitSweepResult.model_dump()`` (skills/exit_strategy_simulator.py)
+        with shape ``{"baseline_pnl": float, "results": [{"strategy": {...}, "simulated_pnl": float,
+        "total_trades": int, ...}], "best_strategy": {...}, "best_improvement": float}``.
+        """
+        if not exit_sweep:
+            return []
+        baseline = float(
+            exit_sweep.get("baseline_pnl")
+            or exit_sweep.get("baseline_net_pnl")
+            or 0.0
+        )
+        if baseline == 0:
+            return []
+        results = exit_sweep.get("results") or exit_sweep.get("variants") or []
+        if not results:
+            return []
+        # Sample-size guard: use the largest total_trades reported across variants
+        total_trades = max(
+            (int(r.get("total_trades") or 0) for r in results if isinstance(r, dict)),
+            default=0,
+        )
+        if total_trades < min_trades:
+            return []
+        # Prefer precomputed best_improvement; fall back to scanning results.
+        best_strategy = exit_sweep.get("best_strategy") or {}
+        improvement = exit_sweep.get("best_improvement")
+        if improvement is None:
+            best = max(
+                results,
+                key=lambda r: float(
+                    (r.get("simulated_pnl") if isinstance(r, dict) else 0.0) or 0.0
+                ),
+                default=None,
+            )
+            if not isinstance(best, dict):
+                return []
+            best_pnl = float(best.get("simulated_pnl") or best.get("net_pnl") or 0.0)
+            base_for_row = float(best.get("baseline_pnl") or baseline)
+            improvement = best_pnl - base_for_row
+            best_strategy = best.get("strategy") or best_strategy
+        edge = float(improvement) / max(abs(baseline), 1e-9)
+        if edge < edge_threshold_pct:
+            return []
+        variant_name = ""
+        if isinstance(best_strategy, dict):
+            variant_name = (
+                best_strategy.get("strategy_type")
+                or best_strategy.get("name")
+                or ""
+            )
+        variant_name = variant_name or "candidate"
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            title=f"Better exit candidate: {variant_name} — {bot_id}",
+            description=(
+                f"Sweep variant '{variant_name}' improves net PnL by {improvement:+.2f} "
+                f"vs baseline {baseline:.2f} ({edge:+.0%}, n={total_trades}). "
+                f"Consider running an A/B experiment for this exit configuration."
+            ),
+            evidence_days=30,
+            confidence=min(0.85, 0.5 + edge),
+            requires_human_judgment=True,
+            detection_context=DetectionContext(
+                detector_name="exit_sweep_edge",
+                bot_id=bot_id,
+                threshold_name="edge_threshold_pct",
+                threshold_value=edge_threshold_pct,
+                observed_value=edge,
+                sample_size=total_trades,
+            ),
+        )]
+
+    def detect_filter_sensitivity_findings(
+        self,
+        bot_id: str,
+        sensitivity: dict,
+        min_blocks: int = 5,
+    ) -> list[StrategySuggestion]:
+        """Tier 2: Emit suggestions for filters that block more value than they save.
+
+        Consumes ``FilterSensitivityReport.model_dump()`` (schemas/filter_sensitivity.py)
+        with shape ``{"bot_id": str, "curves": [{"filter_name": str, "current_block_count": int,
+        "current_net_impact": float, "blocked_winners": int, "blocked_losers": int, ...}]}``.
+        ``current_net_impact`` < 0 means the filter is net value-destroying.
+        """
+        if not sensitivity:
+            return []
+        curves = sensitivity.get("curves") or sensitivity.get("filters") or []
+        out: list[StrategySuggestion] = []
+        for f in curves:
+            if not isinstance(f, dict):
+                continue
+            name = f.get("filter_name") or f.get("name") or ""
+            try:
+                net_impact = float(
+                    f.get("current_net_impact")
+                    if f.get("current_net_impact") is not None
+                    else f.get("net_value", 0.0)
+                )
+            except (TypeError, ValueError):
+                continue
+            blocks = int(f.get("current_block_count") or 0)
+            blocked_winners = int(f.get("blocked_winners") or 0)
+            if blocks < min_blocks:
+                continue
+            # Filter is "marginal" when net impact is non-positive AND it has
+            # blocked at least one winner (otherwise it might just be a clean
+            # safety filter that has nothing to save).
+            if net_impact > 0 or blocked_winners == 0:
+                continue
+            out.append(StrategySuggestion(
+                tier=SuggestionTier.FILTER,
+                bot_id=bot_id,
+                title=f"Filter '{name}' blocks more value than it saves — {bot_id}",
+                description=(
+                    f"Filter '{name}' has net impact {net_impact:+.2f} across "
+                    f"{blocks} blocks ({blocked_winners} winners blocked). "
+                    f"Filter sensitivity analysis suggests relaxing or removing it."
+                ),
+                evidence_days=30,
+                confidence=0.55,
+                requires_human_judgment=True,
+                detection_context=DetectionContext(
+                    detector_name="filter_sensitivity",
+                    bot_id=bot_id,
+                    threshold_name="current_net_impact",
+                    threshold_value=0.0,
+                    observed_value=net_impact,
+                    sample_size=blocks,
+                ),
+            ))
+        return out
+
+    def detect_counterfactual_gaps(
+        self,
+        bot_id: str,
+        counterfactual: dict,
+        gain_threshold_pct: float = 0.10,
+        min_trades: int = 20,
+    ) -> list[StrategySuggestion]:
+        """Tier 3: Emit a suggestion if a counterfactual scenario would meaningfully improve PnL.
+
+        Consumes ``CounterfactualResult.model_dump()`` (schemas/counterfactual.py)
+        with shape ``{"scenario": {"scenario_type": str, "description": str, ...},
+        "baseline_pnl": float, "modified_pnl": float, "baseline_trade_count": int, ...}``.
+        Tolerates a list-shaped wrapper too in case future code aggregates scenarios.
+        """
+        if not counterfactual:
+            return []
+        # Accept either a single result dict or a list of results.
+        if isinstance(counterfactual, list):
+            return [
+                s for c in counterfactual
+                for s in self.detect_counterfactual_gaps(
+                    bot_id, c, gain_threshold_pct, min_trades,
+                )
+            ]
+        baseline = float(counterfactual.get("baseline_pnl") or 0.0)
+        modified = float(counterfactual.get("modified_pnl") or 0.0)
+        base_count = int(counterfactual.get("baseline_trade_count") or 0)
+        if base_count < min_trades or baseline == 0:
+            return []
+        delta = modified - baseline
+        edge = delta / max(abs(baseline), 1e-9)
+        if edge < gain_threshold_pct:
+            return []
+        scenario = counterfactual.get("scenario") or {}
+        scen_name = ""
+        if isinstance(scenario, dict):
+            scen_name = (
+                scenario.get("description")
+                or scenario.get("scenario_type")
+                or ""
+            )
+        scen_name = scen_name or "scenario"
+        return [StrategySuggestion(
+            tier=SuggestionTier.STRATEGY_VARIANT,
+            bot_id=bot_id,
+            title=f"Counterfactual gate gain: {scen_name} — {bot_id}",
+            description=(
+                f"Counterfactual '{scen_name}' projects PnL {modified:+.2f} vs "
+                f"baseline {baseline:+.2f} (delta {delta:+.2f}, {edge:+.0%}, n={base_count}). "
+                f"Worth running an A/B experiment for this configuration."
+            ),
+            evidence_days=30,
+            confidence=min(0.8, 0.5 + edge),
+            requires_human_judgment=True,
+            detection_context=DetectionContext(
+                detector_name="counterfactual_gap",
+                bot_id=bot_id,
+                threshold_name="gain_threshold_pct",
+                threshold_value=gain_threshold_pct,
+                observed_value=edge,
+                sample_size=base_count,
             ),
         )]
 
@@ -1490,11 +1720,29 @@ class StrategyEngine:
         sizing_data: dict[str, dict] | None = None,
         portfolio_context: dict[str, dict] | None = None,
         param_correlations: dict[str, dict] | None = None,
+        funding_data: dict[str, dict] | None = None,
+        grade_data: dict[str, dict] | None = None,
+        confluence_data: dict[str, dict] | None = None,
+        leverage_data: dict[str, dict] | None = None,
+        exit_sweep: dict[str, dict] | None = None,
+        filter_sensitivity: dict[str, dict] | None = None,
+        counterfactual: dict[str, dict] | None = None,
     ) -> RefinementReport:
         """Build the complete refinement report across all bots."""
         all_suggestions: list[StrategySuggestion] = []
 
+        # Bots with too few trades this window are excluded from per-bot detector
+        # calls; their statistical signals are too noisy to produce actionable
+        # suggestions. Detectors with their own min_trades param are unaffected
+        # when invoked outside build_report.
+        low_evidence_bots: set[str] = {
+            bid for bid, s in bot_summaries.items()
+            if s.total_trades < _MIN_EVIDENCE_TRADES
+        }
+
         for bot_id, summary in bot_summaries.items():
+            if bot_id in low_evidence_bots:
+                continue
             all_suggestions.extend(self.analyze_parameters(summary))
 
             if filter_summaries and bot_id in filter_summaries:
@@ -1537,6 +1785,8 @@ class StrategyEngine:
                 ))
 
         for bot_id, summary in bot_summaries.items():
+            if bot_id in low_evidence_bots:
+                continue
             if summary.avg_win > 0 and abs(summary.avg_loss) > 0:
                 all_suggestions.extend(self.detect_position_sizing_issues(
                     bot_id,
@@ -1638,9 +1888,49 @@ class StrategyEngine:
 
         if portfolio_context:
             for bot_id, ctx in portfolio_context.items():
+                if bot_id in low_evidence_bots:
+                    continue
                 all_suggestions.extend(
                     self.detect_portfolio_crowding(bot_id, ctx)
                 )
+
+        # Crypto perpetual detectors
+        if funding_data:
+            for bot_id, summary in funding_data.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_funding_impact(bot_id, summary))
+        if grade_data:
+            for bot_id, summary in grade_data.items():
+                all_suggestions.extend(self.detect_grade_selectivity(bot_id, summary))
+        if confluence_data:
+            for bot_id, summary in confluence_data.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_confluence_quality(bot_id, summary))
+        if leverage_data:
+            for bot_id, summary in leverage_data.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_leverage_utilization(bot_id, summary))
+
+        # Sim-driven detectors (weekly handler feeds these from filter_sensitivity_analyzer,
+        # counterfactual_simulator, exit_strategy_simulator)
+        if exit_sweep:
+            for bot_id, sweep in exit_sweep.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_better_exit_strategies(bot_id, sweep))
+        if filter_sensitivity:
+            for bot_id, sens in filter_sensitivity.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_filter_sensitivity_findings(bot_id, sens))
+        if counterfactual:
+            for bot_id, cf in counterfactual.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_counterfactual_gaps(bot_id, cf))
 
         # Apply per-detector confidence calibration from outcome data
         if self._detector_confidence:
@@ -1713,6 +2003,259 @@ class StrategyEngine:
             week_end=self.week_end,
             suggestions=all_suggestions,
         )
+
+    # --- Crypto perpetual detectors ---
+
+    def detect_funding_impact(
+        self, bot_id: str, funding_summary: dict,
+        cost_threshold: float = 0.15,
+    ) -> list[StrategySuggestion]:
+        """Detect when funding costs erode trading edge."""
+        strategy_id = self._resolve_strategy_id(bot_id)
+        arch_thresh = self._archetype_default(strategy_id, "funding_impact", "cost_threshold")
+        if arch_thresh is not None:
+            cost_threshold = arch_thresh
+
+        suggestions: list[StrategySuggestion] = []
+        funding_pct = funding_summary.get("funding_pct_of_gross", 0.0)
+        funding_losers = funding_summary.get("funding_losers", [])
+        funding_sample = int(funding_summary.get("coverage", 0) or 0)
+
+        if funding_pct > cost_threshold:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.PARAMETER,
+                title=f"Funding costs consuming {funding_pct:.0%} of gross PnL",
+                description=(
+                    f"Funding paid is {funding_pct:.0%} of gross PnL (threshold: {cost_threshold:.0%}). "
+                    f"Consider tightening time_stop to reduce hold duration and funding exposure."
+                ),
+                confidence=min(0.8, 0.5 + funding_pct),
+                detection_context=DetectionContext(
+                    detector_name="funding_impact",
+                    bot_id=bot_id,
+                    threshold_name="cost_threshold",
+                    threshold_value=cost_threshold,
+                    observed_value=funding_pct,
+                    sample_size=funding_sample,
+                ),
+            ))
+
+        if funding_losers:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.HYPOTHESIS,
+                title=f"{len(funding_losers)} trade(s) where funding exceeded PnL",
+                description=(
+                    f"Found {len(funding_losers)} trades where cumulative funding cost "
+                    f"exceeded the trade's PnL. Review funding_extreme filter threshold."
+                ),
+                confidence=0.6,
+                detection_context=DetectionContext(
+                    detector_name="funding_impact",
+                    bot_id=bot_id,
+                    sample_size=len(funding_losers),
+                ),
+            ))
+
+        return suggestions
+
+    def detect_grade_selectivity(
+        self, bot_id: str, grade_summary: dict,
+        min_trades: int = 20,
+    ) -> list[StrategySuggestion]:
+        """Detect grade selectivity issues in crypto setup grading."""
+        suggestions: list[StrategySuggestion] = []
+        per_grade = grade_summary.get("per_grade", {})
+        gap = grade_summary.get("grade_expectancy_gap", 0.0)
+
+        a_data = per_grade.get("A", {})
+        b_data = per_grade.get("B", {})
+        total_trades = sum(g.get("count", 0) for g in per_grade.values())
+
+        if total_trades < min_trades:
+            return suggestions
+
+        # B-grade negative expectancy
+        if b_data.get("count", 0) >= 5 and b_data.get("avg_pnl", 0) < 0:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.HYPOTHESIS,
+                title="B-grade trades have negative expectancy",
+                description=(
+                    f"B-grade: {b_data['count']} trades, avg PnL={b_data['avg_pnl']:.4f}. "
+                    f"Consider disabling B-grade entries or tightening confluence requirements."
+                ),
+                confidence=0.7,
+                detection_context=DetectionContext(detector_name="grade_selectivity"),
+            ))
+
+        # A and B within 10% — miscalibrated differential
+        if a_data.get("count", 0) >= 5 and b_data.get("count", 0) >= 5:
+            a_pnl = a_data.get("avg_pnl", 0)
+            b_pnl = b_data.get("avg_pnl", 0)
+            if a_pnl != 0 and abs(a_pnl - b_pnl) / abs(a_pnl) < 0.10:
+                suggestions.append(StrategySuggestion(
+                    bot_id=bot_id,
+                    tier=SuggestionTier.PARAMETER,
+                    title="A/B grade performance gap is negligible",
+                    description=(
+                        f"A avg_pnl={a_pnl:.4f}, B avg_pnl={b_pnl:.4f} — "
+                        f"risk_pct differential may be miscalibrated."
+                    ),
+                    confidence=0.5,
+                    detection_context=DetectionContext(detector_name="grade_selectivity"),
+                ))
+
+        # Grade inversion (B outperforms A)
+        if gap < 0 and a_data.get("count", 0) >= 5 and b_data.get("count", 0) >= 5:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.HYPOTHESIS,
+                title="Grade criteria may be inverted — B outperforms A",
+                description=(
+                    f"Grade expectancy gap is {gap:.4f} (A underperforms B). "
+                    f"Review confluence scoring criteria for grade assignment."
+                ),
+                confidence=0.6,
+                detection_context=DetectionContext(detector_name="grade_selectivity"),
+            ))
+
+        return suggestions
+
+    def detect_confluence_quality(
+        self, bot_id: str, confluence_summary: dict,
+        lift_threshold: float = 0.10,
+    ) -> list[StrategySuggestion]:
+        """Detect confluence quality issues — which factors add value."""
+        suggestions: list[StrategySuggestion] = []
+        by_count = confluence_summary.get("by_count", {})
+        by_factor = confluence_summary.get("by_factor", {})
+        coverage = int(confluence_summary.get("coverage", 0) or 0)
+
+        # Check if higher confluence count improves win rate
+        sorted_counts = sorted(by_count.items(), key=lambda x: int(x[0]))
+        for i in range(1, len(sorted_counts)):
+            prev_key, prev_data = sorted_counts[i - 1]
+            curr_key, curr_data = sorted_counts[i]
+            prev_wr = prev_data.get("win_rate", 0)
+            curr_wr = curr_data.get("win_rate", 0)
+            curr_count = int(curr_data.get("count", 0) or 0)
+            if curr_wr - prev_wr > lift_threshold and curr_count >= 5:
+                suggestions.append(StrategySuggestion(
+                    bot_id=bot_id,
+                    tier=SuggestionTier.PARAMETER,
+                    title=f"Win rate jumps {curr_wr - prev_wr:.0%} at {curr_key} confluences",
+                    description=(
+                        f"Win rate at {curr_key} confluences ({curr_wr:.0%}) vs "
+                        f"{prev_key} ({prev_wr:.0%}). Consider raising min_confluences."
+                    ),
+                    confidence=0.6,
+                    detection_context=DetectionContext(
+                        detector_name="confluence_quality",
+                        bot_id=bot_id,
+                        threshold_name="lift_threshold",
+                        threshold_value=lift_threshold,
+                        observed_value=curr_wr - prev_wr,
+                        sample_size=curr_count,
+                    ),
+                ))
+                break  # Only report the most significant jump
+
+        # Check for negative-lift factors
+        for factor, data in by_factor.items():
+            lift = data.get("lift", 0)
+            if lift < -lift_threshold:
+                suggestions.append(StrategySuggestion(
+                    bot_id=bot_id,
+                    tier=SuggestionTier.HYPOTHESIS,
+                    title=f"Confluence factor '{factor}' has negative lift ({lift:+.0%})",
+                    description=(
+                        f"Trades WITH '{factor}' have lower win rate than trades WITHOUT it "
+                        f"(lift={lift:+.4f}). Investigate whether this factor adds noise."
+                    ),
+                    confidence=0.5,
+                    detection_context=DetectionContext(
+                        detector_name="confluence_quality",
+                        bot_id=bot_id,
+                        threshold_name="lift_threshold",
+                        threshold_value=lift_threshold,
+                        observed_value=lift,
+                        sample_size=coverage,
+                    ),
+                ))
+
+        return suggestions
+
+    def detect_leverage_utilization(
+        self, bot_id: str, leverage_summary: dict,
+        utilization_warning: float = 0.80,
+    ) -> list[StrategySuggestion]:
+        """Detect leverage risk issues in crypto perpetual trading."""
+        suggestions: list[StrategySuggestion] = []
+        util_pct = leverage_summary.get("leverage_utilization_pct", 0)
+        near_liq = leverage_summary.get("near_liquidation_count", 0)
+        per_grade = leverage_summary.get("per_grade", {})
+        coverage = int(leverage_summary.get("coverage", 0) or 0)
+
+        if util_pct > utilization_warning:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.PARAMETER,
+                title=f"Leverage utilization at {util_pct:.0%} of max",
+                description=(
+                    f"Average leverage is {util_pct:.0%} of configured maximum. "
+                    f"Consider reducing default leverage to build safety margin."
+                ),
+                confidence=0.6,
+                detection_context=DetectionContext(
+                    detector_name="leverage_utilization",
+                    bot_id=bot_id,
+                    threshold_name="utilization_warning",
+                    threshold_value=utilization_warning,
+                    observed_value=util_pct,
+                    sample_size=coverage,
+                ),
+            ))
+
+        if near_liq > 0:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.HYPOTHESIS,
+                title=f"{near_liq} trade(s) approached liquidation threshold",
+                description=(
+                    f"Found {near_liq} trade(s) where MAE exceeded 80% of liquidation "
+                    f"distance. This is a critical safety flag requiring leverage reduction."
+                ),
+                confidence=0.9,
+                detection_context=DetectionContext(
+                    detector_name="leverage_utilization",
+                    bot_id=bot_id,
+                    sample_size=int(near_liq),
+                ),
+            ))
+
+        # Grade-leverage mismatch
+        a_lev = per_grade.get("A", 0)
+        b_lev = per_grade.get("B", 0)
+        if b_lev >= a_lev > 0:
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                tier=SuggestionTier.PARAMETER,
+                title="B-grade trades use equal or more leverage than A-grade",
+                description=(
+                    f"A-grade avg leverage={a_lev:.1f}, B-grade avg leverage={b_lev:.1f}. "
+                    f"Lower-conviction trades should use less leverage, not more."
+                ),
+                confidence=0.6,
+                detection_context=DetectionContext(
+                    detector_name="leverage_utilization",
+                    bot_id=bot_id,
+                    sample_size=coverage,
+                ),
+            ))
+
+        return suggestions
 
     def _should_suppress(self, bot_id: str, tier_value: str) -> bool:
         """Check if a (bot_id, tier) pair should be suppressed due to poor track record.

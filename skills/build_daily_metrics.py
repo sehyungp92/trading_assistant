@@ -8,9 +8,14 @@ Output directory: data/curated/<date>/<bot_id>/
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from filelock import FileLock, Timeout
+
+logger = logging.getLogger(__name__)
 
 from schemas.events import TradeEvent, MissedOpportunityEvent
 from schemas.exit_efficiency import ExitEfficiencyStats
@@ -1218,12 +1223,19 @@ class DailyMetricsBuilder:
         """Identify strategy parameters most correlated with trade outcomes."""
         trades_with_data = 0
         all_params: dict[str, list[tuple[float, float]]] = defaultdict(list)  # param_name -> [(value, pnl)]
+        boolean_params: dict[str, dict[bool, list[float]]] = defaultdict(
+            lambda: {True: [], False: []},
+        )  # param_name -> {True: [pnl, ...], False: [pnl, ...]}
 
         for t in trades:
             if not t.strategy_params_at_entry:
                 continue
             trades_with_data += 1
             for key, val in t.strategy_params_at_entry.items():
+                # Check boolean BEFORE float since float(True)==1.0
+                if isinstance(val, bool):
+                    boolean_params[key][val].append(t.pnl)
+                    continue
                 try:
                     all_params[key].append((float(val), t.pnl))
                 except (TypeError, ValueError):
@@ -1239,6 +1251,34 @@ class DailyMetricsBuilder:
         }
 
         correlations: list[dict] = []
+
+        # Boolean params: 2-group comparison instead of 3-bucket numeric split
+        for param_name, state_pnls in sorted(boolean_params.items()):
+            enabled_pnls = state_pnls[True]
+            disabled_pnls = state_pnls[False]
+            if len(enabled_pnls) < 2 or len(disabled_pnls) < 2:
+                continue
+            en_wins = sum(1 for p in enabled_pnls if p > 0)
+            dis_wins = sum(1 for p in disabled_pnls if p > 0)
+            en_wr = round(en_wins / len(enabled_pnls), 4)
+            dis_wr = round(dis_wins / len(disabled_pnls), 4)
+            spread = abs(en_wr - dis_wr)
+            correlations.append({
+                "param_name": param_name,
+                "type": "boolean",
+                "enabled_win_rate": en_wr,
+                "disabled_win_rate": dis_wr,
+                "enabled_avg_pnl": round(statistics.mean(enabled_pnls), 4),
+                "disabled_avg_pnl": round(statistics.mean(disabled_pnls), 4),
+                "pnl_delta": round(
+                    statistics.mean(disabled_pnls) - statistics.mean(enabled_pnls), 4,
+                ),
+                "enabled_count": len(enabled_pnls),
+                "disabled_count": len(disabled_pnls),
+                "spread": round(spread, 4),
+            })
+
+        # Numeric params: 3-bucket split
         for param_name, pairs in varied_params.items():
             sorted_pairs = sorted(pairs, key=lambda x: x[0])
             n = len(sorted_pairs)
@@ -1276,7 +1316,7 @@ class DailyMetricsBuilder:
         return {
             "coverage": round(trades_with_data / max(len(trades), 1), 4),
             "total_with_data": trades_with_data,
-            "param_count": len(varied_params),
+            "param_count": len(varied_params) + len(boolean_params),
             "top_correlations": correlations[:10],
         }
 
@@ -1441,8 +1481,62 @@ class DailyMetricsBuilder:
         process_quality_events: list[dict] | None = None,
         stop_adjustment_events: list[dict] | None = None,
         post_exit_events: list[dict] | None = None,
+        strategy_registry=None,
     ) -> Path:
-        """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir."""
+        """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir.
+
+        Acquires a per-(date, bot) filelock so concurrent runs serialize cleanly
+        instead of racing each other's file writes.
+        """
+        output_dir = base_dir / self.date / self.bot_id
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = output_dir.parent / f".{self.bot_id}.write.lock"
+        try:
+            with FileLock(str(lock_path), timeout=300):
+                return self._write_curated_locked(
+                    trades,
+                    missed,
+                    base_dir,
+                    coordination_events=coordination_events,
+                    daily_snapshot=daily_snapshot,
+                    findings_dir=findings_dir,
+                    filter_decision_events=filter_decision_events,
+                    indicator_snapshot_events=indicator_snapshot_events,
+                    orderbook_context_events=orderbook_context_events,
+                    parameter_change_events=parameter_change_events,
+                    order_events=order_events,
+                    process_quality_events=process_quality_events,
+                    stop_adjustment_events=stop_adjustment_events,
+                    post_exit_events=post_exit_events,
+                    strategy_registry=strategy_registry,
+                )
+        except Timeout:
+            logger.error(
+                "Timed out acquiring write lock for %s/%s after 300s",
+                self.date, self.bot_id,
+            )
+            raise
+
+    def _write_curated_locked(
+        self,
+        trades: list[TradeEvent],
+        missed: list[MissedOpportunityEvent],
+        base_dir: Path,
+        coordination_events: list[dict] | None = None,
+        daily_snapshot: dict | None = None,
+        findings_dir: Path | None = None,
+        filter_decision_events: list[dict] | None = None,
+        indicator_snapshot_events: list[dict] | None = None,
+        orderbook_context_events: list[dict] | None = None,
+        parameter_change_events: list[dict] | None = None,
+        order_events: list[dict] | None = None,
+        process_quality_events: list[dict] | None = None,
+        stop_adjustment_events: list[dict] | None = None,
+        post_exit_events: list[dict] | None = None,
+        strategy_registry=None,
+    ) -> Path:
+        """Inner write — caller must hold the per-(date, bot) write lock."""
+        self._strategy_registry = strategy_registry
         output_dir = base_dir / self.date / self.bot_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1642,6 +1736,76 @@ class DailyMetricsBuilder:
         if market_cond.get("coverage", 0) > 0:
             self._write_json(output_dir / "market_conditions.json", market_cond)
 
+        # Engine-level decomposition (requires strategy_registry on self)
+        if getattr(self, "_strategy_registry", None) is not None:
+            try:
+                from skills.engine_decomposer import EngineDecomposer
+
+                decomposer = EngineDecomposer(self._strategy_registry)
+                decomposition = decomposer.decompose(trades, self.bot_id, period=self.date)
+                if decomposition.engines:
+                    self._write_json(
+                        output_dir / "engine_decomposition.json",
+                        decomposition.model_dump(mode="json"),
+                    )
+            except Exception:
+                logger.warning(
+                    "Engine decomposition failed for %s/%s — skipping",
+                    self.bot_id, self.date, exc_info=True,
+                )
+
+        # Ablation flag analysis (works from strategy_params_at_entry, no registry needed)
+        try:
+            from skills.ablation_analyzer import AblationAnalyzer
+
+            ablation = AblationAnalyzer()
+            analysis = ablation.analyze(trades, self.bot_id, period=self.date)
+            if analysis.flags:
+                self._write_json(
+                    output_dir / "ablation_analysis.json",
+                    analysis.model_dump(mode="json"),
+                )
+        except Exception:
+            logger.warning(
+                "Ablation analysis failed for %s/%s — skipping",
+                self.bot_id, self.date, exc_info=True,
+            )
+
+        # Exit tier analysis (requires strategy_registry on self)
+        if getattr(self, "_strategy_registry", None) is not None:
+            try:
+                from skills.exit_tier_analyzer import ExitTierAnalyzer
+
+                exit_analyzer = ExitTierAnalyzer(self._strategy_registry)
+                exit_analysis = exit_analyzer.analyze(trades, self.bot_id, period=self.date)
+                if exit_analysis and exit_analysis.get("tiers"):
+                    self._write_json(
+                        output_dir / "exit_tier_analysis.json",
+                        exit_analysis,
+                    )
+            except Exception:
+                logger.warning(
+                    "Exit tier analysis failed for %s/%s — skipping",
+                    self.bot_id, self.date, exc_info=True,
+                )
+
+        # Crypto perpetual curated files (conditional on crypto-specific fields)
+        funding = self._build_funding_analysis(trades)
+        if funding:
+            self._write_json(output_dir / "funding_analysis.json", funding)
+
+        grade = self._build_grade_analysis(trades)
+        if grade:
+            self._write_json(output_dir / "grade_analysis.json", grade)
+
+        confluence = self._build_confluence_analysis(trades)
+        if confluence:
+            self._write_json(output_dir / "confluence_analysis.json", confluence)
+
+        leverage = self._build_leverage_analysis(trades)
+        if leverage:
+            self._write_json(output_dir / "leverage_analysis.json", leverage)
+
         # Write applied regime config from snapshot (per-bot, varies by family)
         if daily_snapshot:
             applied_config = daily_snapshot.get("applied_regime_config")
@@ -1650,16 +1814,205 @@ class DailyMetricsBuilder:
 
         return output_dir
 
+    # --- Crypto perpetual analysis builders ---
+
+    def _build_funding_analysis(self, trades: list[TradeEvent]) -> dict | None:
+        """Build funding cost analysis for crypto perpetual trades."""
+        if not any(t.funding_paid != 0 for t in trades):
+            return None
+        total_funding = sum(t.funding_paid for t in trades)
+        gross_pnl = sum(t.pnl for t in trades)
+        per_direction: dict[str, dict] = {}
+        for direction in ("LONG", "SHORT"):
+            dir_trades = [t for t in trades if t.side == direction]
+            if dir_trades:
+                per_direction[direction] = {
+                    "count": len(dir_trades),
+                    "total_funding": sum(t.funding_paid for t in dir_trades),
+                    "avg_funding": sum(t.funding_paid for t in dir_trades) / len(dir_trades),
+                }
+        per_symbol: dict[str, float] = {}
+        for t in trades:
+            sym = t.pair or "UNKNOWN"
+            per_symbol[sym] = per_symbol.get(sym, 0.0) + t.funding_paid
+        # Trades where funding cost exceeded trade pnl
+        funding_losers = []
+        for t in trades:
+            if t.funding_paid > 0 and t.funding_paid > t.pnl:
+                hold_hours = (t.exit_time - t.entry_time).total_seconds() / 3600
+                funding_losers.append({
+                    "trade_id": t.trade_id,
+                    "pnl": t.pnl,
+                    "funding_paid": t.funding_paid,
+                    "hold_hours": round(hold_hours, 2),
+                })
+        total_hold_hours = sum(
+            (t.exit_time - t.entry_time).total_seconds() / 3600 for t in trades
+        )
+        funded_trades = [t for t in trades if t.funding_paid != 0]
+        return {
+            "coverage": len(funded_trades),
+            "total_funding_paid": total_funding,
+            "gross_pnl": gross_pnl,
+            "funding_pct_of_gross": abs(total_funding / gross_pnl) if gross_pnl else 0.0,
+            "per_direction": per_direction,
+            "per_symbol": per_symbol,
+            "funding_losers": funding_losers,
+            "avg_funding_per_hour": total_funding / total_hold_hours if total_hold_hours > 0 else 0.0,
+        }
+
+    def _build_grade_analysis(self, trades: list[TradeEvent]) -> dict | None:
+        """Build setup grade performance analysis for crypto trades."""
+        if not any(t.setup_grade for t in trades):
+            return None
+        from collections import defaultdict
+        grade_buckets: dict[str, list[TradeEvent]] = defaultdict(list)
+        for t in trades:
+            if t.setup_grade:
+                grade_buckets[t.setup_grade].append(t)
+        per_grade: dict[str, dict] = {}
+        for grade, bucket in sorted(grade_buckets.items()):
+            wins = [t for t in bucket if t.pnl > 0]
+            avg_confluences = (
+                statistics.mean(len(t.confluences) for t in bucket)
+                if any(t.confluences for t in bucket) else 0.0
+            )
+            per_grade[grade] = {
+                "count": len(bucket),
+                "win_rate": len(wins) / len(bucket) if bucket else 0.0,
+                "avg_pnl": statistics.mean(t.pnl for t in bucket),
+                "avg_r": statistics.mean(
+                    t.pnl_pct / (abs(t.mae_pct) if t.mae_pct is not None and t.mae_pct != 0 else abs(t.pnl_pct) or 1.0)
+                    for t in bucket
+                ),
+                "avg_confluences": round(avg_confluences, 2),
+            }
+        # Grade expectancy gap (A - B if both exist)
+        a_pnl = per_grade.get("A", {}).get("avg_pnl", 0.0)
+        b_pnl = per_grade.get("B", {}).get("avg_pnl", 0.0)
+        graded_trades = [t for t in trades if t.setup_grade]
+        return {
+            "coverage": len(graded_trades),
+            "per_grade": per_grade,
+            "grade_expectancy_gap": a_pnl - b_pnl,
+        }
+
+    def _build_confluence_analysis(self, trades: list[TradeEvent]) -> dict | None:
+        """Build confluence factor analysis for crypto trades."""
+        if not any(t.confluences for t in trades):
+            return None
+        from collections import defaultdict
+        # By count
+        count_buckets: dict[int, list[TradeEvent]] = defaultdict(list)
+        for t in trades:
+            count_buckets[len(t.confluences)].append(t)
+        by_count: dict[str, dict] = {}
+        for n, bucket in sorted(count_buckets.items()):
+            wins = [t for t in bucket if t.pnl > 0]
+            by_count[str(n)] = {
+                "count": len(bucket),
+                "win_rate": len(wins) / len(bucket) if bucket else 0.0,
+                "avg_pnl": statistics.mean(t.pnl for t in bucket),
+            }
+        # By factor (present vs absent)
+        all_factors: set[str] = set()
+        for t in trades:
+            all_factors.update(t.confluences)
+        by_factor: dict[str, dict] = {}
+        for factor in sorted(all_factors):
+            present = [t for t in trades if factor in t.confluences]
+            absent = [t for t in trades if factor not in t.confluences]
+            present_wr = len([t for t in present if t.pnl > 0]) / len(present) if present else 0.0
+            absent_wr = len([t for t in absent if t.pnl > 0]) / len(absent) if absent else 0.0
+            by_factor[factor] = {
+                "present_win_rate": round(present_wr, 4),
+                "absent_win_rate": round(absent_wr, 4),
+                "lift": round(present_wr - absent_wr, 4),
+            }
+        confluence_trades = [t for t in trades if t.confluences]
+        return {"coverage": len(confluence_trades), "by_count": by_count, "by_factor": by_factor}
+
+    def _build_leverage_analysis(self, trades: list[TradeEvent]) -> dict | None:
+        """Build leverage utilization analysis for crypto trades."""
+        leverages: list[float] = []
+        for t in trades:
+            lev = 1.0
+            if t.sizing_inputs and isinstance(t.sizing_inputs, dict):
+                lev = float(t.sizing_inputs.get("leverage", 1.0))
+            leverages.append(lev)
+        if not any(lev > 1.0 for lev in leverages):
+            return None
+        avg_leverage = statistics.mean(leverages)
+        max_leverage = max(leverages)
+        # Max configured leverage (estimate from data or use max seen * 1.2)
+        max_configured = max_leverage  # conservative estimate
+        # Per-grade leverage
+        per_grade: dict[str, float] = {}
+        from collections import defaultdict
+        grade_levs: dict[str, list[float]] = defaultdict(list)
+        for t, lev in zip(trades, leverages):
+            if t.setup_grade:
+                grade_levs[t.setup_grade].append(lev)
+        for grade, levs in grade_levs.items():
+            per_grade[grade] = round(statistics.mean(levs), 2)
+        # Near-liquidation count (mae_r > 0.8 * (1/leverage))
+        near_liq = 0
+        worst_mae_r = 0.0
+        for t, lev in zip(trades, leverages):
+            if t.mae_r is not None and lev > 1.0:
+                threshold = 0.8 * (1.0 / lev)
+                if t.mae_r > threshold:
+                    near_liq += 1
+                if t.mae_r > worst_mae_r:
+                    worst_mae_r = t.mae_r
+        leveraged_trades = [lev for lev in leverages if lev > 1.0]
+        return {
+            "coverage": len(leveraged_trades),
+            "avg_leverage": round(avg_leverage, 2),
+            "max_leverage": round(max_leverage, 2),
+            "leverage_utilization_pct": round(avg_leverage / max_configured, 4) if max_configured > 0 else 0.0,
+            "per_grade": per_grade,
+            "worst_mae_r": round(worst_mae_r, 4),
+            "near_liquidation_count": near_liq,
+        }
+
+    def _atomic_write_text(self, path: Path, content: str) -> None:
+        """Write content to path atomically via temp file + os.replace.
+
+        Prevents readers from seeing a half-written file if the process is
+        interrupted, and prevents one of two overlapping runs for the same
+        bot/date from leaving a partially-written file. ``os.replace`` is
+        atomic within a directory on both POSIX and Windows.
+        """
+        import os as _os
+        import tempfile
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            _os.replace(tmp_name, path)
+        except Exception:
+            try:
+                _os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
     def _write_json(self, path: Path, data: dict | list) -> None:
-        path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        self._atomic_write_text(path, json.dumps(data, indent=2, default=str))
 
     def _write_jsonl(self, path: Path, records: list[BaseModel]) -> None:
         if not records:
-            path.write_text("", encoding="utf-8")
+            self._atomic_write_text(path, "")
             return
-        path.write_text(
+        self._atomic_write_text(
+            path,
             "\n".join(record.model_dump_json() for record in records) + "\n",
-            encoding="utf-8",
         )
 
     def _to_winner_loser(self, t: TradeEvent) -> WinnerLoserRecord:

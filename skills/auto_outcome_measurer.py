@@ -40,11 +40,15 @@ class AutoOutcomeMeasurer:
         wfo_dir: Path | None = None,
         findings_dir: Path | None = None,
         calibration_tracker: "BacktestCalibrationTracker | None" = None,
+        hypothesis_library: "HypothesisLibrary | None" = None,
+        proposal_ledger: "ProposalLedger | None" = None,
     ) -> None:
         self._curated_dir = curated_dir
         self._wfo_dir = wfo_dir
         self._findings_dir = findings_dir
         self._calibration_tracker = calibration_tracker
+        self._hypothesis_library = hypothesis_library
+        self._proposal_ledger = proposal_ledger
 
     def measure(
         self,
@@ -185,33 +189,94 @@ class AutoOutcomeMeasurer:
         # Evaluate targeted metric improvement
         measurement = self._evaluate_target_metric(measurement, suggestion_id)
 
+        # Stamp hypothesis/proposal cross-links onto the measurement
+        hypothesis_id, proposal_id = self._load_suggestion_links(suggestion_id)
+        if hypothesis_id or proposal_id:
+            measurement = measurement.model_copy(update={
+                "hypothesis_id": hypothesis_id or None,
+                "proposal_id": proposal_id or None,
+            })
+
         # Feed back to calibration tracker (approximate composite delta)
+        delta = self._estimate_composite_delta(measurement)
         if self._calibration_tracker:
-            delta = self._estimate_composite_delta(measurement)
             self._calibration_tracker.record_outcome(suggestion_id, delta)
+
+        # Feed back to hypothesis library for non-A/B suggestion outcomes
+        # (A/B-experiment outcomes are recorded separately in app.py::_check_experiments)
+        if self._hypothesis_library and hypothesis_id:
+            try:
+                positive = self._is_positive_outcome(measurement, delta)
+                self._hypothesis_library.record_outcome(hypothesis_id, positive=positive)
+            except Exception:
+                pass
+
+        # Feed back to proposal ledger
+        if self._proposal_ledger and proposal_id:
+            try:
+                from schemas.proposal_ledger import ProposalOutcome
+                verdict = measurement.verdict
+                verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
+                self._proposal_ledger.record_outcome(
+                    proposal_id,
+                    ProposalOutcome(
+                        proposal_id=proposal_id,
+                        objective_delta=float(delta),
+                        verdict=verdict_str,
+                    ),
+                )
+            except Exception:
+                pass
 
         return measurement
 
-    def _load_suggestion_category(self, suggestion_id: str) -> tuple[str, str | None]:
-        """Load category and target_param for a suggestion from suggestions.jsonl.
+    @staticmethod
+    def _is_positive_outcome(measurement: OutcomeMeasurement, delta: float) -> bool:
+        """Decide hypothesis-library outcome polarity.
 
-        Returns (category, target_param) or ("", None) if not found.
+        Use the same target-metric logic as _evaluate_target_metric when
+        available; otherwise fall back to composite delta sign.
         """
+        if measurement.target_metric_improved is not None:
+            return bool(measurement.target_metric_improved)
+        return delta > 0
+
+    def _lookup_suggestion(self, suggestion_id: str) -> dict | None:
+        """Find a SuggestionRecord by id in suggestions.jsonl. Tolerates malformed lines."""
         if not self._findings_dir:
-            return "", None
+            return None
         path = self._findings_dir / "suggestions.jsonl"
         if not path.exists():
-            return "", None
+            return None
         try:
-            for line in path.read_text(encoding="utf-8").strip().splitlines():
-                if not line.strip():
-                    continue
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
                 rec = json.loads(line)
-                if rec.get("suggestion_id") == suggestion_id:
-                    return rec.get("category", ""), rec.get("target_param")
-        except (OSError, json.JSONDecodeError):
-            pass
-        return "", None
+            except json.JSONDecodeError:
+                continue  # tolerate one bad line — keep scanning
+            if rec.get("suggestion_id") == suggestion_id:
+                return rec
+        return None
+
+    def _load_suggestion_links(self, suggestion_id: str) -> tuple[str, str]:
+        """Return (hypothesis_id, proposal_id) for a suggestion, blank strings if missing."""
+        rec = self._lookup_suggestion(suggestion_id)
+        if not rec:
+            return "", ""
+        return rec.get("hypothesis_id") or "", rec.get("proposal_id") or ""
+
+    def _load_suggestion_category(self, suggestion_id: str) -> tuple[str, str | None]:
+        """Load category and target_param for a suggestion from suggestions.jsonl."""
+        rec = self._lookup_suggestion(suggestion_id)
+        if not rec:
+            return "", None
+        return rec.get("category", ""), rec.get("target_param")
 
     def _evaluate_target_metric(
         self, measurement: OutcomeMeasurement, suggestion_id: str,

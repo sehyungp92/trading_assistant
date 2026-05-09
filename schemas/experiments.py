@@ -55,6 +55,7 @@ class ExperimentConfig(BaseModel):
     started_at: Optional[datetime] = None
     concluded_at: Optional[datetime] = None
     source_suggestion_id: Optional[str] = None
+    hypothesis_id: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_variants(self) -> ExperimentConfig:

@@ -4,14 +4,31 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class PlaybookStatus(str, Enum):
     ACTIVE = "active"
     QUARANTINED = "quarantined"
     INACTIVE = "inactive"
+
+
+class PlaybookTracking(BaseModel):
+    """Usage and outcome tracking for a playbook, stored separately from manifest."""
+
+    playbook_id: str
+    usage_count: int = 0
+    last_used_at: Optional[datetime] = None
+    positive_outcomes: int = 0
+    negative_outcomes: int = 0
+
+    @computed_field
+    @property
+    def effectiveness_rate(self) -> float:
+        total = self.positive_outcomes + self.negative_outcomes
+        return self.positive_outcomes / total if total > 0 else 0.5
 
 
 class GeneratedPlaybook(BaseModel):

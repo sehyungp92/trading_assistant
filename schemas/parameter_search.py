@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from schemas.regime_conditional import RegimeParameterAnalysis
 from schemas.wfo_results import SimulationMetrics
 
 
@@ -43,9 +44,12 @@ class ParameterSearchReport(BaseModel):
     candidates_passing: int = 0
     best_value: Any = None
     best_composite: float = 0.0
+    best_robustness_score: float = 0.0
+    best_cost_sensitivity_sharpe: float = 0.0
     routing: SearchRouting = SearchRouting.DISCARD
     discard_reason: str = ""
     exploration_summary: str = ""
+    regime_analysis: RegimeParameterAnalysis | None = None
     searched_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
     )

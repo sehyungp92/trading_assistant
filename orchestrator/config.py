@@ -6,6 +6,7 @@ import logging
 import os
 from json import JSONDecodeError
 from pathlib import Path
+from typing import ClassVar
 
 from pydantic import BaseModel
 
@@ -90,13 +91,17 @@ def _parse_bot_timezones(raw: str, bot_ids: list[str]) -> dict[str, BotConfig]:
             if ":" not in pair:
                 logger.warning("Ignoring malformed BOT_TIMEZONES entry: %r", pair)
                 continue
-            bot_id, tz = pair.split(":", 1)
-            bot_id = bot_id.strip()
-            tz = tz.strip()
+            parts = pair.split(":", 2)
+            bot_id = parts[0].strip()
+            tz = parts[1].strip() if len(parts) > 1 else ""
+            close_time = parts[2].strip() if len(parts) > 2 else ""
             if not bot_id or not tz:
                 continue
             try:
-                configs[bot_id] = BotConfig(bot_id=bot_id, timezone=tz)
+                kwargs: dict = {"bot_id": bot_id, "timezone": tz}
+                if close_time:
+                    kwargs["market_close_local"] = close_time
+                configs[bot_id] = BotConfig(**kwargs)
             except Exception as exc:
                 logger.warning("Invalid timezone config for %s: %s", bot_id, exc)
 
@@ -172,7 +177,7 @@ class AppConfig(BaseModel):
             Path(strategy_profiles_path) if strategy_profiles_path else None
         )
 
-        return cls(
+        config = cls(
             bot_ids=bot_ids,
             bot_configs=bot_configs,
             strategy_registry=strategy_registry,
@@ -223,3 +228,47 @@ class AppConfig(BaseModel):
             deployment_monitoring_enabled=env.get("DEPLOYMENT_MONITORING_ENABLED", "false").lower() in ("true", "1", "yes"),
             ab_testing_enabled=env.get("AB_TESTING_ENABLED", "false").lower() in ("true", "1", "yes"),
         )
+
+        config._validate_provider_secrets()
+        return config
+
+    # Providers that require an API key in the environment to function. Other
+    # providers (e.g. claude_max, codex_pro) authenticate via the runtime CLI.
+    # ClassVar so Pydantic doesn't wrap it as a private attribute / FieldInfo.
+    _PROVIDER_REQUIRED_SECRET: ClassVar[dict[str, str]] = {
+        "zai_coding_plan": "zai_api_key",
+        "openrouter": "openrouter_api_key",
+    }
+
+    def _validate_provider_secrets(self) -> None:
+        """Fail fast at startup if a selected provider lacks its required secret."""
+        selected: list[tuple[str, str]] = []
+        for label, name in (
+            ("AGENT_PROVIDER", self.agent_default_provider),
+            ("DAILY_AGENT_PROVIDER", self.daily_agent_provider),
+            ("WEEKLY_AGENT_PROVIDER", self.weekly_agent_provider),
+            ("WFO_AGENT_PROVIDER", self.wfo_agent_provider),
+            ("TRIAGE_AGENT_PROVIDER", self.triage_agent_provider),
+        ):
+            if name:
+                selected.append((label, name))
+
+        missing: list[str] = []
+        seen: set[str] = set()
+        for label, provider in selected:
+            attr = self._PROVIDER_REQUIRED_SECRET.get(provider)
+            if attr is None:
+                continue
+            if not getattr(self, attr, ""):
+                env_name = attr.upper()
+                if env_name in seen:
+                    continue
+                seen.add(env_name)
+                missing.append(
+                    f"{label}={provider!r} requires ${env_name} (currently empty)"
+                )
+        if missing:
+            raise ValueError(
+                "Provider secret validation failed:\n  - "
+                + "\n  - ".join(missing)
+            )

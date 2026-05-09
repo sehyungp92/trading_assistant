@@ -20,6 +20,7 @@ from schemas.parameter_search import (
     ParameterSearchReport,
     SearchRouting,
 )
+from skills.regime_parameter_analyzer import RegimeParameterAnalyzer
 from schemas.wfo_config import ParameterDef, ParameterSpace, RobustnessConfig
 from schemas.wfo_results import SimulationMetrics
 from skills.backtest_simulator import BacktestSimulator
@@ -37,6 +38,7 @@ _EXPERIMENT_ROBUSTNESS = 50.0
 _SAFETY_CRITICAL_IMPROVEMENT = 1.10
 _COST_SENSITIVITY_MULT = 1.5
 _MAX_CANDIDATES = 11
+_REGIME_SENSITIVITY_THRESHOLD = 0.3
 
 
 class ParameterSearcher:
@@ -118,10 +120,79 @@ class ParameterSearcher:
             candidates_passing=len(passing),
             best_value=best.value if best else None,
             best_composite=best.composite_score if best else 0.0,
+            best_robustness_score=best.robustness_score if best else 0.0,
+            best_cost_sensitivity_sharpe=best.cost_sensitivity_sharpe if best else 0.0,
             routing=routing,
             discard_reason=discard_reason,
             exploration_summary=summary,
         )
+
+    def search_with_regime_analysis(
+        self,
+        suggestion_id: str,
+        bot_id: str,
+        param: ParameterDefinition,
+        proposed_value: Any,
+        trades: list[TradeEvent],
+        missed: list[MissedOpportunityEvent],
+    ) -> ParameterSearchReport:
+        """Search with regime-conditional enrichment.
+
+        1. Run flat search() first (counterfactual simulation)
+        2. Run RegimeParameterAnalyzer (observational: actual params from trades)
+        3. If sensitivity > threshold, annotate exploration_summary
+        4. If flat DISCARD but regime analysis shows divergent optima → EXPERIMENT
+        """
+        report = self.search(
+            suggestion_id, bot_id, param, proposed_value, trades, missed,
+        )
+
+        # Run observational regime analysis — wrapped in try/except so a
+        # regime analyzer failure never discards the already-computed flat result.
+        try:
+            analyzer = RegimeParameterAnalyzer()
+            regime_result = analyzer.analyze(trades, param, bot_id)
+        except Exception:
+            logger.warning(
+                "Regime analysis failed for %s; returning flat search result",
+                suggestion_id, exc_info=True,
+            )
+            return report
+
+        report.regime_analysis = regime_result
+
+        if regime_result.regime_sensitivity <= _REGIME_SENSITIVITY_THRESHOLD:
+            return report
+
+        # Append regime info to exploration summary
+        regime_lines = [
+            f"\nRegime sensitivity: {regime_result.regime_sensitivity:.2f}",
+        ]
+        for rec in regime_result.recommendations:
+            regime_lines.append(f"  {rec}")
+        report.exploration_summary += "\n".join(regime_lines)
+
+        # Override: flat DISCARD + divergent regime optima → rescue to EXPERIMENT
+        if report.routing == SearchRouting.DISCARD and regime_result.regime_stats:
+            has_regime_opportunity = any(
+                rs.avg_pnl > 0
+                and rs.trade_count >= 15
+                and str(rs.optimal_value) != str(param.current_value)
+                for rs in regime_result.regime_stats
+            )
+            if has_regime_opportunity:
+                report.routing = SearchRouting.EXPERIMENT
+                report.discard_reason = ""
+                report.exploration_summary += (
+                    "\nRouting override: DISCARD→EXPERIMENT "
+                    "(regime-conditional improvement detected)"
+                )
+                logger.info(
+                    "Regime override DISCARD→EXPERIMENT for %s: sensitivity=%.2f",
+                    suggestion_id, regime_result.regime_sensitivity,
+                )
+
+        return report
 
     def _build_grid(
         self,
@@ -306,10 +377,13 @@ class ParameterSearcher:
         if best is None:
             return SearchRouting.DISCARD, "No candidates passed safety checks"
 
-        if baseline_composite > 0:
-            improvement = best.composite_score / baseline_composite
-        else:
-            improvement = best.composite_score if best.composite_score > 0 else 0.0
+        # Floor baseline at a small positive value so the ratio remains
+        # comparable to the positive-baseline branch. Without this, a
+        # non-positive baseline produced raw scores (~0.4) compared against
+        # ratio thresholds (~1.05), DISCARDing candidates that clearly
+        # improved on a losing baseline.
+        effective_baseline = max(baseline_composite, 0.01)
+        improvement = best.composite_score / effective_baseline
 
         threshold = (
             _SAFETY_CRITICAL_IMPROVEMENT if is_safety_critical

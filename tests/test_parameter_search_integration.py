@@ -129,7 +129,7 @@ class TestSearchApproveFlow:
         pipeline, findings_dir = _make_pipeline(tmp_path, with_searcher=True)
 
         # Mock searcher to return APPROVE with best_value=0.75 (different from proposed 0.7)
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",
@@ -156,7 +156,7 @@ class TestSearchApproveFlow:
         """When searcher returns DISCARD, no approval request created."""
         pipeline, findings_dir = _make_pipeline(tmp_path, with_searcher=True)
 
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",
@@ -174,7 +174,7 @@ class TestSearchApproveFlow:
         """DISCARD path records negative search signal."""
         pipeline, findings_dir = _make_pipeline(tmp_path, with_searcher=True)
 
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",
@@ -201,7 +201,7 @@ class TestSearchExperimentFlow:
             with_experiment_gen=True, with_experiment_tracker=True,
         )
 
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",
@@ -235,7 +235,7 @@ class TestSearchExperimentFlow:
         mock_exp2 = MagicMock(bot_id="bot1")
         pipeline._experiment_tracker.get_active_experiments.return_value = [mock_exp1, mock_exp2]
 
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",
@@ -288,7 +288,7 @@ class TestSearchReportPersistence:
             best_value=0.75,
             best_composite=0.85,
         )
-        pipeline._parameter_searcher.search.return_value = report
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = report
 
         await pipeline.process_new_suggestions(["sug1"])
         reports_path = findings_dir / "search_reports.jsonl"
@@ -302,7 +302,7 @@ class TestSearchReportPersistence:
         """System can find a better value than what Claude originally proposed."""
         pipeline, findings_dir = _make_pipeline(tmp_path, with_searcher=True)
 
-        pipeline._parameter_searcher.search.return_value = ParameterSearchReport(
+        pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",
             bot_id="bot1",
             param_name="signal_strength_min",

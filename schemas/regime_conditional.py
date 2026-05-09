@@ -4,7 +4,9 @@ Used by analysis/strategy_engine.py to produce regime-aware allocation suggestio
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class RegimeStrategyMetrics(BaseModel):
@@ -62,3 +64,32 @@ class MacroRegimeConditionalReport(BaseModel):
     config_effectiveness: list[dict] = []  # {regime, config_key, config_value, pnl, win_rate}
     transition_costs: list[dict] = []  # {from, to, date, pnl_5d_window}
     suggestions: list[dict] = []
+
+
+# ---------------------------------------------------------------------------
+# Regime-conditional parameter analysis (Phase 4)
+# ---------------------------------------------------------------------------
+
+class RegimeParameterStats(BaseModel):
+    """Performance stats for a parameter value within a single regime."""
+
+    regime: str
+    trade_count: int = 0
+    optimal_value: Any = None
+    win_rate: float = 0.0
+    avg_pnl: float = 0.0
+    profit_factor: float = 0.0
+
+
+class RegimeParameterAnalysis(BaseModel):
+    """Analysis of how a parameter's optimal value varies across regimes."""
+
+    param_name: str
+    bot_id: str = ""
+    strategy_id: str = ""
+    regimes_analyzed: list[str] = Field(default_factory=list)
+    optimal_per_regime: dict[str, Any] = Field(default_factory=dict)
+    current_value: Any = None
+    regime_sensitivity: float = 0.0  # 0-1, normalized variance of optimal values
+    regime_stats: list[RegimeParameterStats] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
