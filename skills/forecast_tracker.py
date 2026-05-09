@@ -99,9 +99,20 @@ class ForecastTracker:
         ece: float | None = None
         brier: float | None = None
         cal_sample_size = 0
+        accuracy_by_strategy: dict[str, float] = {}
         if prediction_verdicts:
             cal_buckets, ece, brier = self.compute_calibration(prediction_verdicts)
             cal_sample_size = sum(b.prediction_count for b in cal_buckets)
+            # Per-strategy accuracy from verdicts that carry a strategy_id
+            strat_totals: dict[str, list[bool]] = {}
+            for v in prediction_verdicts:
+                if v.status == "insufficient_data" or not v.strategy_id:
+                    continue
+                strat_totals.setdefault(v.strategy_id, []).append(v.correct)
+            accuracy_by_strategy = {
+                sid: round(sum(vals) / len(vals), 3)
+                for sid, vals in strat_totals.items()
+            }
 
         return ForecastMetaAnalysis(
             rolling_accuracy_4w=round(acc_4w, 3),
@@ -109,6 +120,7 @@ class ForecastTracker:
             trend=trend,
             accuracy_by_bot=accuracy_by_bot,
             accuracy_by_metric=accuracy_by_metric,
+            accuracy_by_strategy=accuracy_by_strategy,
             calibration_adjustment=round(calibration, 3),
             weeks_analyzed=weeks_analyzed,
             calibration_buckets=cal_buckets,

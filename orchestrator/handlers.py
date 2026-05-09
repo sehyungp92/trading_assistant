@@ -210,6 +210,9 @@ class Handlers:
                 "run_id": run_id, "stage": "quality_gate", "handler": "daily_analysis",
             })
 
+            # Strategy registry drift check — surface mismatches between YAML and live code.
+            self._check_strategy_registry_drift(run_id)
+
             # Run deterministic triage to identify significant events
             from analysis.daily_triage import DailyTriage
             from analysis.prompt_assembler import DailyPromptAssembler
@@ -2172,6 +2175,7 @@ class Handlers:
                 prediction_accuracy=prediction_accuracy,
                 recalibrations=recalibrations,
                 current_macro_regime=current_macro_regime,
+                strategy_registry=self._strategy_registry,
             )
             validation = validator.validate(parsed)
 
@@ -2984,9 +2988,13 @@ class Handlers:
                 affected_parameters=[target_param] if target_param else [],
             )
 
+            # Preserve strategy attribution that StrategySuggestion already carries.
+            _raw_sid = getattr(suggestion, "strategy_id", None)
+            strategy_id_val = _raw_sid if isinstance(_raw_sid, str) and _raw_sid else None
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
+                strategy_id=strategy_id_val,
                 title=title,
                 tier=tier_val,
                 category=category_str,
@@ -3153,9 +3161,14 @@ class Handlers:
                 affected_parameters=[agent_target_param] if agent_target_param else [],
             )
 
+            _raw_agent_sid = getattr(suggestion, "strategy_id", None)
+            agent_strategy_id = (
+                _raw_agent_sid if isinstance(_raw_agent_sid, str) and _raw_agent_sid else None
+            )
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
+                strategy_id=agent_strategy_id,
                 title=title,
                 tier=tier,
                 category=category,
@@ -3255,6 +3268,33 @@ class Handlers:
             )
         except Exception:
             logger.exception("Autonomous pipeline failed — analysis unaffected")
+
+    def _check_strategy_registry_drift(self, run_id: str) -> None:
+        """Compare data/strategy_profiles.yaml against live reference dirs.
+
+        Records the diff to memory/findings/strategy_registry_drift.jsonl so
+        ContextBuilder can surface it in subsequent prompts. Drift never blocks
+        the run — it's purely informational.
+        """
+        try:
+            from orchestrator.strategy_registry_loader import load_strategy_registry
+            from skills.strategy_registry_drift import check_drift, record_drift
+
+            registry = load_strategy_registry()
+            drift = check_drift(registry)
+            record_drift(drift, self._memory_dir / "findings")
+            if drift.has_drift:
+                logger.warning(
+                    "Strategy registry drift (run %s): %s", run_id, drift.summary(),
+                )
+                self._event_stream.broadcast("strategy_registry_drift", {
+                    "run_id": run_id,
+                    "registered_but_missing": drift.registered_but_missing,
+                    "present_but_unregistered": drift.present_but_unregistered,
+                    "empty_shells": drift.empty_shells,
+                })
+        except Exception:
+            logger.exception("Strategy registry drift check failed (run %s)", run_id)
 
     def _record_run(
         self, run_id: str, agent_type: str, status: str,

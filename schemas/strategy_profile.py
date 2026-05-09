@@ -137,6 +137,10 @@ class StrategyRegistry(BaseModel):
     portfolio: PortfolioConfig = PortfolioConfig()
     archetype_expectations: dict[str, ArchetypeExpectation] = {}
 
+    def is_active(self, strategy_id: str) -> bool:
+        """Return True if strategy_id is currently registered (i.e. live)."""
+        return strategy_id in self.strategies
+
     def strategies_for_bot(self, bot_id: str) -> dict[str, StrategyProfile]:
         """Return all strategies deployed on a given bot_id."""
         return {

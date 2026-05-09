@@ -1356,6 +1356,23 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         except Exception:
             logger.warning("Playbook retirement failed", exc_info=True)
 
+        # Sweep retired-strategy records into archive/<date>.jsonl so prompt
+        # context stays clean as strategies are added/removed in the references.
+        try:
+            from skills.archive_retired_strategies import archive_retired
+            from orchestrator.strategy_registry_loader import load_strategy_registry
+            registry = load_strategy_registry()
+            archive_summary = archive_retired(
+                db_path / "memory" / "findings", registry,
+            )
+            if archive_summary:
+                logger.info(
+                    "Archived retired-strategy records: %s",
+                    ", ".join(f"{name}={n}" for name, n in archive_summary.items()),
+                )
+        except Exception:
+            logger.warning("Retired-strategy archive sweep failed", exc_info=True)
+
     # Experiment check function (for scheduler)
     async def _check_experiments() -> None:
         """Check active experiments for auto-conclusion."""

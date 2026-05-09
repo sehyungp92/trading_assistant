@@ -58,6 +58,7 @@ class ForecastMetaAnalysis(BaseModel):
     trend: AccuracyTrend = AccuracyTrend.STABLE
     accuracy_by_bot: dict[str, float] = {}
     accuracy_by_metric: dict[str, float] = {}  # pnl, win_rate, drawdown, sharpe → accuracy
+    accuracy_by_strategy: dict[str, float] = {}  # strategy_id → accuracy (when sufficient data)
     calibration_adjustment: float = 0.0  # -1 to +1; negative = over-confident
     weeks_analyzed: int = 0
     calibration_buckets: list[CalibrationBucket] = Field(default_factory=list)

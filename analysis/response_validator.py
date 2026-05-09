@@ -157,6 +157,23 @@ class ResponseValidator:
                     ))
                     continue
 
+            # 1c-bis. Inactive strategy_id check — block suggestions targeting
+            # a strategy that is no longer in the registry. Suggestions for
+            # retired strategies waste implementation cycles and pollute
+            # learning signal for whatever replaced them.
+            if suggestion.strategy_id and self._strategy_registry is not None:
+                is_active = getattr(self._strategy_registry, "is_active", None)
+                if callable(is_active) and not is_active(suggestion.strategy_id):
+                    blocked.append(BlockedSuggestion(
+                        suggestion=suggestion,
+                        reason=(
+                            f"Suggestion targets retired strategy "
+                            f"'{suggestion.strategy_id}' — strategy is not in the "
+                            f"current registry"
+                        ),
+                    ))
+                    continue
+
             # 1d. Crypto safety gates
             if self._strategy_registry and self._is_crypto_bot(suggestion.bot_id):
                 crypto_block = self._check_crypto_safety_gates(suggestion)
@@ -167,8 +184,12 @@ class ResponseValidator:
                     ))
                     continue
 
-            # 2. Category track record check
-            score = self._scorecard.get_score(suggestion.bot_id, suggestion.category)
+            # 2. Category track record check — prefer per-strategy row when
+            # we have one, fall back to bot-wide aggregate (handled by
+            # CategoryScorecard.get_score itself).
+            score = self._scorecard.get_score(
+                suggestion.bot_id, suggestion.category, suggestion.strategy_id,
+            )
             if score and score.sample_size >= 5 and score.win_rate < 0.3:
                 blocked.append(BlockedSuggestion(
                     suggestion=suggestion,

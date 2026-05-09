@@ -258,13 +258,17 @@ At the END of your analysis, emit a structured data block.
 CRITICAL: This block is machine-parsed by the learning system. If you omit it,
 your suggestions and predictions are LOST and cannot improve future performance.
 Always emit it, even if arrays are empty.
+For `strategy_id`: use the exact strategy_id from the strategy registry (e.g.
+"TPC", "ATRSS", "AKC_HELIX") when the suggestion or prediction is specific to
+one strategy; set to null only when the signal genuinely applies bot-wide
+across all that bot's strategies.
 <!-- STRUCTURED_OUTPUT
 {{
   "predictions": [
-    {{"bot_id": "...", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}}
+    {{"bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}}
   ],
   "suggestions": [
-    {{"suggestion_id": "#abc123", "bot_id": "...", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
+    {{"suggestion_id": "#abc123", "bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
   ],
   "structural_proposals": [
     {{"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high", "acceptance_criteria": [{{"metric": "...", "direction": "improve|not_degrade", "minimum_change": 0.0, "observation_window_days": 14, "minimum_trade_count": 20}}]}}

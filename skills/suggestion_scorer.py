@@ -74,10 +74,16 @@ class SuggestionScorer:
         return 1.0
 
     def compute_scorecard(self) -> CategoryScorecard:
-        """Compute per-(bot_id, category) win rates from outcomes and suggestions.
+        """Compute (bot_id, [strategy_id], category) win rates from outcomes.
 
-        Applies category_overrides.jsonl confidence multipliers when present.
-        Weights outcomes by target metric improvement signal.
+        Emits two row variants per data point:
+          - bot-wide aggregate (strategy_id=None) — preserves existing callers
+          - per-strategy stratified (bot_id, strategy_id, category) — for
+            records that carry a non-null strategy_id
+
+        Applies category_overrides.jsonl confidence multipliers when present
+        (overrides remain bot-aggregate-only). Weights outcomes by target
+        metric improvement signal and applies temporal decay.
         """
         suggestions = self._load_suggestions()
         outcomes = self._load_outcomes()
@@ -86,22 +92,23 @@ class SuggestionScorer:
         if not outcomes:
             return CategoryScorecard()
 
-        # Build suggestion_id → (bot_id, category) mapping
-        id_to_info: dict[str, tuple[str, str]] = {}
+        # Build suggestion_id → (bot_id, strategy_id_or_None, category) mapping
+        id_to_info: dict[str, tuple[str, str | None, str]] = {}
         for s in suggestions:
             sid = s.get("suggestion_id", "")
             bot_id = s.get("bot_id", "")
+            strategy_id = s.get("strategy_id") or None
             category = s.get("category", "")
             if not category:
                 tier = s.get("tier", "")
                 category = _TIER_TO_CATEGORY.get(tier, tier)
             if sid:
-                id_to_info[sid] = (bot_id, category)
+                id_to_info[sid] = (bot_id, strategy_id, category)
 
-        # Group outcomes by (bot_id, category), filtering by measurement quality
-        # and conclusiveness, then deduplicating by suggestion_id within each
-        # group (last-write-wins) to prevent double-counting.
-        raw_groups: dict[tuple[str, str], dict[str, dict]] = defaultdict(dict)
+        # Group outcomes by (bot_id, None, category) AND (bot_id, strategy_id, category).
+        # Each outcome contributes to both the bot-aggregate row and (if it has a
+        # strategy_id) the per-strategy row — same outcome, two views.
+        raw_groups: dict[tuple[str, str | None, str], dict[str, dict]] = defaultdict(dict)
         for outcome in outcomes:
             quality = outcome.get("measurement_quality", "high")  # legacy defaults to high
             if quality not in _HIGH_QUALITY:
@@ -110,14 +117,20 @@ class SuggestionScorer:
                 continue
             sid = outcome.get("suggestion_id", "")
             info = id_to_info.get(sid)
-            if info:
-                raw_groups[info][sid] = outcome  # last-write-wins per suggestion_id
-        groups: dict[tuple[str, str], list[dict]] = {
+            if not info:
+                continue
+            bot_id, strategy_id, category = info
+            # Bot-wide aggregate (always)
+            raw_groups[(bot_id, None, category)][sid] = outcome
+            # Per-strategy row (only if attributable)
+            if strategy_id:
+                raw_groups[(bot_id, strategy_id, category)][sid] = outcome
+        groups: dict[tuple[str, str | None, str], list[dict]] = {
             k: list(v.values()) for k, v in raw_groups.items()
         }
 
         scores: list[CategoryScore] = []
-        for (bot_id, category), group_outcomes in groups.items():
+        for (bot_id, strategy_id, category), group_outcomes in groups.items():
             # Apply temporal decay × target metric weight
             weights = [
                 self._compute_age_weight(o) * self._target_metric_weight(o)
@@ -140,9 +153,12 @@ class SuggestionScorer:
                 win_rate = 0.0
                 avg_pnl = 0.0
 
-            # confidence_multiplier: Bayesian posterior mean with Beta(1,1) prior
-            # Uses effective_n (sum of weights) instead of raw count for decay awareness
-            override = category_overrides.get((bot_id, category))
+            # confidence_multiplier: Bayesian posterior mean with Beta(1,1) prior.
+            # Overrides are bot-aggregate-only — only apply to strategy_id=None rows.
+            override = (
+                category_overrides.get((bot_id, category))
+                if strategy_id is None else None
+            )
             if override is not None:
                 multiplier = override
             elif total_weight > 0:
@@ -153,6 +169,7 @@ class SuggestionScorer:
 
             scores.append(CategoryScore(
                 bot_id=bot_id,
+                strategy_id=strategy_id,
                 category=category,
                 win_rate=round(win_rate, 3),
                 avg_pnl_delta=round(avg_pnl, 4),

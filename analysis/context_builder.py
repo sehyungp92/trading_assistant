@@ -42,6 +42,29 @@ def _filter_by_bot(entries: list[dict], bot_id: str) -> list[dict]:
     return result
 
 
+def _filter_inactive_strategies(
+    entries: list[dict], registry: object | None,
+) -> list[dict]:
+    """Drop entries pinned to a retired strategy_id.
+
+    Records with no `strategy_id` (legacy or genuinely bot-wide) and records
+    whose `strategy_id` is still in the registry are kept. Records pinned to
+    a strategy_id that is no longer registered are silently dropped — this
+    prevents retired strategies from polluting prompt context.
+    """
+    if registry is None:
+        return entries
+    is_active = getattr(registry, "is_active", None)
+    if not callable(is_active):
+        return entries
+    result: list[dict] = []
+    for entry in entries:
+        sid = entry.get("strategy_id")
+        if not sid or is_active(sid):
+            result.append(entry)
+    return result
+
+
 def _apply_temporal_window(
     entries: list[dict],
     max_age_days: int = _FINDINGS_MAX_AGE_DAYS,
@@ -104,10 +127,27 @@ class ContextBuilder:
         self._memory_dir = memory_dir
         self._curated_dir = curated_dir
         self._run_index = run_index
+        self._strategy_registry = None  # lazy-loaded on first use
 
     @property
     def memory_dir(self) -> Path:
         return self._memory_dir
+
+    def _get_strategy_registry(self):
+        """Lazy-load the StrategyRegistry from data/strategy_profiles.yaml.
+
+        Returns an empty registry on any error so loaders never break the
+        analysis pipeline.
+        """
+        if self._strategy_registry is not None:
+            return self._strategy_registry
+        try:
+            from orchestrator.strategy_registry_loader import load_strategy_registry
+            self._strategy_registry = load_strategy_registry()
+        except Exception:
+            from schemas.strategy_profile import StrategyRegistry
+            self._strategy_registry = StrategyRegistry()
+        return self._strategy_registry
 
     def build_system_prompt(self) -> str:
         """Load policy files from memory/policies/v1/ into a system prompt."""
@@ -140,6 +180,7 @@ class ContextBuilder:
 
         Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
         If bot_id is provided, only returns entries relevant to that bot.
+        Drops entries pinned to retired strategies.
         """
         path = self._memory_dir / "findings" / "failure-log.jsonl"
         if not path.exists():
@@ -149,10 +190,14 @@ class ContextBuilder:
             if line.strip():
                 entries.append(json.loads(line))
         filtered = _filter_by_bot(entries, bot_id) if bot_id else entries
+        filtered = _filter_inactive_strategies(filtered, self._get_strategy_registry())
         return _apply_temporal_window(filtered)
 
     def load_rejected_suggestions(self) -> list[dict]:
-        """Load rejected suggestions from findings/suggestions.jsonl."""
+        """Load rejected suggestions from findings/suggestions.jsonl.
+
+        Drops entries pinned to retired strategies.
+        """
         path = self._memory_dir / "findings" / "suggestions.jsonl"
         if not path.exists():
             return []
@@ -162,6 +207,7 @@ class ContextBuilder:
                 rec = json.loads(line)
                 if rec.get("status") == "rejected":
                     rejected.append(rec)
+        rejected = _filter_inactive_strategies(rejected, self._get_strategy_registry())
         return _apply_temporal_window(rejected)
 
     _QUALITY_RANK = {"high": 3, "medium": 2, "low": 1, "insufficient": 0}
@@ -212,6 +258,9 @@ class ContextBuilder:
                 reliable.append(entry)
             else:
                 low_quality.append(entry)
+        registry = self._get_strategy_registry()
+        reliable = _filter_inactive_strategies(reliable, registry)
+        low_quality = _filter_inactive_strategies(low_quality, registry)
         return _apply_temporal_window(reliable), _apply_temporal_window(low_quality)
 
     def load_allocation_history(self) -> list[dict]:
@@ -628,8 +677,8 @@ class ContextBuilder:
     def load_active_suggestions(self) -> list[dict]:
         """Load non-rejected suggestions from findings/suggestions.jsonl.
 
-        Returns suggestions with unresolved status,
-        applying temporal window (90d, 30-entry cap).
+        Returns suggestions with unresolved status, applying temporal window
+        (90d, 30-entry cap) and dropping entries pinned to retired strategies.
         """
         path = self._memory_dir / "findings" / "suggestions.jsonl"
         if not path.exists():
@@ -647,6 +696,7 @@ class ContextBuilder:
                 status = rec.get("status", "")
                 if status in active_statuses:
                     active.append(rec)
+        active = _filter_inactive_strategies(active, self._get_strategy_registry())
         return _apply_temporal_window(active, max_entries=30)
 
     def load_recent_proposal_outcomes(
@@ -850,7 +900,8 @@ class ContextBuilder:
         """Load causal outcome reasonings from findings/outcome_reasonings.jsonl.
 
         Returns recent reasonings with lessons learned, mechanisms, and
-        transferability assessments for injection into prompts.
+        transferability assessments for injection into prompts. Drops entries
+        pinned to retired strategies.
         """
         path = self._memory_dir / "findings" / "outcome_reasonings.jsonl"
         if not path.exists():
@@ -862,10 +913,13 @@ class ContextBuilder:
                     reasonings.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+        reasonings = _filter_inactive_strategies(reasonings, self._get_strategy_registry())
         return _apply_temporal_window(reasonings, max_entries=20)
 
     def load_discoveries(self) -> list[dict]:
-        """Load discoveries from findings/discoveries.jsonl."""
+        """Load discoveries from findings/discoveries.jsonl. Drops entries
+        pinned to retired strategies.
+        """
         path = self._memory_dir / "findings" / "discoveries.jsonl"
         if not path.exists():
             return []
@@ -876,6 +930,7 @@ class ContextBuilder:
                     discoveries.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+        discoveries = _filter_inactive_strategies(discoveries, self._get_strategy_registry())
         return _apply_temporal_window(discoveries, max_entries=20)
 
     def load_active_experiments(self) -> list[dict]:
@@ -1324,24 +1379,41 @@ class ContextBuilder:
             signals.append(f"Calibration: ECE={ece:.3f}, {direction}")
 
         # 3. Category strengths/weaknesses from scorecard
+        # Per-strategy rows (strategy_id non-null) carry tighter signal than the
+        # bot-wide aggregate — surface them in their own labels so Claude can
+        # cite specific strategy track records, not just bot averages.
         scores = category_scorecard.get("scores", [])
         if scores:
             strong = []
             weak = []
+            strong_per_strat = []
+            weak_per_strat = []
             for s in scores:
                 wr = s.get("win_rate", 0)
                 n = s.get("sample_size", 0)
                 if n < 3:
                     continue
-                label = f"{s.get('bot_id', '?')}/{s.get('category', '?')} ({wr:.0%}, n={n})"
-                if wr >= 0.6:
-                    strong.append(label)
-                elif wr < 0.4:
-                    weak.append(label)
+                strat_id = s.get("strategy_id")
+                if strat_id:
+                    label = f"{s.get('bot_id', '?')}/{strat_id}/{s.get('category', '?')} ({wr:.0%}, n={n})"
+                    if wr >= 0.6:
+                        strong_per_strat.append(label)
+                    elif wr < 0.4:
+                        weak_per_strat.append(label)
+                else:
+                    label = f"{s.get('bot_id', '?')}/{s.get('category', '?')} ({wr:.0%}, n={n})"
+                    if wr >= 0.6:
+                        strong.append(label)
+                    elif wr < 0.4:
+                        weak.append(label)
             if strong:
-                signals.append("Strong categories: " + ", ".join(strong[:5]))
+                signals.append("Strong categories (bot-wide): " + ", ".join(strong[:5]))
             if weak:
                 signals.append("Weak categories (avoid or justify): " + ", ".join(weak[:5]))
+            if strong_per_strat:
+                signals.append("Strong per-strategy: " + ", ".join(strong_per_strat[:5]))
+            if weak_per_strat:
+                signals.append("Weak per-strategy (avoid or justify): " + ", ".join(weak_per_strat[:5]))
 
         # 4. Recurring corrections (top 3 by count)
         if correction_patterns:

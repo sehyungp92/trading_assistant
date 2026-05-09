@@ -27,6 +27,7 @@ class SuggestionRecord(BaseModel):
 
     suggestion_id: str
     bot_id: str
+    strategy_id: Optional[str] = None  # specific strategy; None = bot-wide
     title: str
     tier: str  # parameter | filter | strategy_variant | hypothesis
     category: str = ""  # original category (exit_timing, filter_threshold, etc.)
@@ -59,6 +60,7 @@ class SuggestionOutcome(BaseModel):
     """Measured impact of an implemented suggestion."""
 
     suggestion_id: str
+    strategy_id: Optional[str] = None  # carried through from the SuggestionRecord
     implemented_date: str  # YYYY-MM-DD
     pnl_delta_7d: float = 0.0
     pnl_delta_30d: float = 0.0

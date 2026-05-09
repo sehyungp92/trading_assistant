@@ -242,22 +242,29 @@ class TestFullYAMLFile:
         return load_strategy_registry(_REAL_YAML)
 
     def test_loads_all_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies) == 20
+        # Reference monorepo deletions (breakout, brs, keltner, helix_v40,
+        # us_orb) and additions (tpc, nq_regime) reduced the count from
+        # 20 to 16 in the optimisation commit.
+        assert len(full_registry.strategies) == 16
 
-    def test_swing_bot_has_6_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies_for_bot("swing_multi_01")) == 6
+    def test_swing_bot_has_3_strategies(self, full_registry: StrategyRegistry) -> None:
+        # ATRSS, AKC_HELIX, TPC. Earlier 6-strategy roster lost
+        # SWING_BREAKOUT_V3, S5_PB, S5_DUAL, BRS_R9 and gained TPC.
+        assert len(full_registry.strategies_for_bot("swing_multi_01")) == 3
 
     def test_momentum_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("momentum_nq_01")) == 4
 
-    def test_stock_bot_has_3_strategies(self, full_registry: StrategyRegistry) -> None:
-        assert len(full_registry.strategies_for_bot("stock_trader")) == 3
+    def test_stock_bot_has_2_strategies(self, full_registry: StrategyRegistry) -> None:
+        # IARIC_v1, ALCB_v1. US_ORB_v1 was retired upstream.
+        assert len(full_registry.strategies_for_bot("stock_trader")) == 2
 
     def test_k_stock_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("k_stock_trader")) == 4
 
-    def test_brs_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
-        assert full_registry.archetype_for_strategy("BRS_R9") == StrategyArchetype.BEAR_REGIME_SWING
+    def test_tpc_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
+        # TPC replaced the deleted breakout/brs/S5 swing entries.
+        assert full_registry.archetype_for_strategy("TPC") == StrategyArchetype.PULLBACK
 
     def test_downturn_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
         assert full_registry.archetype_for_strategy("DownturnDominator_v1") == StrategyArchetype.MULTI_ENGINE_BEAR
@@ -271,33 +278,40 @@ class TestFullYAMLFile:
             assert exp is not None, f"Missing archetype_expectations for {arch}"
 
     def test_profile_metadata_fields(self, full_registry: StrategyRegistry) -> None:
-        brs = full_registry.strategies["BRS_R9"]
-        assert len(brs.entry_types) == 6
-        assert "S1_PULLBACK" in brs.entry_types
-        assert brs.regime_model == "5_state_bear"
-        assert len(brs.analysis_focus) == 4
+        # TPC is the new pullback strategy that took over from the deleted
+        # breakout/S5 entries; verify its registered entry_types and exit
+        # profile loaded cleanly.
+        tpc = full_registry.strategies["TPC"]
+        assert len(tpc.entry_types) >= 5
+        assert "TYPE_A" in tpc.entry_types
+        assert tpc.exit_profile is not None
+        assert any(t.tier_name == "T1" for t in tpc.exit_profile.tiers)
 
         downturn = full_registry.strategies["DownturnDominator_v1"]
         assert downturn.sub_engines == ["REVERSAL", "BREAKDOWN", "FADE"]
         assert downturn.regime_model == "composite_with_vol_state"
         assert len(downturn.key_metadata_fields) == 6
 
-    def test_brs_coordination_signal(self, full_registry: StrategyRegistry) -> None:
-        brs_signals = [
-            s for s in full_registry.coordination.signals
-            if s.trigger.get("strategy") == "BRS_R9"
-        ]
-        assert len(brs_signals) == 1
-        assert brs_signals[0].target.get("action") == "REDUCE_SIZE"
-        assert brs_signals[0].condition == "SAME_SYMBOL_OPPOSITE_DIRECTION"
-        assert brs_signals[0].params.get("size_mult") == 0.5
+    def test_no_signals_reference_retired_strategies(
+        self, full_registry: StrategyRegistry
+    ) -> None:
+        """Coordination signals must not reference strategies that have been
+        deleted upstream (BRS_R9, AKC_Helix_v40, US_ORB_v1, etc.)."""
+        active_ids = set(full_registry.strategies)
+        for sig in full_registry.coordination.signals:
+            for side in (sig.trigger, sig.target):
+                sid = side.get("strategy")
+                assert not sid or sid in active_ids, (
+                    f"signal references retired strategy {sid!r}"
+                )
 
-    def test_downturn_cooldown_pair(self, full_registry: StrategyRegistry) -> None:
-        downturn_pairs = [
-            p for p in full_registry.coordination.cooldown_pairs
-            if "DownturnDominator_v1" in p.strategies
-        ]
-        assert len(downturn_pairs) == 1
-        assert downturn_pairs[0].minutes == 60
-        assert downturn_pairs[0].session_only is True
-        assert downturn_pairs[0].session_window == ["09:45", "16:00"]
+    def test_no_cooldown_pairs_reference_retired_strategies(
+        self, full_registry: StrategyRegistry
+    ) -> None:
+        """Cooldown pairs must only contain currently-registered strategies."""
+        active_ids = set(full_registry.strategies)
+        for pair in full_registry.coordination.cooldown_pairs:
+            for sid in pair.strategies:
+                assert sid in active_ids, (
+                    f"cooldown_pair references retired strategy {sid!r}"
+                )

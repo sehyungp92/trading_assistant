@@ -12,6 +12,7 @@ class PredictionRecord(BaseModel):
     """A single recorded prediction from Claude's structured output."""
 
     bot_id: str
+    strategy_id: Optional[str] = None  # specific strategy; None = bot-wide
     metric: str
     direction: str
     confidence: float
@@ -31,6 +32,7 @@ class PredictionVerdict(BaseModel):
     """Verdict on a single prediction after evaluation."""
 
     bot_id: str
+    strategy_id: Optional[str] = None
     metric: str
     predicted_direction: str
     actual_direction: str = ""
@@ -50,4 +52,5 @@ class PredictionEvaluation(BaseModel):
     accuracy: float = 0.0
     confidence_weighted_accuracy: float = 0.0
     accuracy_by_metric: dict[str, float] = {}
+    accuracy_by_strategy: dict[str, float] = {}  # strategy_id → accuracy
     magnitude_weighted_accuracy: float = 0.0

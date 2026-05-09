@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +13,9 @@ class TransferProposal(BaseModel):
 
     pattern_id: str
     source_bot: str
+    source_strategy_id: Optional[str] = None  # specific source strategy; None = bot-wide pattern
     target_bot: str
+    target_strategy_id: Optional[str] = None  # specific target strategy; None = bot-wide application
     pattern_title: str
     category: str = ""
     compatibility_score: float = 0.0  # 0–1
@@ -25,7 +27,9 @@ class TransferOutcome(BaseModel):
 
     pattern_id: str
     source_bot: str
+    source_strategy_id: Optional[str] = None
     target_bot: str
+    target_strategy_id: Optional[str] = None
     transferred_at: str = ""
     measured_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d")

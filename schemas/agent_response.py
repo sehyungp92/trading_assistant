@@ -44,6 +44,7 @@ class AgentPrediction(BaseModel):
     """A specific, measurable prediction about a bot's future performance."""
 
     bot_id: str
+    strategy_id: Optional[str] = None  # specific strategy this prediction targets; None = bot-wide
     metric: Literal["pnl", "win_rate", "drawdown", "sharpe"]
     direction: Literal["improve", "decline", "stable"]
     confidence: float = Field(ge=0.0, le=1.0)
@@ -56,6 +57,7 @@ class AgentSuggestion(BaseModel):
 
     suggestion_id: str = ""
     bot_id: str
+    strategy_id: Optional[str] = None  # specific strategy this suggestion targets; None = bot-wide
     category: str = ""  # exit_timing, filter_threshold, stop_loss, signal, structural, position_sizing, regime_gate
     title: str
     expected_impact: str = ""

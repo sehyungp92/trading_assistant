@@ -163,24 +163,25 @@ class TestStrategyProfileMacroSensitivity:
         data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         strategies = data.get("strategies", {})
 
-        # US strategies should have macro regime sensitivity
-        for sid in ["IARIC_v1", "ALCB_v1", "US_ORB_v1", "DownturnDominator_v1", "VdubusNQ_v4", "ATRSS", "BRS_R9"]:
+        # US strategies should have macro regime sensitivity. Strategies
+        # deleted upstream (US_ORB_v1, BRS_R9) are tolerated via the
+        # `if sid in strategies` guard.
+        for sid in [
+            "IARIC_v1", "ALCB_v1", "US_ORB_v1", "DownturnDominator_v1",
+            "VdubusNQ_v4", "ATRSS", "BRS_R9", "TPC", "NQ_REGIME",
+        ]:
             if sid in strategies:
                 sens = strategies[sid].get("macro_regime_sensitivity", {})
                 assert len(sens) > 0, f"{sid} missing macro_regime_sensitivity"
 
-        # DownturnDominator_v1 should be disabled in G/R
+        # DownturnDominator_v1 is the canonical bear-regime invariant: disabled
+        # in G/R, full in S. (BRS_R9 used to anchor the same check but was
+        # deleted from the references in the optimisation commit.)
         downturn = strategies.get("DownturnDominator_v1", {})
         sens = downturn.get("macro_regime_sensitivity", {})
         assert sens.get("G") == "disabled"
         assert sens.get("R") == "disabled"
         assert sens.get("S") == "full"
-
-        # BRS_R9 should be full in S/D (bear strategy)
-        brs = strategies.get("BRS_R9", {})
-        brs_sens = brs.get("macro_regime_sensitivity", {})
-        assert brs_sens.get("S") == "full"
-        assert brs_sens.get("D") == "full"
 
 
 # ---------------------------------------------------------------------------

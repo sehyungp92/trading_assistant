@@ -37,89 +37,47 @@ strategies:
       base_risk_pct: 0.018
     macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
 
-  SWING_BREAKOUT_V3:
-    display_name: "Swing Breakout v3"
-    bot_id: swing_multi_01
-    family: swing
-    archetype: breakout
-    asset_class: mixed
-    symbols: [QQQ, GLD]
-    preferred_regimes: [compression]
-    adverse_regimes: [trending_up, trending_down]
-    holding_period: multi_day
-    risk:
-      unit_risk_dollars: 200.0
-      daily_stop_R: 2.0
-      max_heat_R: 1.50
-      tp_ratio: 2.0
-    allocation:
-      base_risk_pct: 0.018
-    macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
-
-  S5_PB:
-    display_name: "S5 Pullback"
+  TPC:
+    display_name: "TPC Pullback Combo"
     bot_id: swing_multi_01
     family: swing
     archetype: pullback
     asset_class: mixed
     symbols: [QQQ, GLD]
     preferred_regimes: [trending_up, trending_down]
-    adverse_regimes: [volatile, ranging]
+    adverse_regimes: [ranging, volatile]
     holding_period: multi_day
     risk:
       unit_risk_dollars: 200.0
       daily_stop_R: 2.0
       max_heat_R: 1.50
-      tp_ratio: 2.0
+      tp_ratio: 1.5
     allocation:
       base_risk_pct: 0.018
     macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
-
-  S5_DUAL:
-    display_name: "S5 Dual Pullback"
-    bot_id: swing_multi_01
-    family: swing
-    archetype: pullback
-    asset_class: mixed
-    symbols: [QQQ, GLD]
-    preferred_regimes: [trending_up, trending_down]
-    adverse_regimes: [volatile, ranging]
-    holding_period: multi_day
-    risk:
-      unit_risk_dollars: 200.0
-      daily_stop_R: 2.0
-      max_heat_R: 1.50
-      tp_ratio: 2.0
-    allocation:
-      base_risk_pct: 0.018
-    macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
-
-  BRS_R9:
-    display_name: "Bear Regime Swing R9"
-    bot_id: swing_multi_01
-    family: swing
-    archetype: bear_regime_swing
-    asset_class: mixed
-    symbols: [QQQ, GLD]
-    preferred_regimes: [trending_down, volatile]
-    adverse_regimes: [trending_up, ranging]
-    holding_period: multi_day
-    risk:
-      unit_risk_dollars: 200.0
-      daily_stop_R: 2.0
-      max_heat_R: 1.50
-      tp_ratio: 2.0
-    allocation:
-      base_risk_pct: 0.018
-    macro_regime_sensitivity: {G: reduced, R: reduced, S: full, D: full}
-    entry_types: [S1_PULLBACK, S2_BREAKDOWN, S3_IMPULSE, L1_GLD_LONG, LH_REJECTION, BD_CONTINUATION]
-    regime_model: "5_state_bear"
-    key_metadata_fields: [adx_entry, score_entry, regime_entry, quality_score, touch_distance_atr, di_agrees]
+    entry_types: [TYPE_A, TYPE_B, TYPE_C, PB30, EMA20_VALUE_TOUCH, SECOND_ENTRY]
+    key_metadata_fields: [score_grade, type_label, fib_zone, pullback_bars, vwap_confirmation, structure_confirmation]
+    exit_profile:
+      tiers:
+        - tier_name: T1
+          tier_type: take_profit
+          r_target: 1.5
+          partial_pct: 0.45
+        - tier_name: T2
+          tier_type: take_profit
+          r_target: 2.0
+          partial_pct: 0.275
+      has_chandelier: false
+      regime_multipliers:
+        trending_up: 1.0
+        trending_down: 1.0
+        volatile: 0.85
     analysis_focus:
-      - regime_identification_accuracy
-      - entry_type_performance_comparison
-      - bear_conviction_sizing
-      - addon_leg_effectiveness
+      - type_a_vs_b_vs_c_performance
+      - pb30_vs_1h_pullback_efficacy
+      - score_grade_calibration
+      - second_entry_attribution
+      - mfe_giveback_protection_value
 
   IARIC_v1:
     display_name: "IARIC Pullback Mean-Reversion"
@@ -147,25 +105,6 @@ strategies:
       - pullback_depth_vs_conviction
       - tier_selectivity_impact
 
-  US_ORB_v1:
-    display_name: "US Opening Range Breakout v1"
-    bot_id: stock_trader
-    family: stock
-    archetype: opening_range_breakout
-    asset_class: equity
-    symbols: []
-    preferred_regimes: [volatile]
-    adverse_regimes: [ranging]
-    holding_period: intraday
-    risk:
-      unit_risk_dollars: 150.0
-      daily_stop_R: 2.0
-      max_heat_R: 1.00
-      tp_ratio: 1.5
-    allocation:
-      base_risk_pct: 0.015
-    macro_regime_sensitivity: {G: full, R: full, S: disabled, D: disabled}
-
   ALCB_v1:
     display_name: "ALCB Adaptive Breakout"
     bot_id: stock_trader
@@ -192,36 +131,48 @@ strategies:
       - breakout_type_comparison
       - exit_cascade_timing
 
-  AKC_Helix_v40:
-    display_name: "AKC Helix Multi-TF Momentum v40"
+  NQ_REGIME:
+    display_name: "NQ Regime Engine"
     bot_id: momentum_nq_01
     family: momentum
-    archetype: multi_tf_momentum
+    archetype: intraday_momentum
     asset_class: futures
-    symbols: [NQ]
+    symbols: [MNQ, NQ]
     preferred_regimes: [trending_up, trending_down, volatile]
     adverse_regimes: [ranging]
     holding_period: intraday
     risk:
       unit_risk_dollars: 300.0
       daily_stop_R: 3.0
-      max_heat_R: 2.00
+      max_heat_R: 1.50
       tp_ratio: 2.0
     allocation:
-      base_risk_pct: 0.020
+      base_risk_pct: 0.006
     macro_regime_sensitivity: {G: full, R: full, S: reduced, D: reduced}
-    entry_types: [CLASS_M, CLASS_F, CLASS_T]
+    sub_engines: [STRUCTURAL_EXPANSION, LIQUIDITY_REVERSION, SECOND_WIND]
+    regime_model: "ib_classified_intraday"
+    key_metadata_fields: [module_id, grade, ib_type, regime_confidence, regime_margin, score, room_r]
     exit_profile:
       tiers:
-        - tier_name: TP1
+        - tier_name: T1
           tier_type: take_profit
-          r_target: 2.5
-          partial_pct: 1.0
-      has_chandelier: true
+          r_target: 1.0
+          partial_pct: 0.40
+        - tier_name: T2
+          tier_type: take_profit
+          r_target: 2.0
+          partial_pct: 0.30
+      has_chandelier: false
       regime_multipliers:
         trending_up: 1.0
         trending_down: 1.0
-        volatile: 0.8
+        volatile: 0.85
+    analysis_focus:
+      - module_performance_comparison
+      - ib_type_routing_accuracy
+      - regime_confidence_calibration
+      - structural_vs_reversion_attribution
+      - second_wind_pm_window_efficacy
 
   "NQDTC_v2.1":
     display_name: "NQ Day Trade Channel v2.1"
@@ -510,19 +461,7 @@ coordination:
       target: {strategy: AKC_HELIX, action: SIZE_BOOST}
       condition: SAME_SYMBOL_SAME_DIRECTION
       params: {size_mult: 1.25}
-    - trigger: {strategy: BRS_R9, event: POSITION_OPEN}
-      target: {strategy: ATRSS, action: REDUCE_SIZE}
-      condition: SAME_SYMBOL_OPPOSITE_DIRECTION
-      params: {size_mult: 0.5}
-  cooldown_pairs:
-    - strategies: [AKC_Helix_v40, "NQDTC_v2.1"]
-      minutes: 120
-      session_only: true
-      session_window: ["09:45", "11:30"]
-    - strategies: [DownturnDominator_v1, AKC_Helix_v40]
-      minutes: 60
-      session_only: true
-      session_window: ["09:45", "16:00"]
+  cooldown_pairs: []
   direction_filter:
     observer: VdubusNQ_v4
     reference: "NQDTC_v2.1"
@@ -531,7 +470,7 @@ coordination:
   stock_coordination:
     directional_cap_R: 8.0
     symbol_collision_action: half_size
-    strategies: [IARIC_v1, US_ORB_v1, ALCB_v1]
+    strategies: [IARIC_v1, ALCB_v1]
 
 portfolio:
   heat_cap_R: 2.5

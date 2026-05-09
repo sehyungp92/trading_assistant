@@ -41,6 +41,7 @@ class PredictionTracker:
             for p in predictions:
                 record = PredictionRecord(
                     bot_id=p.bot_id,
+                    strategy_id=getattr(p, "strategy_id", None) or None,
                     metric=p.metric,
                     direction=p.direction,
                     confidence=p.confidence,
@@ -89,6 +90,7 @@ class PredictionTracker:
             if actual is None:
                 verdicts.append(PredictionVerdict(
                     bot_id=pred.bot_id,
+                    strategy_id=pred.strategy_id,
                     metric=pred.metric,
                     predicted_direction=pred.direction,
                     confidence=pred.confidence,
@@ -101,6 +103,7 @@ class PredictionTracker:
             correct = pred.direction == actual_direction
             verdicts.append(PredictionVerdict(
                 bot_id=pred.bot_id,
+                strategy_id=pred.strategy_id,
                 metric=pred.metric,
                 predicted_direction=pred.direction,
                 actual_direction=actual_direction,
@@ -131,6 +134,15 @@ class PredictionTracker:
             m: sum(vals) / len(vals) for m, vals in by_metric.items()
         }
 
+        # Per-strategy accuracy (only for verdicts that carry a strategy_id)
+        by_strategy: dict[str, list[bool]] = defaultdict(list)
+        for v in evaluated:
+            if v.strategy_id:
+                by_strategy[v.strategy_id].append(v.correct)
+        accuracy_by_strategy = {
+            sid: sum(vals) / len(vals) for sid, vals in by_strategy.items()
+        }
+
         # Magnitude-weighted accuracy
         mag_sum = sum(v.magnitude_score for v in evaluated) if evaluated else 0.0
         mw_accuracy = mag_sum / total if total > 0 else 0.0
@@ -143,6 +155,7 @@ class PredictionTracker:
             accuracy=round(accuracy, 3),
             confidence_weighted_accuracy=round(cw_accuracy, 3),
             accuracy_by_metric={m: round(v, 3) for m, v in accuracy_by_metric.items()},
+            accuracy_by_strategy={sid: round(v, 3) for sid, v in accuracy_by_strategy.items()},
             magnitude_weighted_accuracy=round(mw_accuracy, 3),
         )
 
