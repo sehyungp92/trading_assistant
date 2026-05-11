@@ -22,9 +22,16 @@ def event_stream():
 
 @pytest.fixture
 def handlers_with_stream(tmp_path, event_stream):
-    agent_runner = AsyncMock()
+    # Use MagicMock with explicit AsyncMock for async methods only — keeps
+    # sync methods like refresh_run_index from returning unawaited coroutines
+    # (see handlers.py:_progress for the call site that triggered the warning).
+    agent_runner = MagicMock()
     agent_runner.invoke = AsyncMock(return_value=AgentResult(
         response="test", run_dir=tmp_path / "runs" / "test", success=True,
+    ))
+    agent_runner.invoke_with_selection = AsyncMock(return_value=(
+        AgentResult(response="test", run_dir=tmp_path / "runs" / "test", success=True),
+        "claude_max",
     ))
 
     handlers = Handlers(

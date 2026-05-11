@@ -26,3 +26,6 @@ class OrchestratorMetrics(BaseModel):
     delivery_latency_p95: float = 0.0
     delivery_latency_max: float = 0.0
     per_bot_latency: list[BotLatencyStats] = []
+    # P2-8: backlog age — clearer than depth alone since 20 very-old events
+    # are more dangerous than 200 fresh events during a normal relay drain.
+    oldest_pending_age_seconds: float = 0.0

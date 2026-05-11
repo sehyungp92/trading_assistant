@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,8 +25,19 @@ def event_stream() -> EventStream:
 
 @pytest.fixture
 def mock_agent_runner():
-    runner = AsyncMock()
+    # P2-6: use MagicMock as the base so sync methods (e.g. refresh_run_index,
+    # update_preferences) don't return coroutines. Mark only async methods
+    # with AsyncMock.
+    runner = MagicMock()
     runner.invoke = AsyncMock(return_value=AgentResult(
+        response="Analysis complete.",
+        run_dir=Path("/tmp/test-run"),
+        cost_usd=0.05,
+        duration_ms=3000,
+        session_id="test-session-123",
+        success=True,
+    ))
+    runner.invoke_with_selection = AsyncMock(return_value=AgentResult(
         response="Analysis complete.",
         run_dir=Path("/tmp/test-run"),
         cost_usd=0.05,
@@ -226,6 +237,245 @@ class TestWFO:
 
         assert mock_loader.call_args.kwargs["date_end"] == "2026-03-01"
         assert mock_loader.call_args.kwargs["date_start"] == "2025-03-06"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("recommendation,expected_routing", [
+        ("ADOPT", "APPROVE"),
+        ("TEST_FURTHER", "EXPERIMENT"),
+    ])
+    async def test_records_calibration_with_search_routing(
+        self,
+        handlers: Handlers,
+        recommendation: str,
+        expected_routing: str,
+    ):
+        from schemas.parameter_search import SearchRouting
+        from schemas.wfo_results import RobustnessResult, WFORecommendation, WFOReport
+
+        enum_recommendation = getattr(WFORecommendation, recommendation)
+        expected_enum = getattr(SearchRouting, expected_routing)
+        report = WFOReport(
+            bot_id="bot1",
+            suggested_params={"quality_min": 0.7},
+            robustness=RobustnessResult(robustness_score=63.0),
+            recommendation=enum_recommendation,
+            recommendation_reasoning="passes robustness",
+        )
+        fake_runner = MagicMock()
+        fake_runner.run.return_value = report
+        fake_runner.write_output.side_effect = (
+            lambda _report, output_dir: Path(output_dir).mkdir(parents=True, exist_ok=True)
+        )
+        handlers._suggestion_tracker = MagicMock()
+        handlers._calibration_tracker = MagicMock()
+
+        with (
+            patch("skills.run_wfo.WFORunner", return_value=fake_runner),
+            patch("analysis.wfo_report_builder.WFOReportBuilder") as MockBuilder,
+            patch("analysis.wfo_prompt_assembler.WFOPromptAssembler") as MockAssembler,
+        ):
+            MockBuilder.return_value.build_markdown.return_value = "wfo markdown"
+            MockAssembler.return_value.assemble.return_value = MagicMock()
+
+            action = _make_action(
+                ActionType.SPAWN_WFO,
+                bot_id="bot1",
+                details={
+                    "bot_id": "bot1",
+                    "data_start": "2025-01-01",
+                    "data_end": "2026-03-01",
+                },
+            )
+            await handlers.handle_wfo(action)
+
+        kwargs = handlers._calibration_tracker.record_prediction.call_args.kwargs
+        assert kwargs["predicted_routing"] == expected_enum
+        assert kwargs["predicted_improvement"] == pytest.approx(1.63)
+
+
+class TestHandlerProposalLedger:
+    def test_transfer_candidate_records_target_strategy(self, handlers: Handlers, tmp_path: Path):
+        from skills.proposal_ledger import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "memory" / "findings")
+        handlers._proposal_ledger = ledger
+
+        proposal_id = handlers._ledger_write_candidate(
+            source="transfer",
+            kind_hint="structural_change",
+            bot_id="target_bot",
+            strategy_id="target_strategy",
+            title="Transfer pattern: tighten exits",
+            description="Pattern worked on source bot",
+            run_id="weekly-1",
+            lifecycle_stage="exit",
+            evaluation_method="approval",
+            stable_link_key="transfer:pattern-1:source_bot:target_bot:target_strategy",
+        )
+
+        record = ledger.get_by_id(proposal_id)
+        assert record is not None
+        assert record.candidate.source.value == "transfer"
+        assert record.candidate.bot_id == "target_bot"
+        assert record.candidate.strategy_id == "target_strategy"
+
+    def test_validator_rejections_are_recorded_as_rejected_candidates(
+        self, handlers: Handlers, tmp_path: Path
+    ):
+        from analysis.response_validator import (
+            BlockedPortfolioProposal,
+            BlockedStructuralProposal,
+            BlockedSuggestion,
+            ValidationResult,
+        )
+        from schemas.portfolio_proposal import PortfolioProposal, PortfolioProposalType
+        from skills.proposal_ledger import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "memory" / "findings")
+        handlers._proposal_ledger = ledger
+        validation = ValidationResult(
+            blocked_suggestions=[
+                BlockedSuggestion(
+                    suggestion=AgentSuggestion(
+                        suggestion_id="blocked-agent-suggestion",
+                        bot_id="bot1",
+                        strategy_id="alpha",
+                        category="exit_timing",
+                        title="Rejected exit tweak",
+                        confidence=0.8,
+                        evidence_summary="weak sample",
+                        target_param="exit_threshold",
+                    ),
+                    reason="insufficient evidence",
+                ),
+            ],
+            blocked_structural_proposals=[
+                BlockedStructuralProposal(
+                    proposal=StructuralProposal(
+                        bot_id="bot1",
+                        title="Rejected structural change",
+                        description="needs code changes",
+                        confidence=0.6,
+                        acceptance_criteria=[{"metric": "pnl", "direction": "improve"}],
+                    ),
+                    reason="malformed acceptance criteria",
+                ),
+            ],
+            blocked_portfolio_proposals=[
+                BlockedPortfolioProposal(
+                    proposal=PortfolioProposal(
+                        proposal_type=PortfolioProposalType.RISK_CAP_CHANGE,
+                        evidence_summary="too broad",
+                        confidence=0.7,
+                    ),
+                    reason="risk cap loosening blocked",
+                ),
+            ],
+        )
+
+        handlers._record_rejected_validation_proposals(
+            validation,
+            run_id="daily-2026-03-01",
+            source="llm_daily",
+        )
+
+        records = ledger.list_all()
+        assert len(records) == 3
+        assert {r.evaluations[0].decision for r in records} == {"reject"}
+        assert any(r.candidate.strategy_id == "alpha" for r in records)
+        assert any(
+            r.candidate.suggestion_id == "blocked-agent-suggestion"
+            for r in records
+        )
+        assert any(r.candidate.bot_id == "PORTFOLIO" for r in records)
+
+    def test_blocked_structural_proposals_do_not_create_experiments(
+        self, handlers: Handlers, tmp_path: Path
+    ):
+        from analysis.response_validator import (
+            BlockedStructuralProposal,
+            ValidationResult,
+        )
+        from skills.proposal_ledger import ProposalLedger
+
+        blocked = StructuralProposal(
+            bot_id="bot1",
+            title="Blocked structural change",
+            description="Has criteria but validator rejected it",
+            confidence=0.6,
+            acceptance_criteria=[{"metric": "pnl", "direction": "improve"}],
+        )
+        handlers._proposal_ledger = ProposalLedger(tmp_path / "memory" / "findings")
+        handlers._structural_experiment_tracker = MagicMock()
+
+        handlers._record_agent_suggestions(
+            ValidationResult(
+                blocked_structural_proposals=[
+                    BlockedStructuralProposal(
+                        proposal=blocked,
+                        reason="validator rejected",
+                    ),
+                ],
+            ),
+            run_id="weekly-2026-03-01",
+            parsed=ParsedAnalysis(structural_proposals=[blocked]),
+        )
+
+        assert handlers._proposal_ledger.list_all() == []
+        handlers._structural_experiment_tracker.record_experiment.assert_not_called()
+
+    def test_blocked_structural_context_not_attached_to_approved_suggestion(
+        self, handlers: Handlers, tmp_path: Path
+    ):
+        from analysis.response_validator import (
+            BlockedStructuralProposal,
+            ValidationResult,
+        )
+        from skills.proposal_ledger import ProposalLedger
+        from skills.suggestion_tracker import SuggestionTracker
+
+        blocked = StructuralProposal(
+            linked_suggestion_id="approved-linked",
+            bot_id="bot1",
+            title="Blocked linked implementation",
+            description="This implementation was rejected by the validator",
+            confidence=0.6,
+            acceptance_criteria=[{"metric": "pnl", "direction": "improve"}],
+        )
+        handlers._proposal_ledger = ProposalLedger(tmp_path / "memory" / "findings")
+        handlers._suggestion_tracker = SuggestionTracker(tmp_path / "memory" / "findings")
+        handlers._structural_experiment_tracker = MagicMock()
+
+        handlers._record_agent_suggestions(
+            ValidationResult(
+                approved_suggestions=[
+                    AgentSuggestion(
+                        suggestion_id="approved-linked",
+                        bot_id="bot1",
+                        category="structural",
+                        title="Approved structural hypothesis",
+                        confidence=0.8,
+                        evidence_summary="The hypothesis is valid",
+                    ),
+                ],
+                blocked_structural_proposals=[
+                    BlockedStructuralProposal(
+                        proposal=blocked,
+                        reason="validator rejected implementation",
+                    ),
+                ],
+            ),
+            run_id="weekly-2026-03-01",
+            parsed=ParsedAnalysis(structural_proposals=[blocked]),
+        )
+
+        suggestions = handlers._suggestion_tracker.load_all()
+        assert len(suggestions) == 1
+        assert suggestions[0].get("implementation_context") in (None, {})
+        records = handlers._proposal_ledger.list_all()
+        assert len(records) == 1
+        assert records[0].candidate.title == "Approved structural hypothesis"
+        handlers._structural_experiment_tracker.record_experiment.assert_not_called()
 
 
 class TestTriage:
@@ -728,7 +978,7 @@ class TestLoadCoordinatorEvents:
     def test_loads_events_from_coordinator_impact_json(self, handlers: Handlers, tmp_path: Path):
         """Write coordinator_impact.json with events list, verify parsed CoordinatorAction objects."""
         date = "2026-03-01"
-        coord_dir = tmp_path / "data" / "curated" / date / "swing_trader"
+        coord_dir = tmp_path / "data" / "curated" / date / "swing_multi_01"
         coord_dir.mkdir(parents=True)
         events_data = {
             "total_events": 2,
@@ -769,7 +1019,7 @@ class TestLoadCoordinatorEvents:
     def test_skips_malformed_events(self, handlers: Handlers, tmp_path: Path):
         """Some valid, some malformed entries -> only valid returned."""
         date = "2026-03-01"
-        coord_dir = tmp_path / "data" / "curated" / date / "swing_trader"
+        coord_dir = tmp_path / "data" / "curated" / date / "swing_multi_01"
         coord_dir.mkdir(parents=True)
         events_data = {
             "events": [

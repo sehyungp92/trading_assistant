@@ -5,6 +5,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from orchestrator.data_paths import resolve_data_dirs
 from schemas.memory import ConsolidationSummary, MemoryIndex, PatternCount
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,11 @@ class MemoryConsolidator:
         # and walk up to find the project root.
         if base_dir is not None:
             self._base_dir = Path(base_dir)
+        elif (
+            self._findings_dir.name == "findings"
+            and self._findings_dir.parent.name == "memory"
+        ):
+            self._base_dir = self._findings_dir.parent.parent
         else:
             self._base_dir = self._findings_dir.parent
 
@@ -96,8 +102,8 @@ class MemoryConsolidator:
         """
         index = MemoryIndex()
 
-        # 1. Curated data: data/curated/{date}/{bot_id}/
-        curated_dir = self._base_dir / "data" / "curated"
+        # 1. Curated data: curated/{date}/{bot_id}/, with legacy fallback.
+        curated_dir = resolve_data_dirs(self._base_dir).curated_dir
         all_curated_dates: set[str] = set()
         if curated_dir.is_dir():
             for date_dir in sorted(curated_dir.iterdir()):

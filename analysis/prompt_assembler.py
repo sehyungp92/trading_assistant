@@ -7,10 +7,13 @@ checking 29 items.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
 from schemas.prompt_package import PromptPackage
+
+logger = logging.getLogger(__name__)
 
 _CURATED_FILES = [
     "summary.json",
@@ -50,6 +53,8 @@ _CURATED_FILES = [
     "grade_analysis.json",
     "confluence_analysis.json",
     "leverage_analysis.json",
+    "funnel_analysis.json",
+    "health_summary.json",
 ]
 
 # Portfolio-level curated files (loaded from curated/{date}/portfolio/)
@@ -256,7 +261,7 @@ across all that bot's strategies.
     {{"bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}}
   ],
   "suggestions": [
-    {{"suggestion_id": "#abc123", "bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
+    {{"suggestion_id": "#abc123", "bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate|funding_threshold|leverage_cap|confluence_count|setup_grade_filter", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
   ],
   "structural_proposals": [
     {{"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high", "acceptance_criteria": [{{"metric": "...", "direction": "improve|not_degrade", "minimum_change": 0.0, "observation_window_days": 14, "minimum_trade_count": 20}}]}}
@@ -284,6 +289,15 @@ time-of-day analysis instead.
 
 **Leverage awareness**: If leverage_analysis data is present, assess liquidation proximity.
 Flag any near_liquidation events as critical safety concerns.
+
+**Funnel triage**: If funnel_analysis data is present, identify the top drop-off stage
+and cross-reference detector findings before proposing parameter changes. For example,
+confirmation leaks plus weak B-grade conversion should point toward confirmation or
+confluence tightening, not broad risk reduction.
+
+**Health gating**: If health_summary has HIGH/ERROR/CRITICAL alerts, treat the day as a
+process-quality concern first. Do not propose strategy changes during periods with
+repeated disconnects, stale feeds, or severe data-flow issues.
 
 **Multi-strategy coordination**: Note max_concurrent and correlated risk limits. Flag if
 same-direction trades across strategies caused concentrated losses.
@@ -406,6 +420,7 @@ class DailyPromptAssembler:
 
     def _load_structured_data(self, triage_report=None) -> dict:
         data: dict = {}
+        data_load_errors: list[dict] = []
         date_dir = self.curated_dir / self.date
         findings_dir = self.memory_dir / "findings"
 
@@ -424,7 +439,9 @@ class DailyPromptAssembler:
                 path = bot_dir / filename
                 if path.exists():
                     key = filename.replace(".json", "")
-                    bot_data[key] = json.loads(path.read_text(encoding="utf-8"))
+                    loaded = self._safe_load_json(path, data_load_errors)
+                    if loaded is not None:
+                        bot_data[key] = loaded
 
             # Inject signal factor rolling trends per bot
             factor_trends = self._ctx.load_signal_factor_history(bot, self.date, findings_dir)
@@ -435,7 +452,9 @@ class DailyPromptAssembler:
 
         risk_path = date_dir / "portfolio_risk_card.json"
         if risk_path.exists():
-            data["portfolio_risk_card"] = json.loads(risk_path.read_text(encoding="utf-8"))
+            loaded = self._safe_load_json(risk_path, data_load_errors)
+            if loaded is not None:
+                data["portfolio_risk_card"] = loaded
 
         # Load portfolio-level curated files
         portfolio_dir = date_dir / "portfolio"
@@ -444,9 +463,22 @@ class DailyPromptAssembler:
                 path = portfolio_dir / filename
                 if path.exists():
                     key = "portfolio_" + filename.replace(".json", "")
-                    data[key] = json.loads(path.read_text(encoding="utf-8"))
+                    loaded = self._safe_load_json(path, data_load_errors)
+                    if loaded is not None:
+                        data[key] = loaded
 
+        if data_load_errors:
+            data["data_load_errors"] = data_load_errors
         return data
+
+    @staticmethod
+    def _safe_load_json(path: Path, errors: list[dict]) -> object | None:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Skipping malformed curated JSON %s: %s", path, exc)
+            errors.append({"path": str(path), "error": str(exc)})
+            return None
 
     def _list_data_files(self, triage_report=None) -> list[str]:
         files: list[str] = []
@@ -462,11 +494,11 @@ class DailyPromptAssembler:
             bot_dir = date_dir / bot
             for filename in files_to_list:
                 path = bot_dir / filename
-                if path.exists():
+                if path.exists() and self._json_file_loadable(path):
                     files.append(str(path))
 
         risk_path = date_dir / "portfolio_risk_card.json"
-        if risk_path.exists():
+        if risk_path.exists() and self._json_file_loadable(risk_path):
             files.append(str(risk_path))
 
         # Portfolio-level curated files
@@ -474,7 +506,15 @@ class DailyPromptAssembler:
         if portfolio_dir.is_dir():
             for filename in _PORTFOLIO_CURATED_FILES:
                 path = portfolio_dir / filename
-                if path.exists():
+                if path.exists() and self._json_file_loadable(path):
                     files.append(str(path))
 
         return files
+
+    @staticmethod
+    def _json_file_loadable(path: Path) -> bool:
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        return True

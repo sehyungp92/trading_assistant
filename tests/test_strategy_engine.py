@@ -135,7 +135,7 @@ def _make_registry_for_engine() -> StrategyRegistry:
                 bot_id="breakout_bot", family="momentum",
                 archetype="box_breakout", asset_class="futures",
             ),
-            "BRS_R9": StrategyProfile(
+            "BEAR_SWING_TEST": StrategyProfile(
                 bot_id="bear_bot", family="swing",
                 archetype="bear_regime_swing", asset_class="mixed",
             ),
@@ -279,7 +279,7 @@ class TestBearRegimeSwingArchetype:
         # 0.45 ratio → no fire at 0.50 threshold
         result = engine.detect_alpha_decay(
             "bear_bot", rolling_sharpe_30d=0.55, rolling_sharpe_60d=0.8,
-            rolling_sharpe_90d=1.0, strategy_id="BRS_R9",
+            rolling_sharpe_90d=1.0, strategy_id="BEAR_SWING_TEST",
         )
         assert len(result) == 0
 
@@ -292,7 +292,7 @@ class TestBearRegimeSwingArchetype:
         )
         result = engine.detect_exit_timing_issues(
             "bear_bot", avg_exit_efficiency=0.30, premature_exit_pct=0.3,
-            strategy_id="BRS_R9",
+            strategy_id="BEAR_SWING_TEST",
         )
         assert len(result) == 0
 
@@ -305,7 +305,7 @@ class TestBearRegimeSwingArchetype:
         )
         bucket = MagicMock(hour=10, trade_count=20, pnl=-100, win_rate=0.2)
         result = engine.detect_time_of_day_patterns(
-            "bear_bot", [bucket], strategy_id="BRS_R9",
+            "bear_bot", [bucket], strategy_id="BEAR_SWING_TEST",
         )
         assert len(result) == 1
         assert "LOW RELEVANCE" in result[0].archetype_note

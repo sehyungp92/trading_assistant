@@ -258,11 +258,15 @@ class TestTelegramBotCallbackRouter:
 
         router.register("approve_suggestion_", handler)
 
-        # Create a mock update with callback_query
+        # Create a mock update with callback_query. Set chat.id to match the
+        # configured chat_id so the P0-4 allowlist accepts it.
         update = MagicMock()
         update.callback_query = MagicMock()
         update.callback_query.data = "approve_suggestion_req123"
         update.callback_query.answer = AsyncMock()
+        update.callback_query.message = MagicMock()
+        update.callback_query.message.chat.id = "1"
+        update.callback_query.from_user.id = 100
         update.message = None
 
         await adapter._handle_update(update)
@@ -286,11 +290,14 @@ class TestTelegramBotCallbackRouter:
 
         router.register("cmd_pending", handler)
 
-        # Create a mock update with a /pending message
+        # Create a mock update with a /pending message. Set chat.id to match
+        # the configured chat_id so the P0-4 allowlist accepts it.
         update = MagicMock()
         update.callback_query = None
         update.message = MagicMock()
         update.message.text = "/pending"
+        update.message.chat.id = "1"
+        update.message.from_user.id = 100
 
         await adapter._handle_update(update)
         adapter._bot.send_message.assert_called_once()

@@ -62,10 +62,6 @@
 - Time-of-day analysis is HIGH relevance — opening hour vs midday vs close
 - Slippage is the primary drag (3-5 bps) — analyze fill quality aggressively
 
-### Opening Range Breakout (US_ORB_v1)
-- First 30 minutes only — time window is non-negotiable
-- Wider slippage (5 bps) in early session is expected, not a problem
-
 ### k_stock_trader — Korean Equity (KMP, KPR, PCIM, NULRIMOK)
 - Separate VPS, separate capital pool (KRW), Asia/Seoul timezone — no cross-market coordination
 - LONG-only strategies on KRX (Korea Exchange)
@@ -82,6 +78,13 @@
 - Do NOT suggest cross-market transfers between k_stock and US strategies — different market
   microstructure, currency, and regulatory environment
 
+## Crypto Perpetuals Discipline
+- Hard leverage caps are 5.0x for BTC/ETH majors and 4.0x for alt symbols; never recommend lifting them without 60 days of evidence at confidence >=0.9
+- Funding cost is a first-class PnL item; any hold-time-extending change must reason explicitly about funding impact
+- Crypto trades 24/7; daily windows roll at 00:00 UTC and session analysis uses Asia 00-04, EU 07-11, and US 13-17 UTC
+- Liquidation proximity where mae_r * leverage > 0.7 is a process-quality failure, not a tunable edge
+- Symbol risk parity matters: no single symbol should exceed 70% of exposure without explicit opt-in
+
 ## Inter-Strategy Coordination Rules
 - ATRSS entry triggers AKC_HELIX stop tightening (same symbol) — evaluate if this
   fires correctly and whether the tightening threshold is appropriate
@@ -90,7 +93,7 @@
   if cooldown prevented good setups or correctly avoided whipsaws
 - VdubusNQ_v4 direction filter on NQDTC_v2.1 (agree=1.5x, oppose=0x) — evaluate
   signal agreement rate and quality of filtered trades
-- Stock strategies: 50% size reduction on symbol collision between IARIC/ORB/ALCB
+- Stock strategies: 50% size reduction on symbol collision between IARIC/ALCB
 
 ## General Regime Rules
 - Regime mismatches in root causes are actionable only if persistent (>5 occurrences in 30 days)

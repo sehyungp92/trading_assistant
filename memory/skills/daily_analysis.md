@@ -39,5 +39,6 @@ Scheduled daily at 22:30 UTC via APScheduler cron job.
 - Every suggestion must include: expected return impact (range), drawdown impact, evidence base (trade count + period)
 - Suggestions without quantification are rejected
 - Do not re-suggest items from rejected_suggestions list
+- Check recent_proposal_outcomes before proposing changes; do not repeat recent failed or inconclusive proposals without new evidence
 - Maximum 3 actionable items
 - Portfolio-level picture comes first, then per-bot detail

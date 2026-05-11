@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from schemas.parameter_search import (
-    BacktestCalibrationRecord,
     ParameterSearchReport,
     SearchRouting,
 )

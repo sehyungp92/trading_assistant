@@ -1,6 +1,6 @@
 """Interaction analysis schemas — coordinator events and cross-strategy effects.
 
-Used by skills/interaction_analyzer.py to assess coordinator benefit on swing_trader.
+Used by skills/interaction_analyzer.py to assess coordinator benefit on swing_multi_01.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class InteractionReport(BaseModel):
 
     week_start: str
     week_end: str
-    bot_id: str = "swing_trader"  # currently only swing_trader has coordinator
+    bot_id: str = "swing_multi_01"  # currently only swing_multi_01 has coordinator
     total_coordination_events: int = 0
     effects: list[InteractionEffect] = []
     overlay_regime_summary: dict = {}  # regime → {trades, pnl, win_rate}

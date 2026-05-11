@@ -1,7 +1,7 @@
 """Tests for relay health monitoring (#27).
 
 These test the MonitoringCheck.check_relay_health() method using a fake
-HTTP relay (no dependency on _references/swing_trader/relay/).
+HTTP relay (no dependency on _references/trading/apps/relay/).
 """
 from __future__ import annotations
 

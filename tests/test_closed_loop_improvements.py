@@ -23,12 +23,12 @@ import pytest
 
 
 class TestDiscoveryDetectorAlignment:
-    """Verify discovery prompt references all 25 detectors."""
+    """Verify discovery prompt references all 30 per-bot detectors."""
 
     def test_instructions_reference_21_detectors(self):
         from analysis.discovery_prompt_assembler import _DISCOVERY_INSTRUCTIONS
 
-        assert "25 automated detectors" in _DISCOVERY_INSTRUCTIONS
+        assert "30 automated detectors" in _DISCOVERY_INSTRUCTIONS
         assert "7 automated detectors" not in _DISCOVERY_INSTRUCTIONS
 
     def test_all_strategy_engine_detectors_covered(self):
@@ -36,10 +36,10 @@ class TestDiscoveryDetectorAlignment:
         from analysis.strategy_engine import StrategyEngine
 
         detector_names = list(StrategyEngine._DETECTOR_TO_CATEGORY.keys())
-        # 25 per-bot detectors (wired into build_report) + 5 portfolio-level
+        # 30 per-bot detectors (wired into build_report) + 5 portfolio-level
         # detectors (use "detect_" prefix, not wired into build_report).
-        assert len(detector_names) == 30, (
-            f"Expected 30 detectors, got {len(detector_names)}: {detector_names}"
+        assert len(detector_names) == 35, (
+            f"Expected 35 detectors, got {len(detector_names)}: {detector_names}"
         )
         # Per-bot detectors should appear in discovery instructions
         per_bot = [n for n in detector_names if not n.startswith("detect_")]
@@ -71,7 +71,7 @@ class TestDiscoveryDetectorAlignment:
             memory_dir=tmp,
         )
         prompt = assembler._build_task_prompt()
-        assert "25 automated detectors" in prompt
+        assert "30 automated detectors" in prompt
 
 
 # ── 2. Strategy idea experiment criteria extraction ──

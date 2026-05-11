@@ -11,7 +11,10 @@ Tier 4 (Hypothesis): reserved for the analysis runtime to synthesize in the week
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from schemas.detection_context import DetectionContext
+from schemas.events import normalize_strategy_id
 from schemas.regime_conditional import (
     RegimeAllocation,
     RegimeConditionalReport,
@@ -81,6 +84,16 @@ class StrategyEngine:
             "institutional_anchor": {"cost_threshold": 0.20},
             "volume_profile_breakout": {"cost_threshold": 0.10},
         },
+        "liquidation_proximity": {
+            "momentum_pullback_crypto": {"proximity_threshold": 0.70},
+            "institutional_anchor": {"proximity_threshold": 0.70},
+            "volume_profile_breakout": {"proximity_threshold": 0.65},
+        },
+        "funding_trend": {
+            "momentum_pullback_crypto": {"cost_threshold": 0.15},
+            "institutional_anchor": {"cost_threshold": 0.20},
+            "volume_profile_breakout": {"cost_threshold": 0.10},
+        },
     }
 
     # Map detector_name → suggestion category for value-map lookups.
@@ -116,6 +129,11 @@ class StrategyEngine:
         "grade_selectivity": "signal",
         "confluence_quality": "filter_threshold",
         "leverage_utilization": "position_sizing",
+        "mtf_alignment_drift": "signal",
+        "liquidation_proximity": "leverage_cap",
+        "symbol_concentration": "position_sizing",
+        "session_patterns_24_7": "signal",
+        "funding_trend": "funding_threshold",
     }
 
     # Keywords indicating direction of change
@@ -1724,6 +1742,7 @@ class StrategyEngine:
         grade_data: dict[str, dict] | None = None,
         confluence_data: dict[str, dict] | None = None,
         leverage_data: dict[str, dict] | None = None,
+        crypto_trade_data: dict[str, list] | None = None,
         exit_sweep: dict[str, dict] | None = None,
         filter_sensitivity: dict[str, dict] | None = None,
         counterfactual: dict[str, dict] | None = None,
@@ -1913,6 +1932,15 @@ class StrategyEngine:
                 if bot_id in low_evidence_bots:
                     continue
                 all_suggestions.extend(self.detect_leverage_utilization(bot_id, summary))
+        if crypto_trade_data:
+            for bot_id, trades in crypto_trade_data.items():
+                if bot_id in low_evidence_bots:
+                    continue
+                all_suggestions.extend(self.detect_mtf_alignment_drift(bot_id, trades))
+                all_suggestions.extend(self.detect_liquidation_proximity(bot_id, trades))
+                all_suggestions.extend(self.detect_symbol_concentration(bot_id, trades))
+                all_suggestions.extend(self.detect_session_patterns_24_7(bot_id, trades))
+                all_suggestions.extend(self.detect_funding_trend(bot_id, trades))
 
         # Sim-driven detectors (weekly handler feeds these from filter_sensitivity_analyzer,
         # counterfactual_simulator, exit_strategy_simulator)
@@ -2256,6 +2284,358 @@ class StrategyEngine:
             ))
 
         return suggestions
+
+    def detect_mtf_alignment_drift(
+        self,
+        bot_id: str,
+        trades: list,
+        min_mismatched: int = 5,
+        win_rate_gap_threshold: float = 0.15,
+    ) -> list[StrategySuggestion]:
+        """Detect higher-timeframe bias disagreement hurting expectancy."""
+        aligned: list = []
+        mismatched: list = []
+        for trade in trades:
+            side = self._normalize_trade_side(self._trade_get(trade, "side", ""))
+            bias = self._normalize_bias_direction(self._trade_get(trade, "bias_direction", ""))
+            if not side or not bias:
+                continue
+            if side == bias:
+                aligned.append(trade)
+            else:
+                mismatched.append(trade)
+
+        if len(mismatched) < min_mismatched or not aligned:
+            return []
+
+        aligned_wr = self._win_rate(aligned)
+        mismatched_wr = self._win_rate(mismatched)
+        gap = aligned_wr - mismatched_wr
+        aligned_avg = self._avg_pnl(aligned)
+        mismatched_avg = self._avg_pnl(mismatched)
+        if gap < win_rate_gap_threshold or mismatched_avg >= aligned_avg:
+            return []
+
+        return [StrategySuggestion(
+            bot_id=bot_id,
+            strategy_id=self._strategy_id_from_trades(bot_id, trades),
+            tier=SuggestionTier.PARAMETER,
+            title="Higher-timeframe bias mismatch is degrading crypto entries",
+            description=(
+                f"{len(mismatched)} trades disagreed with bias_direction. "
+                f"Mismatched win rate {mismatched_wr:.0%} vs aligned {aligned_wr:.0%}; "
+                f"avg PnL {mismatched_avg:.4f} vs {aligned_avg:.4f}. "
+                "Review side/bias alignment gates before loosening entry filters."
+            ),
+            confidence=min(0.85, 0.55 + max(gap, 0.0)),
+            detection_context=DetectionContext(
+                detector_name="mtf_alignment_drift",
+                bot_id=bot_id,
+                threshold_name="win_rate_gap_threshold",
+                threshold_value=win_rate_gap_threshold,
+                observed_value=gap,
+                sample_size=len(mismatched),
+            ),
+        )]
+
+    def detect_liquidation_proximity(
+        self,
+        bot_id: str,
+        trades: list,
+        proximity_threshold: float = 0.70,
+        systemic_count: int = 3,
+    ) -> list[StrategySuggestion]:
+        """Detect trades whose MAE came too close to liquidation after leverage."""
+        strategy_id = self._strategy_id_from_trades(bot_id, trades)
+        arch_thresh = self._archetype_default(
+            strategy_id, "liquidation_proximity", "proximity_threshold",
+        )
+        if arch_thresh is not None:
+            proximity_threshold = arch_thresh
+
+        offenders: list[tuple[str, float]] = []
+        worst = 0.0
+        for trade in trades:
+            mae_r = abs(self._trade_float(trade, "mae_r", 0.0))
+            leverage = self._trade_leverage(trade)
+            proximity = mae_r * leverage
+            worst = max(worst, proximity)
+            if proximity > proximity_threshold + 1e-9:
+                offenders.append((str(self._trade_get(trade, "trade_id", "")), proximity))
+
+        if not offenders:
+            return []
+
+        tier = SuggestionTier.PARAMETER if len(offenders) >= systemic_count else SuggestionTier.HYPOTHESIS
+        return [StrategySuggestion(
+            bot_id=bot_id,
+            strategy_id=strategy_id,
+            tier=tier,
+            title=f"{len(offenders)} crypto trade(s) breached liquidation proximity guard",
+            description=(
+                f"Worst mae_r * leverage was {worst:.2f}; guardrail is "
+                f"{proximity_threshold:.2f}. Treat this as a process-quality "
+                "and leverage-cap issue before tuning entries."
+            ),
+            confidence=0.9 if len(offenders) >= systemic_count else 0.75,
+            detection_context=DetectionContext(
+                detector_name="liquidation_proximity",
+                bot_id=bot_id,
+                threshold_name="proximity_threshold",
+                threshold_value=proximity_threshold,
+                observed_value=worst,
+                sample_size=len(offenders),
+            ),
+        )]
+
+    def detect_symbol_concentration(
+        self,
+        bot_id: str,
+        trades: list,
+        concentration_threshold: float = 0.70,
+        min_trades: int = 10,
+    ) -> list[StrategySuggestion]:
+        """Detect BTC/ETH/SOL loss concentration."""
+        tracked = {"BTC", "ETH", "SOL"}
+        loss_by_symbol: dict[str, float] = {symbol: 0.0 for symbol in tracked}
+        count_by_symbol: dict[str, int] = {symbol: 0 for symbol in tracked}
+        for trade in trades:
+            symbol = self._base_symbol(self._trade_get(trade, "pair", ""))
+            if symbol not in tracked:
+                continue
+            count_by_symbol[symbol] += 1
+            pnl = self._trade_float(trade, "pnl", 0.0)
+            if pnl < 0:
+                loss_by_symbol[symbol] += abs(pnl)
+
+        total_loss = sum(loss_by_symbol.values())
+        if total_loss <= 0:
+            return []
+
+        suggestions: list[StrategySuggestion] = []
+        for symbol, loss in loss_by_symbol.items():
+            share = loss / total_loss if total_loss else 0.0
+            if share >= concentration_threshold and count_by_symbol[symbol] >= min_trades:
+                suggestions.append(StrategySuggestion(
+                    bot_id=bot_id,
+                    strategy_id=self._strategy_id_from_trades(bot_id, trades),
+                    tier=SuggestionTier.PARAMETER,
+                    title=f"{symbol} dominates crypto losses ({share:.0%})",
+                    description=(
+                        f"{symbol} accounts for {share:.0%} of BTC/ETH/SOL gross losses "
+                        f"across {count_by_symbol[symbol]} trades. Review symbol risk parity "
+                        "or symbol-specific filters before changing global parameters."
+                    ),
+                    confidence=0.7,
+                    detection_context=DetectionContext(
+                        detector_name="symbol_concentration",
+                        bot_id=bot_id,
+                        threshold_name="concentration_threshold",
+                        threshold_value=concentration_threshold,
+                        observed_value=share,
+                        sample_size=count_by_symbol[symbol],
+                    ),
+                ))
+        return suggestions
+
+    def detect_session_patterns_24_7(
+        self,
+        bot_id: str,
+        trades: list,
+        min_trades: int = 10,
+        negative_avg_pnl_threshold: float = 0.0,
+    ) -> list[StrategySuggestion]:
+        """Detect persistent Asia/EU/US UTC session underperformance."""
+        sessions: dict[str, list] = {"Asia": [], "EU": [], "US": []}
+        for trade in trades:
+            ts = self._trade_timestamp(trade)
+            if ts is None:
+                continue
+            hour = ts.hour
+            if 0 <= hour <= 4:
+                sessions["Asia"].append(trade)
+            elif 7 <= hour <= 11:
+                sessions["EU"].append(trade)
+            elif 13 <= hour <= 17:
+                sessions["US"].append(trade)
+
+        suggestions: list[StrategySuggestion] = []
+        for session, bucket in sessions.items():
+            if len(bucket) < min_trades:
+                continue
+            avg_pnl = self._avg_pnl(bucket)
+            net_pnl = sum(self._trade_float(t, "pnl", 0.0) for t in bucket)
+            if avg_pnl < negative_avg_pnl_threshold and net_pnl < 0:
+                suggestions.append(StrategySuggestion(
+                    bot_id=bot_id,
+                    strategy_id=self._strategy_id_from_trades(bot_id, trades),
+                    tier=SuggestionTier.HYPOTHESIS,
+                    title=f"{session} UTC session is negative for crypto_trader",
+                    description=(
+                        f"{session} window has {len(bucket)} trades, net PnL {net_pnl:.4f}, "
+                        f"avg PnL {avg_pnl:.4f}. Validate 24/7 session liquidity before "
+                        "changing entry thresholds."
+                    ),
+                    confidence=0.6,
+                    detection_context=DetectionContext(
+                        detector_name="session_patterns_24_7",
+                        bot_id=bot_id,
+                        threshold_name="min_trades",
+                        threshold_value=float(min_trades),
+                        observed_value=float(len(bucket)),
+                        sample_size=len(bucket),
+                    ),
+                ))
+        return suggestions
+
+    def detect_funding_trend(
+        self,
+        bot_id: str,
+        trades: list,
+        cost_threshold: float = 0.15,
+        rising_weeks: int = 3,
+    ) -> list[StrategySuggestion]:
+        """Detect funding cost rising as a share of gross PnL across weeks."""
+        strategy_id = self._strategy_id_from_trades(bot_id, trades)
+        arch_thresh = self._archetype_default(strategy_id, "funding_trend", "cost_threshold")
+        if arch_thresh is not None:
+            cost_threshold = arch_thresh
+
+        weekly_by_symbol: dict[str, dict[tuple[int, int], dict[str, float]]] = {}
+        count_by_symbol: dict[str, int] = {}
+        for trade in trades:
+            ts = self._trade_timestamp(trade)
+            if ts is None:
+                continue
+            iso = ts.isocalendar()
+            symbol = self._base_symbol(self._trade_get(trade, "pair", "")) or "UNKNOWN"
+            count_by_symbol[symbol] = count_by_symbol.get(symbol, 0) + 1
+            weekly = weekly_by_symbol.setdefault(symbol, {})
+            bucket = weekly.setdefault((iso.year, iso.week), {"funding": 0.0, "gross": 0.0})
+            bucket["funding"] += abs(self._trade_float(trade, "funding_paid", 0.0))
+            bucket["gross"] += abs(self._trade_float(trade, "pnl", 0.0))
+
+        suggestions: list[StrategySuggestion] = []
+        for symbol, weekly in sorted(weekly_by_symbol.items()):
+            ratios: list[float] = []
+            for key in sorted(weekly):
+                gross = weekly[key]["gross"]
+                if gross > 0:
+                    ratios.append(weekly[key]["funding"] / gross)
+
+            if len(ratios) < rising_weeks:
+                continue
+            recent = ratios[-rising_weeks:]
+            if recent[-1] <= cost_threshold:
+                continue
+            if not all(a < b for a, b in zip(recent, recent[1:])):
+                continue
+
+            suggestions.append(StrategySuggestion(
+                bot_id=bot_id,
+                strategy_id=strategy_id,
+                tier=SuggestionTier.PARAMETER,
+                title=f"{symbol} funding cost ratio rose for {rising_weeks} straight weeks",
+                description=(
+                    f"{symbol} funding/gross PnL ratios: {', '.join(f'{r:.0%}' for r in recent)}; "
+                    f"latest exceeds {cost_threshold:.0%}. Review funding_threshold and "
+                    "time-stop settings before extending holds."
+                ),
+                confidence=0.75,
+                detection_context=DetectionContext(
+                    detector_name="funding_trend",
+                    bot_id=bot_id,
+                    threshold_name="cost_threshold",
+                    threshold_value=cost_threshold,
+                    observed_value=recent[-1],
+                    sample_size=count_by_symbol.get(symbol, 0),
+                ),
+            ))
+        return suggestions
+
+    @staticmethod
+    def _trade_get(trade: object, key: str, default: object = None) -> object:
+        if isinstance(trade, dict):
+            return trade.get(key, default)
+        return getattr(trade, key, default)
+
+    @classmethod
+    def _trade_float(cls, trade: object, key: str, default: float = 0.0) -> float:
+        value = cls._trade_get(trade, key, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _trade_leverage(cls, trade: object) -> float:
+        sizing = cls._trade_get(trade, "sizing_inputs", None)
+        if isinstance(sizing, dict):
+            try:
+                return float(sizing.get("leverage", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                return 1.0
+        return 1.0
+
+    @classmethod
+    def _trade_timestamp(cls, trade: object) -> datetime | None:
+        raw = cls._trade_get(trade, "exit_time", None) or cls._trade_get(trade, "entry_time", None)
+        if isinstance(raw, datetime):
+            return raw
+        if isinstance(raw, str) and raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _normalize_trade_side(raw: object) -> str:
+        value = str(raw or "").strip().lower()
+        if value in {"long", "buy", "bull", "bullish"}:
+            return "long"
+        if value in {"short", "sell", "bear", "bearish"}:
+            return "short"
+        return ""
+
+    @staticmethod
+    def _normalize_bias_direction(raw: object) -> str:
+        value = str(raw or "").strip().lower()
+        if value in {"long", "bull", "bullish", "up", "trend_up"}:
+            return "long"
+        if value in {"short", "bear", "bearish", "down", "trend_down"}:
+            return "short"
+        return ""
+
+    @classmethod
+    def _win_rate(cls, trades: list) -> float:
+        if not trades:
+            return 0.0
+        wins = sum(1 for trade in trades if cls._trade_float(trade, "pnl", 0.0) > 0)
+        return wins / len(trades)
+
+    @classmethod
+    def _avg_pnl(cls, trades: list) -> float:
+        if not trades:
+            return 0.0
+        return sum(cls._trade_float(trade, "pnl", 0.0) for trade in trades) / len(trades)
+
+    @staticmethod
+    def _base_symbol(raw: object) -> str:
+        symbol = str(raw or "").upper()
+        for suffix in ("USDT", "USD", "-PERP", "PERP", "/USD", "/USDT"):
+            symbol = symbol.replace(suffix, "")
+        return "".join(ch for ch in symbol if ch.isalpha())[:3]
+
+    def _strategy_id_from_trades(self, bot_id: str, trades: list) -> str:
+        seen = {
+            normalize_strategy_id(bot_id, self._trade_get(trade, "strategy_id", "") or "")
+            for trade in trades
+            if self._trade_get(trade, "strategy_id", "")
+        }
+        if len(seen) == 1:
+            return next(iter(seen))
+        return self._resolve_strategy_id(bot_id)
 
     def _should_suppress(self, bot_id: str, tier_value: str) -> bool:
         """Check if a (bot_id, tier) pair should be suppressed due to poor track record.

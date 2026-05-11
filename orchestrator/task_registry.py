@@ -141,6 +141,16 @@ class TaskRegistry:
 
     async def find_stale(self, timeout_seconds: int = 3600) -> list[TaskRecord]:
         """Find tasks stuck in RUNNING state beyond timeout."""
+        if timeout_seconds <= 0:
+            cursor = await self.db.execute(
+                """SELECT * FROM tasks
+                   WHERE status = 'running'
+                     AND started_at IS NOT NULL
+                   ORDER BY started_at ASC"""
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_task(row) for row in rows]
+
         cursor = await self.db.execute(
             """SELECT * FROM tasks
                WHERE status = 'running'

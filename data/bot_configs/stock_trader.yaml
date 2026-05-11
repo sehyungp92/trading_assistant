@@ -1,22 +1,26 @@
 bot_id: stock_trader
-repo_url: git@github.com:user/stock_trader.git
-repo_dir: /repos/stock_trader
+repo_url: git@github.com:sehyungp92/trading.git
+repo_dir: /repos/trading
 default_branch: main
 allowed_edit_paths:
+  - strategies/stock/*
   - config/*
-  - strategies/*
   - tests/*
-  - docs/*
 structural_context_paths:
+  - strategies/stock/*
+  - strategies/core/*
+  - strategies/contracts.py
+  - libs/*
+  - apps/*
+  - instrumentation/*
+  - regime/*
   - config/*
-  - strategies/*
   - tests/*
 verification_commands:
   - pytest tests -q
 strategies:
   - IARIC_v1
   - ALCB_v1
-  - US_ORB_v1
 parameters:
   # === IARIC_v1 — Institutional Accumulation Reversal ===
   - param_name: tier_a_min
@@ -74,7 +78,7 @@ parameters:
     param_type: PYTHON_CONSTANT
     file_path: strategies/stock/iaric/config.py
     python_path: StrategySettings.base_risk_fraction
-    current_value: 0.008
+    current_value: 0.00864
     valid_range: [0.003, 0.02]
     value_type: float
     category: risk_management
@@ -94,11 +98,363 @@ parameters:
     param_type: PYTHON_CONSTANT
     file_path: strategies/stock/iaric/config.py
     python_path: StrategySettings.heat_cap_r
-    current_value: 6.0
+    current_value: 5.4
     valid_range: [2.0, 10.0]
     value_type: float
     category: risk_management
     is_safety_critical: true
+  - param_name: portfolio_daily_stop_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.portfolio_daily_stop_r
+    current_value: 3.5
+    valid_range: [1.0, 8.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: intraday_leverage
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.intraday_leverage
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: sector_risk_cap_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.sector_risk_cap_pct
+    current_value: 0.35
+    valid_range: [0.10, 0.80]
+    value_type: float
+    category: risk_management
+    is_safety_critical: false
+  - param_name: stop_risk_cap_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.stop_risk_cap_pct
+    current_value: 0.02
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_positions_tier_a
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.max_positions_tier_a
+    current_value: 8
+    valid_range: [2, 20]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_positions_tier_b
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.max_positions_tier_b
+    current_value: 5
+    valid_range: [1, 12]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_positions_per_sector
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.max_positions_per_sector
+    current_value: 4
+    valid_range: [1, 8]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+
+  # IARIC_v1 — Universe / liquidity filters
+  - param_name: min_price
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.min_price
+    current_value: 10.0
+    valid_range: [1.0, 50.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: min_adv_usd
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.min_adv_usd
+    current_value: 20000000.0
+    valid_range: [5000000.0, 100000000.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: max_median_spread_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.max_median_spread_pct
+    current_value: 0.0050
+    valid_range: [0.001, 0.02]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: anchor_lookback_sessions
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.anchor_lookback_sessions
+    current_value: 40
+    valid_range: [10, 120]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # IARIC_v1 — Regime / macro gates
+  - param_name: regime_full_mult_score
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.regime_full_mult_score
+    current_value: 0.825
+    valid_range: [0.50, 1.00]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: breadth_threshold_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.breadth_threshold_pct
+    current_value: 55.0
+    valid_range: [40.0, 75.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: vix_percentile_threshold
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.vix_percentile_threshold
+    current_value: 80.0
+    valid_range: [50.0, 95.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # IARIC_v1 — Stale / invalidation timers
+  - param_name: drift_exhaustion_drop_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.drift_exhaustion_drop_pct
+    current_value: 0.02
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: drift_exhaustion_minutes
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.drift_exhaustion_minutes
+    current_value: 60
+    valid_range: [15, 240]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: panic_flush_minutes
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.panic_flush_minutes
+    current_value: 15
+    valid_range: [5, 60]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: setup_stale_minutes
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.setup_stale_minutes
+    current_value: 45
+    valid_range: [15, 180]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: avwap_breakdown_pct
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.avwap_breakdown_pct
+    current_value: 0.007
+    valid_range: [0.002, 0.02]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: avwap_breakdown_volume_mult
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.avwap_breakdown_volume_mult
+    current_value: 1.5
+    valid_range: [1.0, 3.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # IARIC_v1 — Carry / overnight
+  - param_name: max_carry_days
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.max_carry_days
+    current_value: 7
+    valid_range: [1, 14]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: min_carry_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.min_carry_r
+    current_value: 0.5
+    valid_range: [0.0, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: flow_reversal_lookback
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.flow_reversal_lookback
+    current_value: 1
+    valid_range: [1, 5]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: min_conviction_multiplier
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.min_conviction_multiplier
+    current_value: 0.25
+    valid_range: [0.0, 1.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # IARIC_v1 — T2 intraday engine
+  - param_name: t2_initial_atr_mult
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_initial_atr_mult
+    current_value: 1.5
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t2_breakeven_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_breakeven_r
+    current_value: 0.5
+    valid_range: [0.1, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t2_partial_r
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_partial_r
+    current_value: 1.5
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t2_partial_frac
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_partial_frac
+    current_value: 0.33
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t2_carry_threshold
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_carry_threshold
+    current_value: 65.0
+    valid_range: [40.0, 90.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # IARIC_v1 — Ablation flags
+  - param_name: t2_pm_reentry
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_pm_reentry
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: t2_open_entry
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.t2_open_entry
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: carry_only_entry
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.carry_only_entry
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: strong_only_entry
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.strong_only_entry
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: use_close_stop
+    strategy_id: IARIC_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/iaric/config.py
+    python_path: StrategySettings.use_close_stop
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
   - param_name: avwap_band_pct
     strategy_id: IARIC_v1
     param_type: PYTHON_CONSTANT
@@ -180,4 +536,426 @@ parameters:
     valid_values: [true, false]
     value_type: bool
     category: ablation
+    is_safety_critical: false
+
+  # ALCB_v1 — Risk
+  - param_name: base_risk_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.base_risk_fraction
+    current_value: 0.00702
+    valid_range: [0.002, 0.015]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: volatile_base_risk_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.volatile_base_risk_fraction
+    current_value: 0.0035
+    valid_range: [0.001, 0.01]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: daily_stop_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.daily_stop_r
+    current_value: 2.35
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: heat_cap_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.heat_cap_r
+    current_value: 4.0
+    valid_range: [1.5, 8.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: portfolio_daily_stop_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.portfolio_daily_stop_r
+    current_value: 3.5
+    valid_range: [1.0, 8.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_portfolio_heat_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_portfolio_heat_fraction
+    current_value: 0.03
+    valid_range: [0.01, 0.10]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_campaign_risk_mult
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_campaign_risk_mult
+    current_value: 1.5
+    valid_range: [1.0, 3.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_positions
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_positions
+    current_value: 6
+    valid_range: [2, 15]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_positions_per_sector
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_positions_per_sector
+    current_value: 3
+    valid_range: [1, 6]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: max_adds
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_adds
+    current_value: 2
+    valid_range: [0, 5]
+    value_type: int
+    category: position_sizing
+    is_safety_critical: false
+
+  # ALCB_v1 — Universe / liquidity filters
+  - param_name: min_price
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.min_price
+    current_value: 10.0
+    valid_range: [1.0, 50.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: min_adv_usd
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.min_adv_usd
+    current_value: 10000000.0
+    valid_range: [2000000.0, 50000000.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: max_median_spread_pct
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_median_spread_pct
+    current_value: 0.0050
+    valid_range: [0.001, 0.02]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: earnings_block_days
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.earnings_block_days
+    current_value: 3
+    valid_range: [0, 10]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # ALCB_v1 — Box / squeeze
+  - param_name: max_squeeze_metric
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.max_squeeze_metric
+    current_value: 1.10
+    valid_range: [0.5, 2.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: squeeze_lookback
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.squeeze_lookback
+    current_value: 60
+    valid_range: [20, 120]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: sq_good_quantile
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.sq_good_quantile
+    current_value: 0.30
+    valid_range: [0.10, 0.50]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: box_length_low
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.box_length_low
+    current_value: 8
+    valid_range: [4, 20]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: box_length_mid
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.box_length_mid
+    current_value: 12
+    valid_range: [8, 24]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: box_length_high
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.box_length_high
+    current_value: 18
+    valid_range: [10, 40]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # ALCB_v1 — Entry signal / scoring
+  - param_name: base_q_disp
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.base_q_disp
+    current_value: 0.70
+    valid_range: [0.40, 1.00]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: breakout_min_rvol_d
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.breakout_min_rvol_d
+    current_value: 1.0
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: breakout_reject_min_rvol_d
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.breakout_reject_min_rvol_d
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: intraday_rvol_min
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.intraday_rvol_min
+    current_value: 1.2
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: intraday_rvol_strong
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.intraday_rvol_strong
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: normal_intraday_score_min
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.normal_intraday_score_min
+    current_value: 2
+    valid_range: [0, 6]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: degraded_intraday_score_min
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.degraded_intraday_score_min
+    current_value: 3
+    valid_range: [1, 7]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+
+  # ALCB_v1 — Exit timing / targets
+  - param_name: atr_stop_mult_std
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.atr_stop_mult_std
+    current_value: 1.0
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: atr_stop_mult_volatile
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.atr_stop_mult_volatile
+    current_value: 1.2
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: breakeven_buffer_atr
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.breakeven_buffer_atr
+    current_value: 0.10
+    valid_range: [0.0, 0.50]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp1_aligned_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.tp1_aligned_r
+    current_value: 1.25
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_aligned_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.tp2_aligned_r
+    current_value: 2.5
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp1_neutral_r
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.tp1_neutral_r
+    current_value: 1.0
+    valid_range: [0.4, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp1_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.tp1_fraction
+    current_value: 0.30
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.tp2_fraction
+    current_value: 0.30
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: runner_fraction
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.runner_fraction
+    current_value: 0.40
+    valid_range: [0.10, 0.80]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: runner_profit_ratchet_r_base
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.runner_profit_ratchet_r_base
+    current_value: 2.0
+    valid_range: [0.8, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # ALCB_v1 — Correlation / quality
+  - param_name: corr_threshold
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.corr_threshold
+    current_value: 0.70
+    valid_range: [0.30, 0.95]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: corr_lookback
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.corr_lookback
+    current_value: 60
+    valid_range: [20, 180]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: evidence_score_top_tier
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.evidence_score_top_tier
+    current_value: 6
+    valid_range: [3, 10]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: stale_warn_days
+    strategy_id: ALCB_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/stock/alcb/config.py
+    python_path: StrategySettings.stale_warn_days
+    current_value: 8
+    valid_range: [3, 20]
+    value_type: int
+    category: exit_timing
     is_safety_critical: false

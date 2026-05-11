@@ -9,9 +9,50 @@ import hashlib
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
+
+
+_CRYPTO_STRATEGY_ID_ALIASES = {
+    "momentum": "MomentumPullback_M15",
+    "trend": "InstitutionalAnchor_H1",
+    "breakout": "VolumeProfileBreakout_M30",
+}
+
+
+def normalize_strategy_id(bot_id: str, strategy_id: object) -> str:
+    """Map crypto_trader internal strategy keys to assistant profile IDs."""
+    value = str(strategy_id or "")
+    if bot_id == "crypto_trader":
+        return _CRYPTO_STRATEGY_ID_ALIASES.get(value, value)
+    return value
+
+
+def _copy_metadata_identity(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    normalized = dict(data)
+    metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        if not normalized.get("bot_id") and metadata.get("bot_id"):
+            normalized["bot_id"] = metadata["bot_id"]
+        if not normalized.get("strategy_id") and metadata.get("strategy_id"):
+            normalized["strategy_id"] = metadata["strategy_id"]
+    if normalized.get("strategy_id"):
+        normalized["strategy_id"] = normalize_strategy_id(
+            str(normalized.get("bot_id", "")), normalized["strategy_id"],
+        )
+    return normalized
+
+
+def _normalize_strategy_keyed_dict(bot_id: str, value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    return {
+        normalize_strategy_id(bot_id, key): item
+        for key, item in value.items()
+    }
 
 
 class TradeSide(str, Enum):
@@ -123,9 +164,9 @@ class TradeEvent(BaseModel):
     mae_r: float | None = None
     exit_efficiency: float | None = None  # actual_pnl_pct / mfe_pct
 
-    # 1.5: momentum_trader per-bar signal component values
+    # 1.5: momentum_nq_01 per-bar signal component values
     signal_evolution: list[dict] | None = None
-    # 2.6: momentum_trader order fill details
+    # 2.6: momentum_nq_01 order fill details
     entry_fill_details: dict | None = None
     exit_fill_details: dict | None = None
 
@@ -184,6 +225,23 @@ class TradeEvent(BaseModel):
     signal_generation_version: str | None = None
     code_sha: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _from_reference_payload(cls, data: Any) -> Any:
+        data = _copy_metadata_identity(data)
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        market_context = normalized.get("market_context")
+        if isinstance(market_context, dict):
+            if not normalized.get("bias_direction") and market_context.get("bias_direction"):
+                normalized["bias_direction"] = market_context["bias_direction"]
+            if not normalized.get("setup_grade") and market_context.get("setup_grade"):
+                normalized["setup_grade"] = market_context["setup_grade"]
+            if not normalized.get("confluences") and market_context.get("setup_confluences"):
+                normalized["confluences"] = market_context["setup_confluences"]
+        return normalized
+
 
 class MissedOpportunityEvent(BaseModel):
     model_config = {"extra": "ignore"}
@@ -222,6 +280,11 @@ class MissedOpportunityEvent(BaseModel):
     signal_generation_version: str | None = None
     code_sha: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _from_reference_payload(cls, data: Any) -> Any:
+        return _copy_metadata_identity(data)
+
 
 class DailySnapshot(BaseModel):
     date: str  # YYYY-MM-DD
@@ -248,13 +311,81 @@ class DailySnapshot(BaseModel):
     root_cause_distribution: dict = {}
     per_strategy_summary: dict = {}
     overlay_state_summary: dict | None = None
-    experiment_breakdown: dict | None = None  # 1.4: swing_trader per-experiment A/B stats
+    experiment_breakdown: dict | None = None  # 1.4: swing_multi_01 per-experiment A/B stats
 
     # Macro regime context (from portfolio-level HMM classifier)
     regime_context: dict | None = None  # RegimeContext snapshot (macro_regime, confidence, stress, etc.)
     applied_regime_config: dict | None = None  # Active regime-adjusted portfolio config
 
     calmar_rolling_30d: float = 0.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_reference_payload(cls, data: Any) -> Any:
+        data = _copy_metadata_identity(data)
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        bot_id = str(normalized.get("bot_id", ""))
+        normalized["per_strategy_summary"] = _normalize_strategy_keyed_dict(
+            bot_id, normalized.get("per_strategy_summary", {}),
+        )
+        return normalized
+
+
+class PipelineFunnelSnapshot(BaseModel):
+    """Crypto strategy pipeline funnel snapshot.
+
+    Accepts both the current crypto_trader JSONL shape
+    (strategy_id/timestamp/period_start/period_end/funnel/assessment) and the
+    flatter assistant-side shape used by earlier planning notes.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    event_metadata: Optional[EventMetadata] = None
+    metadata: dict[str, Any] | None = None
+    bot_id: str = ""
+    strategy_id: str = ""
+    date: str = ""
+    timestamp: str = ""
+    period_start: str = ""
+    period_end: str = ""
+    funnel: dict[str, Any] = Field(default_factory=dict)
+    signals_generated: int = 0
+    setups_qualified: int = 0
+    confirmations_passed: int = 0
+    entries_taken: int = 0
+    wins: int = 0
+    losses: int = 0
+    per_strategy_breakdown: dict[str, Any] = Field(default_factory=dict)
+    per_symbol_breakdown: dict[str, Any] = Field(default_factory=dict)
+    assessment: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_reference_payload(cls, data: Any) -> Any:
+        return _copy_metadata_identity(data)
+
+
+class HealthReportSnapshot(BaseModel):
+    """Crypto bot health report snapshot."""
+
+    model_config = {"extra": "ignore"}
+
+    event_metadata: Optional[EventMetadata] = None
+    metadata: dict[str, Any] | None = None
+    bot_id: str = ""
+    timestamp: str = ""
+    report: dict[str, Any] = Field(default_factory=dict)
+    uptime_pct: float = 0.0
+    last_event_age_sec: float = 0.0
+    queue_depth: int = 0
+    funding_drift_per_symbol: dict[str, Any] = Field(default_factory=dict)
+    websocket_disconnects_24h: int = 0
+    error_count_24h: int = 0
+    severity: str = ""
+    notes: str = ""
 
 
 class RegimeTransitionEvent(BaseModel):

@@ -243,9 +243,9 @@ class TestPatternLibrary:
         entry = PatternEntry(
             title="Time-of-day gate for NQ strategies",
             category=PatternCategory.FILTER,
-            source_bot="momentum_trader",
+            source_bot="momentum_nq_01",
             source_strategy="NQDTC",
-            target_bots=["swing_trader"],
+            target_bots=["swing_multi_01"],
             description="NQ strategies perform better outside first 30 min",
             evidence="45 trades over 60 days, Calmar +0.3",
         )

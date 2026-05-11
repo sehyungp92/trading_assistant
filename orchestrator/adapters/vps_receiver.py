@@ -8,6 +8,7 @@ Protocol:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -65,10 +66,15 @@ class VPSReceiver:
             if not events:
                 return 0
 
-            # Add received_at timestamp for local tracking
+            # Add received_at timestamp and normalize relay payloads for the
+            # local SQLite queue. Some relays return decoded JSON objects while
+            # EventQueue stores payload as text.
             now = datetime.now(timezone.utc).isoformat()
-            for event in events:
-                event.setdefault("received_at", now)
+            normalized_events = [
+                self._normalize_relay_event(event, received_at=now)
+                for event in events
+            ]
+            for event in normalized_events:
                 # Record latency if tracker available
                 if self._latency_tracker:
                     ex_ts = event.get("exchange_timestamp", "")
@@ -78,18 +84,56 @@ class VPSReceiver:
                             event.get("bot_id", "unknown"), ex_ts, rx_ts,
                         )
 
-            result = await self._queue.enqueue_batch(events)
+            result = await self._queue.enqueue_batch(normalized_events)
             logger.info(
                 "Pulled %d events (%d new, %d dup)",
                 len(events), result.inserted, result.duplicates,
             )
 
             # Ack the last event on relay
-            last_event_id = events[-1]["event_id"]
+            last_event_id = normalized_events[-1]["event_id"]
             await client.post("/ack", json={"watermark": last_event_id})
             await self._queue.update_watermark(self._watermark_key, last_event_id)
 
             return result.inserted
+
+    def _normalize_relay_event(self, event: dict, *, received_at: str) -> dict:
+        normalized = dict(event)
+        normalized.setdefault("received_at", received_at)
+
+        payload = normalized.get("payload", {})
+        payload_obj = payload
+        if isinstance(payload, str):
+            try:
+                payload_obj = json.loads(payload)
+            except json.JSONDecodeError:
+                payload_obj = payload
+        elif isinstance(payload, (dict, list)):
+            normalized["payload"] = json.dumps(payload, default=str)
+        else:
+            normalized["payload"] = json.dumps(payload, default=str)
+
+        normalized.setdefault(
+            "exchange_timestamp",
+            self._extract_exchange_timestamp(payload_obj) or received_at,
+        )
+        return normalized
+
+    @staticmethod
+    def _extract_exchange_timestamp(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("exchange_timestamp", "timestamp", "period_end"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for meta_key in ("metadata", "event_metadata"):
+            meta = payload.get(meta_key)
+            if isinstance(meta, dict):
+                value = meta.get("exchange_timestamp")
+                if isinstance(value, str) and value:
+                    return value
+        return ""
 
     async def poll(self) -> int:
         """Pull with retry-safe error handling. Returns events pulled, 0 on failure."""

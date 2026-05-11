@@ -14,6 +14,51 @@ def protected_app(tmp_path):
     return create_app(db_dir=str(tmp_path), config=config)
 
 
+class TestPublicBindRequiresAuth:
+    """P0-2: refuse startup when bound non-loopback without an API key."""
+
+    def test_default_without_key_is_refused(self, tmp_path):
+        config = AppConfig(orchestrator_api_key="", bind_host="127.0.0.1")
+        with pytest.raises(RuntimeError, match="ORCHESTRATOR_API_KEY"):
+            create_app(db_dir=str(tmp_path), config=config)
+
+    def test_explicit_loopback_dev_without_key_is_allowed(self, tmp_path):
+        config = AppConfig(orchestrator_api_key="", bind_host="127.0.0.1")
+        config.allow_unauthenticated_local = True
+        # Should not raise.
+        create_app(db_dir=str(tmp_path), config=config)
+
+    def test_localhost_alias_treated_as_loopback(self, tmp_path):
+        config = AppConfig(
+            orchestrator_api_key="",
+            bind_host="localhost",
+            allow_unauthenticated_local=True,
+        )
+        create_app(db_dir=str(tmp_path), config=config)
+
+    def test_public_bind_without_key_refused(self, tmp_path):
+        config = AppConfig(
+            orchestrator_api_key="",
+            bind_host="0.0.0.0",
+            allow_unauthenticated_local=True,
+        )
+        with pytest.raises(RuntimeError, match="ORCHESTRATOR_API_KEY"):
+            create_app(db_dir=str(tmp_path), config=config)
+
+    def test_empty_bind_without_key_refused(self, tmp_path):
+        config = AppConfig(
+            orchestrator_api_key="",
+            bind_host="",
+            allow_unauthenticated_local=True,
+        )
+        with pytest.raises(RuntimeError, match="ORCHESTRATOR_API_KEY"):
+            create_app(db_dir=str(tmp_path), config=config)
+
+    def test_public_bind_with_key_allowed(self, tmp_path):
+        config = AppConfig(orchestrator_api_key="secret", bind_host="0.0.0.0")
+        create_app(db_dir=str(tmp_path), config=config)
+
+
 class TestOrchestratorApiKeyAuth:
     @pytest.mark.asyncio
     async def test_health_remains_open(self, protected_app):

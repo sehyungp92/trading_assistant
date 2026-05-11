@@ -58,25 +58,51 @@ class EventQueue:
         return cursor.rowcount > 0
 
     async def enqueue_batch(self, events: list[dict]) -> BatchResult:
-        """Insert a batch of events with idempotent dedup. Returns counts."""
-        inserted = 0
-        for event in events:
-            cursor = await self.db.execute(
-                """INSERT OR IGNORE INTO events
-                   (event_id, bot_id, event_type, payload, exchange_timestamp, received_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    event["event_id"],
-                    event["bot_id"],
-                    event["event_type"],
-                    event["payload"],
-                    event["exchange_timestamp"],
-                    event["received_at"],
-                ),
+        """Insert a batch of events with idempotent dedup. Returns counts.
+
+        P2-5: uses executemany so a 1000-event relay drain incurs one
+        round-trip instead of 1000.
+        """
+        if not events:
+            return BatchResult(inserted=0, duplicates=0)
+
+        rows = [
+            (
+                event["event_id"],
+                event["bot_id"],
+                event["event_type"],
+                event["payload"],
+                event["exchange_timestamp"],
+                event["received_at"],
             )
-            inserted += cursor.rowcount
+            for event in events
+        ]
+        # changes() reflects total mutations; capture the delta around
+        # executemany since aiosqlite doesn't surface per-statement rowcount
+        # for executemany reliably across versions.
+        before_cursor = await self.db.execute("SELECT changes()")
+        before_row = await before_cursor.fetchone()
+        before_total = await self._total_changes()
+
+        await self.db.executemany(
+            """INSERT OR IGNORE INTO events
+               (event_id, bot_id, event_type, payload, exchange_timestamp, received_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
         await self.db.commit()
+
+        after_total = await self._total_changes()
+        inserted = max(0, after_total - before_total)
+        # Defensive cap: inserted cannot exceed batch size.
+        inserted = min(inserted, len(events))
+        del before_row  # cursor cleanup
         return BatchResult(inserted=inserted, duplicates=len(events) - inserted)
+
+    async def _total_changes(self) -> int:
+        cursor = await self.db.execute("SELECT total_changes()")
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
 
     async def claim(self, limit: int = 10) -> list[dict]:
         """Atomically claim pending events for processing.
@@ -116,10 +142,39 @@ class EventQueue:
         row = await cursor.fetchone()
         return row[0] if row else 0
 
+    async def oldest_pending_age_seconds(self) -> float:
+        """Return seconds since the oldest pending event was enqueued (P2-8).
+
+        Returns 0.0 when the queue has no pending events. Uses julianday
+        differential so the value reflects wall-clock age regardless of
+        process restarts.
+        """
+        cursor = await self.db.execute(
+            """SELECT (julianday('now') - julianday(MIN(created_at))) * 86400
+               FROM events WHERE status = 'pending'"""
+        )
+        row = await cursor.fetchone()
+        if not row or row[0] is None:
+            return 0.0
+        return float(row[0])
+
     async def ack(self, event_id: str) -> None:
         """Mark an event as acknowledged/processed."""
         await self.db.execute(
             "UPDATE events SET status = 'acked', processed_at = datetime('now') WHERE event_id = ?",
+            (event_id,),
+        )
+        await self.db.commit()
+
+    async def requeue(self, event_id: str) -> None:
+        """Reset an event to pending without incrementing retry_count.
+
+        Use for transient back-pressure (e.g. subagent capacity) where the
+        event should be retried but the failure should not count against the
+        dead-letter budget.
+        """
+        await self.db.execute(
+            "UPDATE events SET status = 'pending', processed_at = NULL WHERE event_id = ?",
             (event_id,),
         )
         await self.db.commit()

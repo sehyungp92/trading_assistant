@@ -502,7 +502,10 @@ def _set_provider_statuses(app, statuses: dict[AgentProvider, tuple[bool, str, s
 @pytest.fixture
 def app_factory(tmp_path):
     def _create():
-        return create_app(db_dir=str(tmp_path), config=AppConfig())
+        return create_app(
+            db_dir=str(tmp_path),
+            config=AppConfig(allow_unauthenticated_local=True),
+        )
 
     return _create
 

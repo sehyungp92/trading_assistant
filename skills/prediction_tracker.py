@@ -6,6 +6,7 @@ Storage: memory/findings/predictions.jsonl
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,9 @@ from schemas.prediction_tracking import (
     PredictionRecord,
     PredictionVerdict,
 )
+from orchestrator.jsonl_store import append_jsonl
+
+logger = logging.getLogger(__name__)
 
 
 _NOISE_THRESHOLDS: dict[str, float] = {
@@ -36,33 +40,45 @@ class PredictionTracker:
         """Append structured predictions for a given week/date."""
         if not predictions:
             return
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "a", encoding="utf-8") as f:
-            for p in predictions:
-                record = PredictionRecord(
-                    bot_id=p.bot_id,
-                    strategy_id=getattr(p, "strategy_id", None) or None,
-                    metric=p.metric,
-                    direction=p.direction,
-                    confidence=p.confidence,
-                    timeframe_days=p.timeframe_days,
-                    reasoning=p.reasoning,
-                    week=week,
-                )
-                f.write(json.dumps(record.model_dump(mode="json"), default=str) + "\n")
+        records = []
+        for p in predictions:
+            record = PredictionRecord(
+                bot_id=p.bot_id,
+                strategy_id=getattr(p, "strategy_id", None) or None,
+                metric=p.metric,
+                direction=p.direction,
+                confidence=p.confidence,
+                timeframe_days=p.timeframe_days,
+                reasoning=p.reasoning,
+                week=week,
+            )
+            records.append(record.model_dump(mode="json"))
+        append_jsonl(self._path, records)
 
     def load_predictions(self, week: str | None = None) -> list[PredictionRecord]:
-        """Load predictions, optionally filtered by week."""
+        """Load predictions, optionally filtered by week.
+
+        P2-1: malformed lines are logged and skipped rather than crashing.
+        """
         if not self._path.exists():
             return []
         records: list[PredictionRecord] = []
-        for line in self._path.read_text(encoding="utf-8").strip().splitlines():
+        for n, line in enumerate(
+            self._path.read_text(encoding="utf-8").splitlines(), 1,
+        ):
             if not line.strip():
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Skipping malformed predictions.jsonl line %d", n)
+                continue
             if week and data.get("week") != week:
                 continue
-            records.append(PredictionRecord(**data))
+            try:
+                records.append(PredictionRecord(**data))
+            except Exception:
+                logger.warning("Skipping invalid PredictionRecord at line %d", n)
         return records
 
     def evaluate_predictions(

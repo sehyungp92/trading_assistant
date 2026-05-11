@@ -12,7 +12,11 @@ from orchestrator.scheduler import SchedulerConfig, create_scheduler_jobs
 
 @pytest.fixture
 def app_with_tmp(tmp_path):
-    config = AppConfig(data_dir=str(tmp_path), bot_ids=["bot1"])
+    config = AppConfig(
+        data_dir=str(tmp_path),
+        bot_ids=["bot1"],
+        allow_unauthenticated_local=True,
+    )
     return create_app(db_dir=str(tmp_path), config=config)
 
 

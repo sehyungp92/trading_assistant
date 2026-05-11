@@ -124,6 +124,28 @@ class TestVPSReceiver:
         pulled = await receiver.pull_and_store()
         assert pulled == 0
 
+    async def test_pull_normalizes_decoded_payload_from_relay(
+        self, fake_relay, relay_app, local_queue,
+    ):
+        fake_relay.events.append({
+            "event_id": "decoded1",
+            "bot_id": "bot1",
+            "event_type": "pipeline_funnels",
+            "payload": {
+                "strategy_id": "momentum",
+                "timestamp": "2026-03-01T14:00:00+00:00",
+                "funnel": {"bars_received": {"BTC": 1}},
+            },
+        })
+
+        receiver = _make_receiver(relay_app, local_queue)
+        pulled = await receiver.pull_and_store()
+
+        assert pulled == 1
+        pending = await local_queue.peek(limit=10)
+        assert pending[0]["payload"].startswith("{")
+        assert pending[0]["exchange_timestamp"] == "2026-03-01T14:00:00+00:00"
+
     async def test_ack_after_pull(self, fake_relay, relay_app, local_queue):
         fake_relay.seed(count=2)
 

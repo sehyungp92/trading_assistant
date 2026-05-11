@@ -242,28 +242,28 @@ class TestFullYAMLFile:
         return load_strategy_registry(_REAL_YAML)
 
     def test_loads_all_strategies(self, full_registry: StrategyRegistry) -> None:
-        # Reference monorepo deletions (breakout, brs, keltner, helix_v40,
-        # us_orb) and additions (tpc, nq_regime) reduced the count from
-        # 20 to 16 in the optimisation commit.
+        # Reference monorepo deletions (breakout, keltner, helix_v40, etc.)
+        # and additions (tpc, nq_regime) reduced the count from 20 to 16
+        # in the optimisation commit.
         assert len(full_registry.strategies) == 16
 
     def test_swing_bot_has_3_strategies(self, full_registry: StrategyRegistry) -> None:
         # ATRSS, AKC_HELIX, TPC. Earlier 6-strategy roster lost
-        # SWING_BREAKOUT_V3, S5_PB, S5_DUAL, BRS_R9 and gained TPC.
+        # SWING_BREAKOUT_V3, S5_PB, S5_DUAL and gained TPC.
         assert len(full_registry.strategies_for_bot("swing_multi_01")) == 3
 
     def test_momentum_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("momentum_nq_01")) == 4
 
     def test_stock_bot_has_2_strategies(self, full_registry: StrategyRegistry) -> None:
-        # IARIC_v1, ALCB_v1. US_ORB_v1 was retired upstream.
+        # IARIC_v1, ALCB_v1.
         assert len(full_registry.strategies_for_bot("stock_trader")) == 2
 
     def test_k_stock_bot_has_4_strategies(self, full_registry: StrategyRegistry) -> None:
         assert len(full_registry.strategies_for_bot("k_stock_trader")) == 4
 
     def test_tpc_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
-        # TPC replaced the deleted breakout/brs/S5 swing entries.
+        # TPC replaced the deleted breakout/S5 swing entries.
         assert full_registry.archetype_for_strategy("TPC") == StrategyArchetype.PULLBACK
 
     def test_downturn_archetype_resolves(self, full_registry: StrategyRegistry) -> None:
@@ -296,7 +296,7 @@ class TestFullYAMLFile:
         self, full_registry: StrategyRegistry
     ) -> None:
         """Coordination signals must not reference strategies that have been
-        deleted upstream (BRS_R9, AKC_Helix_v40, US_ORB_v1, etc.)."""
+        deleted upstream (e.g. AKC_Helix_v40)."""
         active_ids = set(full_registry.strategies)
         for sig in full_registry.coordination.signals:
             for side in (sig.trigger, sig.target):

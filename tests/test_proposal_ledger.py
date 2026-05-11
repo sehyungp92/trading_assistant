@@ -10,6 +10,7 @@ from schemas.proposal_ledger import (
     ProposalOutcome,
     ProposalSource,
 )
+from schemas.objective_weights import OBJECTIVE_WEIGHTS_VERSION
 from skills.proposal_ledger import ProposalLedger, make_proposal_id
 
 
@@ -116,6 +117,48 @@ def test_make_proposal_id_is_deterministic() -> None:
     b = make_proposal_id(ProposalSource.WFO, "bot_x", ProposalKind.PARAMETER_CHANGE, "tighten stop  ")
     assert a == b  # case + whitespace insensitive
     assert len(a) == 16
+
+
+def test_make_proposal_id_includes_strategy_and_stable_link() -> None:
+    base = make_proposal_id(
+        ProposalSource.LLM_DAILY,
+        "bot_x",
+        ProposalKind.PARAMETER_CHANGE,
+        "Tighten stop",
+        strategy_id="alpha",
+        link_key="suggestion-1",
+    )
+    different_strategy = make_proposal_id(
+        ProposalSource.LLM_DAILY,
+        "bot_x",
+        ProposalKind.PARAMETER_CHANGE,
+        "Tighten stop",
+        strategy_id="beta",
+        link_key="suggestion-1",
+    )
+    different_link = make_proposal_id(
+        ProposalSource.LLM_DAILY,
+        "bot_x",
+        ProposalKind.PARAMETER_CHANGE,
+        "Tighten stop",
+        strategy_id="alpha",
+        link_key="suggestion-2",
+    )
+
+    assert base != different_strategy
+    assert base != different_link
+
+
+def test_objective_version_defaults_on_evaluation_and_outcome() -> None:
+    assert ProposalEvaluation(
+        proposal_id="p1",
+        method="parameter_search",
+        decision="approve",
+    ).objective_version == OBJECTIVE_WEIGHTS_VERSION
+    assert ProposalOutcome(
+        proposal_id="p1",
+        verdict="positive",
+    ).objective_version == OBJECTIVE_WEIGHTS_VERSION
 
 
 def test_malformed_lines_are_tolerated(tmp_path: Path) -> None:

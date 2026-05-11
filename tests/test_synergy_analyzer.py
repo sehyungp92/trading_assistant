@@ -110,9 +110,9 @@ class TestSynergyAnalyzer:
     def test_same_instrument_detection_same_bot(self):
         analyzer = SynergyAnalyzer("2026-02-24", "2026-03-02")
         strats = {
-            "momentum_trader": {
-                "strat_a": _make_strat("strat_a", "momentum_trader", {d: 50.0 for d in _DATES}),
-                "strat_b": _make_strat("strat_b", "momentum_trader", {d: 30.0 for d in _DATES}),
+            "momentum_nq_01": {
+                "strat_a": _make_strat("strat_a", "momentum_nq_01", {d: 50.0 for d in _DATES}),
+                "strat_b": _make_strat("strat_b", "momentum_nq_01", {d: 30.0 for d in _DATES}),
             },
         }
         report = analyzer.compute(strats)

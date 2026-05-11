@@ -86,6 +86,25 @@ class TestWeeklyPromptAssembler:
         assert package.corrections is not None
         assert package.context_files is not None
 
+    def test_skips_malformed_weekly_json_and_records_error(self, setup_dirs):
+        curated, memory, runs = setup_dirs
+        bad_path = curated / "weekly" / "2026-02-23" / "weekly_summary.json"
+        bad_path.write_text("{not json", encoding="utf-8")
+        assembler = WeeklyPromptAssembler(
+            week_start="2026-02-23",
+            week_end="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated,
+            memory_dir=memory,
+            runs_dir=runs,
+        )
+
+        package = assembler.assemble()
+
+        assert "weekly_summary" not in package.data
+        assert any(e["path"] == str(bad_path) for e in package.data["data_load_errors"])
+        assert str(bad_path) not in package.context_files
+
     def test_system_prompt_includes_policies(self, setup_dirs):
         curated, memory, runs = setup_dirs
         assembler = WeeklyPromptAssembler(

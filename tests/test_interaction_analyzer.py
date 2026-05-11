@@ -32,7 +32,7 @@ def _make_trade(
 ) -> TradeEvent:
     return make_trade(
         trade_id=f"t-{pair}-{pnl}",
-        bot_id="swing_trader",
+        bot_id="swing_multi_01",
         pair=pair,
         side=side,
         entry_time=entry_time,
@@ -86,7 +86,7 @@ class TestSchemaDefaults:
 
     def test_interaction_report_defaults(self):
         r = InteractionReport(week_start="2026-01-01", week_end="2026-01-07")
-        assert r.bot_id == "swing_trader"
+        assert r.bot_id == "swing_multi_01"
         assert r.total_coordination_events == 0
         assert r.recommendation == ""
 

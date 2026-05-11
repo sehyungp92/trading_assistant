@@ -131,6 +131,17 @@ class TestConsolidate:
 
 
 class TestRebuildIndex:
+    def test_infers_project_root_from_memory_findings(self, tmp_path: Path):
+        findings = tmp_path / "memory" / "findings"
+        findings.mkdir(parents=True)
+        (tmp_path / "curated" / "2026-03-01" / "bot1").mkdir(parents=True)
+
+        consolidator = MemoryConsolidator(findings)
+        index = consolidator.rebuild_index()
+
+        assert index.curated_dates_by_bot["bot1"] == ["2026-03-01"]
+        assert (tmp_path / "memory" / "index.json").exists()
+
     def test_scans_curated_dates(self, project_dir: Path):
         consolidator = MemoryConsolidator(project_dir / "findings", base_dir=project_dir)
         index = consolidator.rebuild_index()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -143,3 +144,25 @@ class TestPredictionTracker:
         evaluation = tracker.evaluate_predictions("2026-03-01", tmp_path)
         assert evaluation.total == 0
         assert evaluation.accuracy == 0.0
+
+    def test_two_tracker_instances_serialize_appends(self, tmp_path):
+        tracker_a = PredictionTracker(tmp_path)
+        tracker_b = PredictionTracker(tmp_path)
+        prediction = AgentPrediction(
+            bot_id="bot1",
+            metric="pnl",
+            direction="improve",
+            confidence=0.8,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(tracker_a.record_predictions, "2026-03-01", [prediction]),
+                pool.submit(tracker_b.record_predictions, "2026-03-02", [prediction]),
+            ]
+            for future in futures:
+                future.result()
+
+        lines = (tmp_path / "predictions.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+        assert all(json.loads(line)["bot_id"] == "bot1" for line in lines)

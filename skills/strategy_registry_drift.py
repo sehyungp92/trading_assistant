@@ -5,7 +5,7 @@ Surfaces three categories of drift:
   - registered_but_missing: in registry but the reference dir is empty/absent
   - present_but_unregistered: live in references but no registry entry
   - empty_shell: dir exists but has no strategy code (deleted strategies leave
-    empty parent dirs, e.g. brs/, breakout/, keltner/, helix_v40/, us_orb/)
+    empty parent dirs, e.g. breakout/, keltner/, helix_v40/)
 
 Records the finding to memory/findings/strategy_registry_drift.jsonl.
 """

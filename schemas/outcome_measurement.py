@@ -10,6 +10,8 @@ from typing import Optional
 
 from pydantic import BaseModel, computed_field
 
+from schemas.objective_weights import OBJECTIVE_WEIGHTS_VERSION
+
 
 class Verdict(str, Enum):
     POSITIVE = "positive"
@@ -81,6 +83,7 @@ class OutcomeMeasurement(BaseModel):
     # Cross-links into proposal/hypothesis graph (optional)
     proposal_id: Optional[str] = None
     hypothesis_id: Optional[str] = None
+    objective_version: str = OBJECTIVE_WEIGHTS_VERSION
 
     @computed_field  # type: ignore[prop-decorator]
     @property

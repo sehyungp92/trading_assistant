@@ -45,7 +45,7 @@ class TestBotDailySummaryPerStrategy:
     def test_with_strategy_data(self):
         b = BotDailySummary(
             date="2026-03-01",
-            bot_id="momentum_trader",
+            bot_id="momentum_nq_01",
             per_strategy_summary={
                 "momentum_long": PerStrategySummary(
                     strategy_id="momentum_long", trades=5, net_pnl=200.0,
@@ -68,7 +68,7 @@ class TestDailySnapshotPerStrategy:
     def test_with_per_strategy_and_overlay(self):
         snap = DailySnapshot(
             date="2026-03-01",
-            bot_id="swing_trader",
+            bot_id="swing_multi_01",
             per_strategy_summary={
                 "ATRSS": {"trades": 3, "net_pnl": 150.0},
                 "Helix": {"trades": 2, "net_pnl": -30.0},
@@ -88,7 +88,7 @@ class TestStrategyWeeklySummary:
     def test_full_weekly_strategy(self):
         s = StrategyWeeklySummary(
             strategy_id="mean_revert",
-            bot_id="swing_trader",
+            bot_id="swing_multi_01",
             total_trades=28,
             win_count=18,
             loss_count=10,
@@ -118,10 +118,10 @@ class TestBotWeeklySummaryPerStrategy:
         b = BotWeeklySummary(
             week_start="2026-02-24",
             week_end="2026-03-02",
-            bot_id="momentum_trader",
+            bot_id="momentum_nq_01",
             per_strategy_summary={
                 "strat_a": StrategyWeeklySummary(
-                    strategy_id="strat_a", bot_id="momentum_trader",
+                    strategy_id="strat_a", bot_id="momentum_nq_01",
                     total_trades=10, net_pnl=500.0,
                 ),
             },

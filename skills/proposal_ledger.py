@@ -39,6 +39,8 @@ def make_proposal_id(
     kind: ProposalKind,
     title: str,
     proposed_at: datetime | None = None,
+    strategy_id: str = "",
+    link_key: str = "",
 ) -> str:
     """Deterministic 16-char proposal_id (sha256 prefix).
 
@@ -46,7 +48,15 @@ def make_proposal_id(
     ledger naturally deduplicates re-runs of the same handler within a day.
     """
     when = proposed_at or datetime.now(timezone.utc)
-    raw = f"{source.value}|{bot_id}|{kind.value}|{title.strip().lower()}|{when.date().isoformat()}"
+    raw = "|".join([
+        source.value,
+        bot_id,
+        kind.value,
+        strategy_id.strip(),
+        link_key.strip(),
+        title.strip().lower(),
+        when.date().isoformat(),
+    ])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 

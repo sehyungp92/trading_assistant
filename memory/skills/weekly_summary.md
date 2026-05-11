@@ -16,7 +16,7 @@ Scheduled weekly on Sunday via APScheduler cron job.
    - Proportion optimization (intra-bot strategy allocation)
    - Structural analysis (lifecycle stage, architecture mismatches)
    - Regime-conditional metrics (per-regime Sharpe/win_rate)
-   - Interaction analysis (swing_trader coordinator effects)
+   - Interaction analysis (swing_multi_01 coordinator effects)
 5. **Weekly Retrospective** — compare last week's predictions/warnings to actual outcomes.
 6. **Context Assembly** — load policies, corrections, failure log, pattern library, allocation history.
 7. **Prompt Assembly** — 18-step structured analysis framework.
@@ -38,7 +38,7 @@ Scheduled weekly on Sunday via APScheduler cron job.
 ## Quality Criteria
 - Do NOT repeat what daily reports already said — synthesize higher-level patterns
 - Each suggestion must quantify Calmar ratio impact with evidence base
-- Cross-reference against rejected suggestions — do not re-suggest without new evidence
+- Cross-reference against rejected suggestions and recent_proposal_outcomes; do not re-suggest without new evidence
 - Review allocation analysis and validate whether changes make strategic sense
 - Consider second-order effects of allocation changes
 - Propose structural improvements (Tier 3-4) with specific test plans

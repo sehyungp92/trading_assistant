@@ -276,7 +276,7 @@ class TestDailyMetricsPipelineEnriched:
 class TestPerStrategyPipeline:
     """Tests for per-strategy summary mapping from DailySnapshot data."""
 
-    def test_momentum_trader_format(self):
+    def test_momentum_nq_01_format(self):
         """Multi-strategy bot with multiple keys in per_strategy_summary."""
         snapshot = {
             "per_strategy_summary": {
@@ -296,7 +296,7 @@ class TestPerStrategyPipeline:
                 },
             }
         }
-        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="momentum_trader")
+        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="momentum_nq_01")
         result = builder.build_per_strategy_from_snapshot(snapshot)
 
         assert len(result) == 2
@@ -451,7 +451,7 @@ class TestExcursionStatsPipeline:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         t = TradeEvent(
-            trade_id="exc1", bot_id="swing_trader", pair="BTCUSDT",
+            trade_id="exc1", bot_id="swing_multi_01", pair="BTCUSDT",
             side="LONG", entry_time=now, exit_time=now,
             entry_price=50000, exit_price=50500, position_size=1.0,
             pnl=500, pnl_pct=1.0,
@@ -570,7 +570,7 @@ class TestOverlayStatePipeline:
 
     def test_write_curated_with_overlay_state(self, tmp_path: Path):
         """write_curated writes overlay_state_summary.json when present in snapshot."""
-        trades = [_make_trade("t1", "swing_trader", 100.0)]
+        trades = [_make_trade("t1", "swing_multi_01", 100.0)]
         missed: list = []
         snapshot = {
             "per_strategy_summary": {},
@@ -596,7 +596,7 @@ class TestOverlayStatePipeline:
             },
         }
 
-        builder = DailyMetricsBuilder(date="2026-03-06", bot_id="swing_trader")
+        builder = DailyMetricsBuilder(date="2026-03-06", bot_id="swing_multi_01")
         output_dir = builder.write_curated(trades, missed, base_dir=tmp_path, daily_snapshot=snapshot)
 
         overlay_path = output_dir / "overlay_state_summary.json"
@@ -638,7 +638,7 @@ class TestOverlayStatePipeline:
         from analysis.prompt_assembler import DailyPromptAssembler
 
         # Set up curated dir with overlay file
-        bot_dir = tmp_path / "curated" / "2026-03-06" / "swing_trader"
+        bot_dir = tmp_path / "curated" / "2026-03-06" / "swing_multi_01"
         bot_dir.mkdir(parents=True)
         overlay_data = {"total_unrealized_pnl": 242.50, "capital_deployed_pct": 42.0}
         (bot_dir / "overlay_state_summary.json").write_text(json.dumps(overlay_data))
@@ -654,19 +654,19 @@ class TestOverlayStatePipeline:
 
         assembler = DailyPromptAssembler(
             date="2026-03-06",
-            bots=["swing_trader"],
+            bots=["swing_multi_01"],
             curated_dir=tmp_path / "curated",
             memory_dir=memory_dir,
         )
         pkg = assembler.assemble()
-        assert "overlay_state_summary" in pkg.data["swing_trader"]
-        assert pkg.data["swing_trader"]["overlay_state_summary"]["total_unrealized_pnl"] == 242.50
+        assert "overlay_state_summary" in pkg.data["swing_multi_01"]
+        assert pkg.data["swing_multi_01"]["overlay_state_summary"]["total_unrealized_pnl"] == 242.50
 
 
 class TestCoordinatorImpactRawEvents:
     def test_coordinator_impact_includes_raw_events(self):
         """Verify coordinator_impact() output includes 'events' key with original event dicts."""
-        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_trader")
+        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_multi_01")
         events = [
             {"action": "tighten_stop_be", "rule": "rule_1", "symbol": "BTCUSDT"},
             {"action": "size_boost", "rule": "rule_2", "symbol": "ETHUSDT"},
@@ -680,7 +680,7 @@ class TestCoordinatorImpactRawEvents:
 
     def test_coordinator_impact_empty_includes_events_key(self):
         """Empty coordination events should still have an 'events' key."""
-        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_trader")
+        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_multi_01")
         result = builder.coordinator_impact([])
         assert "events" in result
         assert result["events"] == []
@@ -694,7 +694,7 @@ class TestExperimentBreakdownPipeline:
         """DailySnapshot schema accepts experiment_breakdown field."""
         from schemas.events import DailySnapshot
         snap = DailySnapshot(
-            date="2026-03-01", bot_id="swing_trader",
+            date="2026-03-01", bot_id="swing_multi_01",
             experiment_breakdown={"v1": {"trades": 10, "pnl": 500}},
         )
         assert snap.experiment_breakdown == {"v1": {"trades": 10, "pnl": 500}}
@@ -702,12 +702,12 @@ class TestExperimentBreakdownPipeline:
     def test_snapshot_schema_defaults_to_none(self):
         """DailySnapshot defaults experiment_breakdown to None."""
         from schemas.events import DailySnapshot
-        snap = DailySnapshot(date="2026-03-01", bot_id="swing_trader")
+        snap = DailySnapshot(date="2026-03-01", bot_id="swing_multi_01")
         assert snap.experiment_breakdown is None
 
     def test_write_curated_writes_experiment_breakdown(self, tmp_path: Path):
         """write_curated writes experiment_data.json when snapshot has data."""
-        trades = [_make_trade("t1", "swing_trader", 100.0)]
+        trades = [_make_trade("t1", "swing_multi_01", 100.0)]
         missed: list = []
         snapshot = {
             "per_strategy_summary": {},
@@ -716,7 +716,7 @@ class TestExperimentBreakdownPipeline:
                 "variant_b": {"trades": 5, "pnl": -50, "win_rate": 0.4},
             },
         }
-        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_trader")
+        builder = DailyMetricsBuilder(date="2026-03-01", bot_id="swing_multi_01")
         output_dir = builder.write_curated(trades, missed, base_dir=tmp_path, daily_snapshot=snapshot)
 
         exp_path = output_dir / "experiment_data.json"
@@ -751,7 +751,7 @@ class TestExperimentBreakdownPipeline:
         """DailyPromptAssembler loads experiment_data when file exists."""
         from analysis.prompt_assembler import DailyPromptAssembler
 
-        bot_dir = tmp_path / "curated" / "2026-03-01" / "swing_trader"
+        bot_dir = tmp_path / "curated" / "2026-03-01" / "swing_multi_01"
         bot_dir.mkdir(parents=True)
         exp_data = {"variant_a": {"trades": 5, "pnl": 200}}
         (bot_dir / "experiment_data.json").write_text(json.dumps(exp_data))
@@ -764,12 +764,12 @@ class TestExperimentBreakdownPipeline:
         (memory_dir / "findings").mkdir(parents=True)
 
         assembler = DailyPromptAssembler(
-            date="2026-03-01", bots=["swing_trader"],
+            date="2026-03-01", bots=["swing_multi_01"],
             curated_dir=tmp_path / "curated", memory_dir=memory_dir,
         )
         pkg = assembler.assemble()
-        assert "experiment_data" in pkg.data["swing_trader"]
-        assert pkg.data["swing_trader"]["experiment_data"]["variant_a"]["pnl"] == 200
+        assert "experiment_data" in pkg.data["swing_multi_01"]
+        assert pkg.data["swing_multi_01"]["experiment_data"]["variant_a"]["pnl"] == 200
 
 
 class TestSignalHealthPipeline:
@@ -777,7 +777,7 @@ class TestSignalHealthPipeline:
 
     def test_trade_event_accepts_signal_evolution(self):
         """TradeEvent accepts signal_evolution field."""
-        t = _make_trade("t1", "momentum_trader", 100.0, signal_evolution=[
+        t = _make_trade("t1", "momentum_nq_01", 100.0, signal_evolution=[
             {"bar": 1, "rsi": 0.7, "macd": 0.3},
             {"bar": 2, "rsi": 0.8, "macd": 0.4},
         ])
@@ -889,9 +889,9 @@ class TestSignalHealthPipeline:
         """DailyPromptAssembler loads signal_health data when file exists."""
         from analysis.prompt_assembler import DailyPromptAssembler
 
-        bot_dir = tmp_path / "curated" / "2026-03-01" / "momentum_trader"
+        bot_dir = tmp_path / "curated" / "2026-03-01" / "momentum_nq_01"
         bot_dir.mkdir(parents=True)
-        sh_data = {"bot_id": "momentum_trader", "components": [], "total_trades_with_data": 5}
+        sh_data = {"bot_id": "momentum_nq_01", "components": [], "total_trades_with_data": 5}
         (bot_dir / "signal_health.json").write_text(json.dumps(sh_data))
 
         memory_dir = tmp_path / "memory"
@@ -902,11 +902,11 @@ class TestSignalHealthPipeline:
         (memory_dir / "findings").mkdir(parents=True)
 
         assembler = DailyPromptAssembler(
-            date="2026-03-01", bots=["momentum_trader"],
+            date="2026-03-01", bots=["momentum_nq_01"],
             curated_dir=tmp_path / "curated", memory_dir=memory_dir,
         )
         pkg = assembler.assemble()
-        assert "signal_health" in pkg.data["momentum_trader"]
+        assert "signal_health" in pkg.data["momentum_nq_01"]
 
     def test_strategy_engine_detects_degraded_components(self):
         """detect_component_signal_decay flags components with low stability/correlation."""
@@ -978,7 +978,7 @@ class TestFillQualityPipeline:
 
     def test_trade_event_accepts_fill_details(self):
         """TradeEvent accepts entry/exit fill detail fields."""
-        t = _make_trade("t1", "momentum_trader", 100.0,
+        t = _make_trade("t1", "momentum_nq_01", 100.0,
             entry_fill_details={"slippage_bps": 0.5, "fill_latency_ms": 12, "fill_type": "limit"},
             exit_fill_details={"slippage_bps": 1.2, "fill_latency_ms": 8, "fill_type": "market"},
         )

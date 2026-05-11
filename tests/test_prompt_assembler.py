@@ -113,6 +113,45 @@ class TestDailyPromptAssembler:
 
         assert "portfolio_risk_card" in prompt.data
 
+    def test_skips_malformed_bot_json_and_records_error(
+        self, curated_dir: Path, memory_dir: Path,
+    ):
+        bad_path = curated_dir / "2026-03-01" / "bot1" / "winners.json"
+        bad_path.write_text("{not json", encoding="utf-8")
+
+        assembler = DailyPromptAssembler(
+            date="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated_dir,
+            memory_dir=memory_dir,
+        )
+        prompt = assembler.assemble()
+
+        assert "summary" in prompt.data["bot1"]
+        assert "winners" not in prompt.data["bot1"]
+        assert prompt.data["data_load_errors"]
+        assert str(bad_path) == prompt.data["data_load_errors"][0]["path"]
+        assert str(bad_path) not in prompt.context_files
+
+    def test_skips_malformed_portfolio_json_and_keeps_valid_files(
+        self, curated_dir: Path, memory_dir: Path,
+    ):
+        bad_path = curated_dir / "2026-03-01" / "portfolio_risk_card.json"
+        bad_path.write_text("{not json", encoding="utf-8")
+
+        assembler = DailyPromptAssembler(
+            date="2026-03-01",
+            bots=["bot1"],
+            curated_dir=curated_dir,
+            memory_dir=memory_dir,
+        )
+        prompt = assembler.assemble()
+
+        assert "summary" in prompt.data["bot1"]
+        assert "portfolio_risk_card" not in prompt.data
+        assert any(e["path"] == str(bad_path) for e in prompt.data["data_load_errors"])
+        assert str(bad_path) not in prompt.context_files
+
     def test_includes_instructions(self, curated_dir: Path, memory_dir: Path):
         assembler = DailyPromptAssembler(
             date="2026-03-01",

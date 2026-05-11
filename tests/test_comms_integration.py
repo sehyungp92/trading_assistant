@@ -164,7 +164,11 @@ class TestNotificationEndpoints:
     @pytest.fixture
     def app(self, tmp_path):
         from orchestrator.app import create_app
-        return create_app(db_dir=str(tmp_path))
+        from orchestrator.config import AppConfig
+        return create_app(
+            db_dir=str(tmp_path),
+            config=AppConfig(allow_unauthenticated_local=True),
+        )
 
     @pytest.mark.asyncio
     async def test_get_preferences_returns_defaults(self, app):

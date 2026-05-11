@@ -128,9 +128,9 @@ class TestStrategyProportionOptimizer:
         opt = StrategyProportionOptimizer("2026-02-24", "2026-03-02")
         daily = {d: 50.0 for d in _DATES}
         strats = {
-            "momentum_trader": {
-                "long": _make_strat("long", "momentum_trader", dict(daily)),
-                "short": _make_strat("short", "momentum_trader", dict(daily)),
+            "momentum_nq_01": {
+                "long": _make_strat("long", "momentum_nq_01", dict(daily)),
+                "short": _make_strat("short", "momentum_nq_01", dict(daily)),
             },
         }
         report = opt.compute(strats)
@@ -141,9 +141,9 @@ class TestStrategyProportionOptimizer:
         opt = StrategyProportionOptimizer("2026-02-24", "2026-03-02")
         daily = {d: 50.0 for d in _DATES}
         strats = {
-            "swing_trader": {
-                "a": _make_strat("a", "swing_trader", dict(daily)),
-                "b": _make_strat("b", "swing_trader", dict(daily)),
+            "swing_multi_01": {
+                "a": _make_strat("a", "swing_multi_01", dict(daily)),
+                "b": _make_strat("b", "swing_multi_01", dict(daily)),
             },
         }
         report = opt.compute(strats)

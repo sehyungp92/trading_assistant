@@ -8,6 +8,11 @@ from typing import Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
+
+class CapacityExceeded(Exception):
+    """Raised when SubagentManager has no available slots for a new spawn."""
+
+
 @dataclass
 class SubagentInfo:
     """Metadata about a running subagent."""

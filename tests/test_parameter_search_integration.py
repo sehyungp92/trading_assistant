@@ -76,7 +76,7 @@ def _make_pipeline(
     simulate_fn=None,
     with_searcher: bool = True,
     with_experiment_gen: bool = False,
-    with_experiment_tracker: bool = False,
+    with_experiment_manager: bool = False,
 ) -> tuple[AutonomousPipeline, Path]:
     """Build pipeline with or without parameter_searcher."""
     config_dir = _write_bot_config(tmp_path)
@@ -99,10 +99,10 @@ def _make_pipeline(
             experiment_id="exp_001",
         )
 
-    exp_tracker = None
-    if with_experiment_tracker:
-        exp_tracker = MagicMock()
-        exp_tracker.get_active_experiments.return_value = []
+    exp_manager = None
+    if with_experiment_manager:
+        exp_manager = MagicMock()
+        exp_manager.get_active.return_value = []
 
     findings_dir = tmp_path / "findings"
     findings_dir.mkdir()
@@ -114,7 +114,7 @@ def _make_pipeline(
         suggestion_tracker=suggestion_tracker,
         parameter_searcher=searcher,
         experiment_config_generator=exp_gen,
-        experiment_tracker=exp_tracker,
+        experiment_manager=exp_manager,
         search_log_dir=findings_dir,
     )
     return pipeline, findings_dir
@@ -198,7 +198,7 @@ class TestSearchExperimentFlow:
         """EXPERIMENT routing creates a structural change request via ExperimentConfigGenerator."""
         pipeline, findings_dir = _make_pipeline(
             tmp_path, with_searcher=True,
-            with_experiment_gen=True, with_experiment_tracker=True,
+            with_experiment_gen=True, with_experiment_manager=True,
         )
 
         pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
@@ -227,13 +227,13 @@ class TestSearchExperimentFlow:
         """When bot already has 2 active experiments, EXPERIMENT route returns None."""
         pipeline, findings_dir = _make_pipeline(
             tmp_path, with_searcher=True,
-            with_experiment_gen=True, with_experiment_tracker=True,
+            with_experiment_gen=True, with_experiment_manager=True,
         )
 
         # Mock 2 active experiments for bot1
         mock_exp1 = MagicMock(bot_id="bot1")
         mock_exp2 = MagicMock(bot_id="bot1")
-        pipeline._experiment_tracker.get_active_experiments.return_value = [mock_exp1, mock_exp2]
+        pipeline._experiment_manager.get_active.return_value = [mock_exp1, mock_exp2]
 
         pipeline._parameter_searcher.search_with_regime_analysis.return_value = ParameterSearchReport(
             suggestion_id="sug1",

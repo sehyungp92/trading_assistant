@@ -6,6 +6,7 @@ import pytest
 from orchestrator.worker import Worker
 from orchestrator.orchestrator_brain import OrchestratorBrain
 from orchestrator.db.queue import EventQueue
+from orchestrator.subagent import CapacityExceeded
 from orchestrator.task_registry import TaskRegistry
 
 
@@ -84,6 +85,32 @@ class TestWorker:
     async def test_empty_queue_returns_zero(self, worker: Worker):
         processed = await worker.process_batch(limit=10)
         assert processed == 0
+
+    async def test_capacity_exceeded_requeues_without_consuming_retry(
+        self, worker: Worker, queue: EventQueue,
+    ):
+        async def raise_capacity(action):
+            raise CapacityExceeded("no slot")
+
+        worker.on_daily_analysis = raise_capacity
+
+        await queue.enqueue({
+            "event_id": "daily-trigger-001",
+            "bot_id": "bot1",
+            "event_type": "daily_analysis_trigger",
+            "payload": "{}",
+            "exchange_timestamp": "2026-03-01T14:00:00+00:00",
+            "received_at": "2026-03-01T14:00:01+00:00",
+        })
+
+        processed = await worker.process_batch(limit=10)
+        assert processed == 0  # not counted as processed
+
+        # Event must be back in pending state, not acked, not dead-lettered
+        pending = await queue.peek(limit=10)
+        assert len(pending) == 1
+        assert pending[0]["event_id"] == "daily-trigger-001"
+        assert pending[0]["retry_count"] == 0
 
 
 class TestPersistRawEvent:

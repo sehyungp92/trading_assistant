@@ -5,7 +5,7 @@ entry_slippage_bps, session_type, signal_id, strategy_id, etc.) are correctly
 captured by the extended schemas, and that unknown fields are silently ignored.
 
 stock_trader uses a single bot_id ("stock_trader") with strategy_id to
-distinguish strategies (iaric, us_orb), matching k_stock_trader's multi-strategy
+distinguish strategies (iaric, alcb, etc.), matching k_stock_trader's multi-strategy
 pattern.
 """
 
@@ -48,9 +48,9 @@ def _make_base_missed(**overrides) -> dict:
     """Minimal valid MissedOpportunityEvent payload."""
     base = dict(
         bot_id="stock_trader",
-        strategy_id="us_orb",
+        strategy_id="alcb",
         pair="MSFT",
-        signal="orb_breakout_long",
+        signal="breakout_long",
         signal_strength=0.78,
         blocked_by="spread_filter",
         hypothetical_entry=420.50,
@@ -66,12 +66,12 @@ def _make_base_missed(**overrides) -> dict:
 class TestStrategyIdField:
     """Verify strategy_id distinguishes strategies within a multi-strategy bot."""
 
-    @pytest.mark.parametrize("strategy_id", ["iaric", "us_orb", "kmp", ""])
+    @pytest.mark.parametrize("strategy_id", ["iaric", "alcb", "kmp", ""])
     def test_strategy_id_in_trade(self, strategy_id):
         trade = TradeEvent.model_validate(_make_base_trade(strategy_id=strategy_id))
         assert trade.strategy_id == strategy_id
 
-    @pytest.mark.parametrize("strategy_id", ["iaric", "us_orb", ""])
+    @pytest.mark.parametrize("strategy_id", ["iaric", "alcb", ""])
     def test_strategy_id_in_missed(self, strategy_id):
         event = MissedOpportunityEvent.model_validate(
             _make_base_missed(strategy_id=strategy_id)
@@ -86,9 +86,9 @@ class TestStrategyIdField:
         assert trade.strategy_id == ""
 
     def test_strategy_id_roundtrip(self):
-        original = TradeEvent.model_validate(_make_base_trade(strategy_id="us_orb"))
+        original = TradeEvent.model_validate(_make_base_trade(strategy_id="alcb"))
         restored = TradeEvent.model_validate(original.model_dump(mode="json"))
-        assert restored.strategy_id == "us_orb"
+        assert restored.strategy_id == "alcb"
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ class TestMissedOpportunityStockTraderFields:
     """Verify MissedOpportunityEvent captures stock_trader extras."""
 
     @pytest.mark.parametrize("field,value", [
-        ("signal_id", "sig_orb_20260314_MSFT"),
+        ("signal_id", "sig_alcb_20260314_MSFT"),
         ("block_reason", "spread_too_wide"),
         ("backfill_status", "completed"),
         ("simulation_confidence", 0.85),
@@ -326,7 +326,7 @@ class TestMultiStrategyBotIds:
 
     @pytest.mark.parametrize("bot_id,strategy_id", [
         ("stock_trader", "iaric"),
-        ("stock_trader", "us_orb"),
+        ("stock_trader", "alcb"),
         ("k_stock_trader", "kmp"),
         ("k_stock_trader", "nulrimok"),
     ])
@@ -339,7 +339,7 @@ class TestMultiStrategyBotIds:
 
     @pytest.mark.parametrize("bot_id,strategy_id", [
         ("stock_trader", "iaric"),
-        ("stock_trader", "us_orb"),
+        ("stock_trader", "alcb"),
     ])
     def test_bot_strategy_in_missed_events(self, bot_id, strategy_id):
         event = MissedOpportunityEvent.model_validate(

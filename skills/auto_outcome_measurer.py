@@ -7,17 +7,21 @@ and statistical significance estimation.
 from __future__ import annotations
 
 import json
-import math
 import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from schemas.outcome_measurement import (
-    MeasurementQuality,
     OutcomeMeasurement,
     compute_measurement_quality,
     compute_significance,
 )
+
+if TYPE_CHECKING:
+    from skills.backtest_calibration_tracker import BacktestCalibrationTracker
+    from skills.hypothesis_library import HypothesisLibrary
+    from skills.proposal_ledger import ProposalLedger
 
 
 class AutoOutcomeMeasurer:
@@ -32,6 +36,10 @@ class AutoOutcomeMeasurer:
         "position_sizing": "pnl",
         "regime_gate": "drawdown",
         "structural": "pnl",
+        "funding_threshold": "pnl",
+        "leverage_cap": "drawdown",
+        "confluence_count": "win_rate",
+        "setup_grade_filter": "win_rate",
     }
 
     def __init__(
@@ -57,6 +65,7 @@ class AutoOutcomeMeasurer:
         implemented_date: str,
         before_days: int = 7,
         after_days: int = 7,
+        record_feedback: bool = True,
     ) -> OutcomeMeasurement | None:
         """Compare performance before and after a suggestion was implemented.
 
@@ -197,38 +206,56 @@ class AutoOutcomeMeasurer:
                 "proposal_id": proposal_id or None,
             })
 
-        # Feed back to calibration tracker (approximate composite delta)
+        if record_feedback:
+            self.record_measurement_feedback(measurement)
+
+        return measurement
+
+    def record_measurement_feedback(self, measurement: OutcomeMeasurement) -> None:
+        """Record learning feedback once for a selected persisted measurement."""
+        suggestion_id = measurement.suggestion_id
+        hypothesis_id = measurement.hypothesis_id or ""
+        proposal_id = measurement.proposal_id or ""
+        if not hypothesis_id or not proposal_id:
+            loaded_hypothesis_id, loaded_proposal_id = self._load_suggestion_links(suggestion_id)
+            hypothesis_id = hypothesis_id or loaded_hypothesis_id
+            proposal_id = proposal_id or loaded_proposal_id
+
         delta = self._estimate_composite_delta(measurement)
         if self._calibration_tracker:
             self._calibration_tracker.record_outcome(suggestion_id, delta)
 
-        # Feed back to hypothesis library for non-A/B suggestion outcomes
-        # (A/B-experiment outcomes are recorded separately in app.py::_check_experiments)
-        if self._hypothesis_library and hypothesis_id:
+        verdict = measurement.verdict
+        verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
+
+        # A/B and structural experiment outcomes are recorded separately by app.py.
+        if self._hypothesis_library and hypothesis_id and verdict_str in ("positive", "negative"):
             try:
                 positive = self._is_positive_outcome(measurement, delta)
-                self._hypothesis_library.record_outcome(hypothesis_id, positive=positive)
+                self._hypothesis_library.record_outcome(
+                    hypothesis_id,
+                    positive=positive,
+                )
             except Exception:
                 pass
 
-        # Feed back to proposal ledger
         if self._proposal_ledger and proposal_id:
             try:
                 from schemas.proposal_ledger import ProposalOutcome
-                verdict = measurement.verdict
-                verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
+                measurement_path = ""
+                if self._findings_dir:
+                    measurement_path = str(self._findings_dir / "outcomes.jsonl")
                 self._proposal_ledger.record_outcome(
                     proposal_id,
                     ProposalOutcome(
                         proposal_id=proposal_id,
                         objective_delta=float(delta),
                         verdict=verdict_str,
+                        measurement_path=measurement_path,
                     ),
                 )
             except Exception:
                 pass
-
-        return measurement
 
     @staticmethod
     def _is_positive_outcome(measurement: OutcomeMeasurement, delta: float) -> bool:
@@ -345,11 +372,19 @@ class AutoOutcomeMeasurer:
                 implemented_date=implemented_date,
                 before_days=window,
                 after_days=window,
+                record_feedback=False,
             )
             if result is None:
                 continue
             rank = self._QUALITY_RANK.get(result.measurement_quality.value, 0)
-            if rank > best_rank:
+            if (
+                rank > best_rank
+                or (
+                    best is not None
+                    and rank == best_rank
+                    and result.window_days > best.window_days
+                )
+            ):
                 best = result
                 best_rank = rank
 

@@ -11,6 +11,8 @@ class TestBrainErrorRouting:
     """The brain already handles error events, but now we test the full severity spectrum."""
 
     def test_critical_error_produces_alert(self):
+        # P1-1: critical errors emit both ALERT_IMMEDIATE and QUEUE_FOR_DAILY
+        # so the failure is also persisted in the raw daily store.
         brain = OrchestratorBrain()
         event = {
             "event_id": "e1",
@@ -23,10 +25,12 @@ class TestBrainErrorRouting:
             }),
         }
         actions = brain.decide(event)
-        assert len(actions) == 1
-        assert actions[0].type == ActionType.ALERT_IMMEDIATE
+        types = [a.type for a in actions]
+        assert ActionType.ALERT_IMMEDIATE in types
+        assert ActionType.QUEUE_FOR_DAILY in types
 
     def test_high_error_spawns_triage(self):
+        # P1-1: high errors emit both SPAWN_TRIAGE and QUEUE_FOR_DAILY.
         brain = OrchestratorBrain()
         event = {
             "event_id": "e2",
@@ -35,8 +39,9 @@ class TestBrainErrorRouting:
             "payload": json.dumps({"severity": "HIGH"}),
         }
         actions = brain.decide(event)
-        assert len(actions) == 1
-        assert actions[0].type == ActionType.SPAWN_TRIAGE
+        types = [a.type for a in actions]
+        assert ActionType.SPAWN_TRIAGE in types
+        assert ActionType.QUEUE_FOR_DAILY in types
 
     def test_medium_error_queues_for_daily(self):
         brain = OrchestratorBrain()

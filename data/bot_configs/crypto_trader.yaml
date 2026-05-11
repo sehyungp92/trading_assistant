@@ -3,14 +3,16 @@ repo_url: git@github.com:user/crypto_trader.git
 repo_dir: /repos/crypto_trader
 default_branch: main
 allowed_edit_paths:
-  - config/*
-  - strategy/*
+  - config/strategies/*
+  - src/crypto_trader/strategy/*
   - tests/*
   - docs/*
 structural_context_paths:
-  - config/*
-  - strategy/*
-  - backtest/*
+  - config/strategies/*
+  - src/crypto_trader/strategy/*
+  - src/crypto_trader/portfolio/*
+  - src/crypto_trader/instrumentation/*
+  - tests/*
 verification_commands:
   - pytest tests -q
 strategies:
@@ -19,11 +21,12 @@ strategies:
   - VolumeProfileBreakout_M30
 parameters:
   # === MomentumPullback_M15 — Crypto Momentum Pullback ===
+  # Indicators (entry signal)
   - param_name: ema_fast
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.ema_fast
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.indicators.ema_fast
     current_value: 20
     valid_range: [8, 50]
     value_type: int
@@ -31,9 +34,9 @@ parameters:
     is_safety_critical: false
   - param_name: ema_mid
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.ema_mid
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.indicators.ema_mid
     current_value: 50
     valid_range: [20, 100]
     value_type: int
@@ -41,9 +44,9 @@ parameters:
     is_safety_critical: false
   - param_name: ema_slow
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.ema_slow
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.indicators.ema_slow
     current_value: 200
     valid_range: [100, 300]
     value_type: int
@@ -51,19 +54,43 @@ parameters:
     is_safety_critical: false
   - param_name: adx_period
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.adx_period
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.indicators.adx_period
     current_value: 14
     valid_range: [7, 28]
     value_type: int
     category: entry_signal
     is_safety_critical: false
+
+  # Bias (HTF context)
+  - param_name: min_4h_conditions
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.bias.min_4h_conditions
+    current_value: 2
+    valid_range: [1, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: h1_adx_threshold
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.bias.h1_adx_threshold
+    current_value: 10.0
+    valid_range: [5.0, 30.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # Setup (confluence + room)
   - param_name: min_confluences_a
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.min_confluences_a
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.setup.min_confluences_a
     current_value: 2
     valid_range: [1, 4]
     value_type: int
@@ -71,9 +98,9 @@ parameters:
     is_safety_critical: false
   - param_name: min_confluences_b
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.min_confluences_b
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.setup.min_confluences_b
     current_value: 1
     valid_range: [0, 3]
     value_type: int
@@ -81,9 +108,9 @@ parameters:
     is_safety_critical: false
   - param_name: min_room_a
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.min_room_a
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.setup.min_room_a
     current_value: 2.0
     valid_range: [1.0, 4.0]
     value_type: float
@@ -91,345 +118,751 @@ parameters:
     is_safety_critical: false
   - param_name: min_room_b
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: entry.min_room_b
-    current_value: 1.6
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.setup.min_room_b
+    current_value: 1.25
     valid_range: [0.8, 3.0]
     value_type: float
     category: entry_signal
     is_safety_critical: false
+
+  # Entry mode (ablation)
+  - param_name: entry_on_close
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.entry.entry_on_close
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # Risk (safety-critical)
   - param_name: risk_pct_a
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: risk.risk_pct_a
-    current_value: 0.0075
-    valid_range: [0.002, 0.015]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.risk.risk_pct_a
+    current_value: 0.019
+    valid_range: [0.002, 0.025]
     value_type: float
     category: risk_management
     is_safety_critical: true
   - param_name: risk_pct_b
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: risk.risk_pct_b
-    current_value: 0.004
-    valid_range: [0.001, 0.01]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.risk.risk_pct_b
+    current_value: 0.0076
+    valid_range: [0.001, 0.015]
     value_type: float
     category: risk_management
     is_safety_critical: true
   - param_name: max_leverage_major
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: risk.max_leverage_major
-    current_value: 5.0
-    valid_range: [1.0, 10.0]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.risk.max_leverage_major
+    current_value: 10.0
+    valid_range: [1.0, 15.0]
     value_type: float
     category: risk_management
     is_safety_critical: true
   - param_name: max_leverage_alt
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: risk.max_leverage_alt
-    current_value: 4.0
-    valid_range: [1.0, 8.0]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.risk.max_leverage_alt
+    current_value: 8.0
+    valid_range: [1.0, 12.0]
     value_type: float
     category: risk_management
     is_safety_critical: true
-  - param_name: max_concurrent
+  - param_name: max_concurrent_positions
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: risk.max_concurrent
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.risk.max_concurrent_positions
     current_value: 3
     valid_range: [1, 5]
     value_type: int
     category: risk_management
     is_safety_critical: true
+
+  # Exits
   - param_name: tp1_r
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: exit.tp1_r
-    current_value: 1.0
-    valid_range: [0.5, 2.0]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.tp1_r
+    current_value: 1.2
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp1_frac
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.tp1_frac
+    current_value: 0.16
+    valid_range: [0.05, 0.5]
     value_type: float
     category: exit_timing
     is_safety_critical: false
   - param_name: tp2_r
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: exit.tp2_r
-    current_value: 2.0
-    valid_range: [1.0, 4.0]
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.tp2_r
+    current_value: 2.5
+    valid_range: [1.0, 4.5]
     value_type: float
     category: exit_timing
     is_safety_critical: false
-  - param_name: soft_time_stop
+  - param_name: tp2_frac
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: exit.soft_time_stop
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.tp2_frac
+    current_value: 0.2
+    valid_range: [0.05, 0.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: soft_time_stop_bars
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.soft_time_stop_bars
     current_value: 12
     valid_range: [4, 24]
     value_type: int
     category: exit_timing
     is_safety_critical: false
-  - param_name: hard_time_stop
+  - param_name: hard_time_stop_bars
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: exit.hard_time_stop
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.exits.hard_time_stop_bars
     current_value: 20
     valid_range: [8, 48]
     value_type: int
     category: exit_timing
     is_safety_critical: false
-  - param_name: funding_extreme
+
+  # Filters (funding is safety-critical for crypto perps)
+  - param_name: funding_extreme_threshold
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: filters.funding_extreme
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.filters.funding_extreme_threshold
     current_value: 0.01
     valid_range: [0.005, 0.03]
     value_type: float
     category: filter_threshold
     is_safety_critical: true
+  - param_name: funding_moderate_threshold
+    strategy_id: MomentumPullback_M15
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.filters.funding_moderate_threshold
+    current_value: 0.005
+    valid_range: [0.001, 0.015]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
   - param_name: atr_expansion_mult
     strategy_id: MomentumPullback_M15
-    param_type: PYTHON_CONSTANT
-    file_path: config/momentum_pullback.toml
-    python_path: filters.atr_expansion_mult
+    param_type: JSON_FIELD
+    file_path: config/strategies/momentum.json
+    python_path: strategy.filters.atr_expansion_mult
     current_value: 2.5
     valid_range: [1.5, 4.0]
     value_type: float
     category: filter_threshold
     is_safety_critical: false
 
-  # === InstitutionalAnchor_H1 — Institutional Anchor ===
-  - param_name: min_4h_conditions
+  # === InstitutionalAnchor_H1 — Trend (D1 anchor → H1 impulse-pullback) ===
+  # Indicators
+  - param_name: h1_ema_fast
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.min_4h_conditions
-    current_value: 2
-    valid_range: [1, 4]
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.h1_indicators.ema_fast
+    current_value: 30
+    valid_range: [10, 50]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: h1_adx_threshold
+  - param_name: h1_ema_mid
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.h1_adx_threshold
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.h1_indicators.ema_mid
+    current_value: 50
+    valid_range: [20, 100]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: h1_ema_slow
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.h1_indicators.ema_slow
+    current_value: 200
+    valid_range: [100, 300]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: d1_ema_fast
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.d1_indicators.ema_fast
+    current_value: 21
+    valid_range: [10, 50]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+
+  # Regime gate
+  - param_name: a_min_adx
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.regime.a_min_adx
+    current_value: 12.0
+    valid_range: [5.0, 25.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: b_min_adx
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.regime.b_min_adx
+    current_value: 8.0
+    valid_range: [4.0, 20.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: h1_min_adx
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.regime.h1_min_adx
     current_value: 20.0
     valid_range: [10.0, 35.0]
     value_type: float
     category: entry_signal
     is_safety_critical: false
-  - param_name: min_confluences_a
+
+  # Setup (weighted confluence, single min_confluences field)
+  - param_name: min_confluences
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.min_confluences_a
-    current_value: 2
-    valid_range: [1, 4]
-    value_type: int
-    category: entry_signal
-    is_safety_critical: false
-  - param_name: min_confluences_b
-    strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.min_confluences_b
-    current_value: 1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.setup.min_confluences
+    current_value: 0
     valid_range: [0, 3]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: risk_pct_a
+  - param_name: min_setup_score_a
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: risk.risk_pct_a
-    current_value: 0.0075
-    valid_range: [0.002, 0.015]
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.setup.min_setup_score_a
+    current_value: 2.05
+    valid_range: [1.0, 4.0]
     value_type: float
-    category: risk_management
-    is_safety_critical: true
-  - param_name: risk_pct_b
-    strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: risk.risk_pct_b
-    current_value: 0.004
-    valid_range: [0.001, 0.01]
-    value_type: float
-    category: risk_management
-    is_safety_critical: true
-  - param_name: tp1_r
-    strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: exit.tp1_r
-    current_value: 1.0
-    valid_range: [0.5, 2.0]
-    value_type: float
-    category: exit_timing
+    category: entry_signal
     is_safety_critical: false
-  - param_name: tp2_r
+  - param_name: min_setup_score_b
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: exit.tp2_r
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.setup.min_setup_score_b
+    current_value: 1.35
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_r
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.setup.min_room_r
+    current_value: 1.5
+    valid_range: [0.8, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_r_a
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.setup.min_room_r_a
     current_value: 2.0
     valid_range: [1.0, 4.0]
     value_type: float
-    category: exit_timing
+    category: entry_signal
     is_safety_critical: false
+
+  # Entry / confirmation (ablation)
   - param_name: entry_on_close
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.entry_on_close
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.entry.entry_on_close
     current_value: true
     valid_values: [true, false]
     value_type: bool
     category: ablation
     is_safety_critical: false
-  - param_name: require_volume
+  - param_name: require_volume_confirm
     strategy_id: InstitutionalAnchor_H1
-    param_type: PYTHON_CONSTANT
-    file_path: config/institutional_anchor.toml
-    python_path: entry.require_volume
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.confirmation.require_volume_confirm
     current_value: true
     valid_values: [true, false]
     value_type: bool
     category: ablation
     is_safety_critical: false
 
-  # === VolumeProfileBreakout_M30 — Volume Profile Breakout ===
-  - param_name: volume_bins
+  # Risk (safety-critical)
+  - param_name: risk_pct_a
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.risk.risk_pct_a
+    current_value: 0.012
+    valid_range: [0.002, 0.025]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_pct_b
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.risk.risk_pct_b
+    current_value: 0.0216
+    valid_range: [0.005, 0.04]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_major
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.risk.max_leverage_major
+    current_value: 15.0
+    valid_range: [1.0, 20.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_alt
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.risk.max_leverage_alt
+    current_value: 12.0
+    valid_range: [1.0, 15.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_concurrent_positions
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.limits.max_concurrent_positions
+    current_value: 5
+    valid_range: [1, 8]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+
+  # Exits
+  - param_name: tp1_r
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.exits.tp1_r
+    current_value: 1.2
+    valid_range: [0.5, 2.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_r
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.exits.tp2_r
+    current_value: 1.8
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: time_stop_bars
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.exits.time_stop_bars
+    current_value: 12
+    valid_range: [4, 32]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+
+  # Filters
+  - param_name: funding_filter_enabled
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.filters.funding_filter_enabled
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: funding_extreme_threshold
+    strategy_id: InstitutionalAnchor_H1
+    param_type: JSON_FIELD
+    file_path: config/strategies/trend.json
+    python_path: strategy.filters.funding_extreme_threshold
+    current_value: 0.001
+    valid_range: [0.0005, 0.01]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: true
+
+  # === VolumeProfileBreakout_M30 — Volume Profile / LVN runway breakout ===
+  # Indicators
+  - param_name: ema_fast
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.volume_bins
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.m30_indicators.ema_fast
+    current_value: 20
+    valid_range: [8, 50]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: ema_mid
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.m30_indicators.ema_mid
     current_value: 50
     valid_range: [20, 100]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: lookback_bars
+  - param_name: ema_slow
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.lookback_bars
-    current_value: 36
-    valid_range: [12, 72]
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.m30_indicators.ema_slow
+    current_value: 100
+    valid_range: [50, 250]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: balance_min_bars
+
+  # Volume profile
+  - param_name: num_bins
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.balance_min_bars
-    current_value: 4
-    valid_range: [2, 12]
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.profile.num_bins
+    current_value: 50
+    valid_range: [20, 100]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: balance_min_touches
+  - param_name: profile_lookback_bars
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.balance_min_touches
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.profile.lookback_bars
+    current_value: 38
+    valid_range: [12, 96]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+
+  # Balance zone (range detection)
+  - param_name: min_bars_in_zone
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.balance.min_bars_in_zone
+    current_value: 6
+    valid_range: [2, 16]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_touches
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.balance.min_touches
     current_value: 2
     valid_range: [1, 5]
     value_type: int
     category: entry_signal
     is_safety_critical: false
-  - param_name: balance_atr_width
+  - param_name: zone_width_atr
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.balance_atr_width
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.balance.zone_width_atr
     current_value: 1.2
     valid_range: [0.5, 2.5]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # H4 context
+  - param_name: h4_adx_threshold
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.context.h4_adx_threshold
+    current_value: 12.0
+    valid_range: [5.0, 30.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # Setup (confluence + room)
+  - param_name: min_confluences_a_plus
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_confluences_a_plus
+    current_value: 4
+    valid_range: [2, 6]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_a
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_confluences_a
+    current_value: 2
+    valid_range: [1, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_confluences_b
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_confluences_b
+    current_value: 0
+    valid_range: [0, 3]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_r_a
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_room_r_a
+    current_value: 1.8
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_room_r_b
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_room_r_b
+    current_value: 1.2
+    valid_range: [0.8, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: min_breakout_atr
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_breakout_atr
+    current_value: 0.2
+    valid_range: [0.05, 0.6]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: max_breakout_atr
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.max_breakout_atr
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
     value_type: float
     category: entry_signal
     is_safety_critical: false
   - param_name: volume_surge_mult
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: entry.volume_surge_mult
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.volume_surge_mult
     current_value: 1.3
     valid_range: [1.0, 2.5]
     value_type: float
     category: entry_signal
     is_safety_critical: false
-  - param_name: tp1_r
+  - param_name: min_lvn_runway_atr
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: exit.tp1_r
-    current_value: 0.8
-    valid_range: [0.4, 1.5]
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.setup.min_lvn_runway_atr
+    current_value: 0.3
+    valid_range: [0.1, 1.5]
     value_type: float
-    category: exit_timing
+    category: entry_signal
     is_safety_critical: false
-  - param_name: tp2_r
+
+  # Risk (safety-critical)
+  - param_name: risk_pct_a_plus
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: exit.tp2_r
-    current_value: 2.0
-    valid_range: [1.0, 4.0]
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.risk.risk_pct_a_plus
+    current_value: 0.007875
+    valid_range: [0.002, 0.015]
     value_type: float
-    category: exit_timing
-    is_safety_critical: false
-  - param_name: quick_exit_bars
-    strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: exit.quick_exit_bars
-    current_value: 4
-    valid_range: [2, 10]
-    value_type: int
-    category: exit_timing
-    is_safety_critical: false
-  - param_name: invalidation_reentry_atr
-    strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: exit.invalidation_reentry_atr
-    current_value: 1.2
-    valid_range: [0.5, 2.5]
-    value_type: float
-    category: exit_timing
-    is_safety_critical: false
+    category: risk_management
+    is_safety_critical: true
   - param_name: risk_pct_a
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: risk.risk_pct_a
-    current_value: 0.0075
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.risk.risk_pct_a
+    current_value: 0.007875
     valid_range: [0.002, 0.015]
     value_type: float
     category: risk_management
     is_safety_critical: true
   - param_name: risk_pct_b
     strategy_id: VolumeProfileBreakout_M30
-    param_type: PYTHON_CONSTANT
-    file_path: config/volume_profile_breakout.toml
-    python_path: risk.risk_pct_b
-    current_value: 0.004
-    valid_range: [0.001, 0.01]
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.risk.risk_pct_b
+    current_value: 0.0277725
+    valid_range: [0.005, 0.04]
     value_type: float
     category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_major
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.risk.max_leverage_major
+    current_value: 10.0
+    valid_range: [1.0, 15.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_leverage_alt
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.risk.max_leverage_alt
+    current_value: 8.0
+    valid_range: [1.0, 12.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_concurrent_positions
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.limits.max_concurrent_positions
+    current_value: 3
+    valid_range: [1, 6]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+
+  # Exits
+  - param_name: tp1_r
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.exits.tp1_r
+    current_value: 1.0
+    valid_range: [0.4, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: tp2_r
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.exits.tp2_r
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: time_stop_bars
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.exits.time_stop_bars
+    current_value: 16
+    valid_range: [4, 32]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: invalidation_depth_atr
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.exits.invalidation_depth_atr
+    current_value: 0.8
+    valid_range: [0.3, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: quick_exit_bars
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.exits.quick_exit_bars
+    current_value: 4
+    valid_range: [2, 12]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+
+  # Filters
+  - param_name: funding_filter_enabled
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.filters.funding_filter_enabled
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: funding_extreme_threshold
+    strategy_id: VolumeProfileBreakout_M30
+    param_type: JSON_FIELD
+    file_path: config/strategies/breakout.json
+    python_path: strategy.filters.funding_extreme_threshold
+    current_value: 0.001
+    valid_range: [0.0005, 0.01]
+    value_type: float
+    category: filter_threshold
     is_safety_critical: true

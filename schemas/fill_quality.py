@@ -1,6 +1,6 @@
 """Fill quality schemas — order fill analysis for adverse selection detection.
 
-Used by FillQualityAnalyzer to assess momentum_trader fill detail data.
+Used by FillQualityAnalyzer to assess momentum_nq_01 fill detail data.
 """
 from __future__ import annotations
 

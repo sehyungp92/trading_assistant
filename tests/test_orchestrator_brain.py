@@ -77,7 +77,7 @@ class TestOrchestratorBrain:
     def test_coordinator_action_queued_for_daily(self, brain: OrchestratorBrain):
         event = {
             "event_id": "ca001",
-            "bot_id": "swing_trader",
+            "bot_id": "swing_multi_01",
             "event_type": "coordinator_action",
             "source_strategy": "ATRSS",
             "target_strategy": "Helix",
@@ -86,7 +86,7 @@ class TestOrchestratorBrain:
         actions = brain.decide(event)
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
-        assert actions[0].bot_id == "swing_trader"
+        assert actions[0].bot_id == "swing_multi_01"
         assert actions[0].details["event_type"] == "coordinator_action"
         assert actions[0].details["payload"]["action"] == "tighten_stops"
 
@@ -101,6 +101,35 @@ class TestOrchestratorBrain:
         assert len(actions) == 1
         assert actions[0].type == ActionType.QUEUE_FOR_DAILY
         assert actions[0].details["event_type"] == "daily_snapshot"
+
+    @pytest.mark.parametrize(
+        ("relay_event_type", "canonical_event_type"),
+        [
+            ("instrumented_trades", "trade"),
+            ("missed_opportunities", "missed_opportunity"),
+            ("daily_snapshots", "daily_snapshot"),
+            ("pipeline_funnels", "pipeline_funnel"),
+            ("health_reports", "health_report"),
+        ],
+    )
+    def test_relay_file_event_aliases_queue_for_daily(
+        self,
+        brain: OrchestratorBrain,
+        relay_event_type: str,
+        canonical_event_type: str,
+    ):
+        event = {
+            "event_id": f"{relay_event_type}-001",
+            "bot_id": "crypto_trader",
+            "event_type": relay_event_type,
+            "payload": json.dumps({"timestamp": "2026-05-10T00:00:00+00:00"}),
+        }
+
+        actions = brain.decide(event)
+
+        assert len(actions) == 1
+        assert actions[0].type == ActionType.QUEUE_FOR_DAILY
+        assert actions[0].details["event_type"] == canonical_event_type
 
     def test_order_queued_for_daily(self, brain: OrchestratorBrain):
         event = {

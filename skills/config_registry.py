@@ -19,6 +19,7 @@ from schemas.autonomous_pipeline import (
     ParameterDefinition,
     ParameterType,
 )
+from skills.file_change_generator import FileChangeGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ class ConfigRegistry:
 
     def __init__(self, config_dir: Path) -> None:
         self._profiles: dict[str, BotConfigProfile] = {}
+        self._load_errors: list[str] = []
+        self._missing_repo_dirs_logged: set[Path] = set()
+        self._file_change_generator = FileChangeGenerator()
         self._load_profiles(config_dir)
 
     def _load_profiles(self, config_dir: Path) -> None:
@@ -41,10 +45,22 @@ class ConfigRegistry:
                 if not data or not isinstance(data, dict):
                     continue
                 bot_id = data.get("bot_id", yaml_file.stem)
+                repo_dir_raw = data.get("repo_dir", "")
+                repo_dir = Path(repo_dir_raw) if repo_dir_raw else None
                 params = []
                 for p in data.get("parameters", []):
-                    p["bot_id"] = bot_id
-                    params.append(ParameterDefinition(**p))
+                    raw_param = dict(p)
+                    raw_param["bot_id"] = bot_id
+                    try:
+                        param = ParameterDefinition(**raw_param)
+                    except Exception as exc:
+                        self._record_load_error(yaml_file, bot_id, raw_param, str(exc))
+                        continue
+                    ok, reason = self._validate_parameter_definition(param, repo_dir)
+                    if not ok:
+                        self._record_load_error(yaml_file, bot_id, raw_param, reason or "invalid")
+                        continue
+                    params.append(param)
                 profile = BotConfigProfile(
                     bot_id=bot_id,
                     repo_url=data.get("repo_url", ""),
@@ -61,8 +77,57 @@ class ConfigRegistry:
             except Exception:
                 logger.exception("Failed to load config from %s", yaml_file)
 
+    def _record_load_error(
+        self,
+        yaml_file: Path,
+        bot_id: str,
+        raw_param: dict,
+        reason: str,
+    ) -> None:
+        param_name = raw_param.get("param_name", "<unknown>")
+        msg = f"{yaml_file.name}:{bot_id}:{param_name}: {reason}"
+        self._load_errors.append(msg)
+        logger.warning("Skipping invalid config parameter %s", msg)
+
+    def _validate_parameter_definition(
+        self,
+        param: ParameterDefinition,
+        repo_dir: Path | None,
+    ) -> tuple[bool, str | None]:
+        if not param.file_path:
+            return False, "file_path is required"
+
+        if repo_dir is None:
+            return True, None
+        if not repo_dir.exists():
+            if repo_dir not in self._missing_repo_dirs_logged:
+                logger.info(
+                    "Repo dir %s is not present; deferring file-shape validation",
+                    repo_dir,
+                )
+                self._missing_repo_dirs_logged.add(repo_dir)
+            return True, None
+
+        target = repo_dir / param.file_path
+        if not target.exists():
+            return False, f"target file does not exist: {param.file_path}"
+
+        try:
+            self._file_change_generator.generate_change(
+                param,
+                param.current_value,
+                repo_dir,
+            )
+        except Exception as exc:
+            return False, f"unsupported parameter target: {exc}"
+        return True, None
+
     def get_profile(self, bot_id: str) -> BotConfigProfile | None:
         return self._profiles.get(bot_id)
+
+    @property
+    def load_errors(self) -> list[str]:
+        return list(self._load_errors)
 
     def get_parameter(self, bot_id: str, param_name: str) -> ParameterDefinition | None:
         profile = self._profiles.get(bot_id)

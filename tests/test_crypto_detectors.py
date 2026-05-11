@@ -401,6 +401,8 @@ def test_archetype_defaults_crypto():
     assert fi["institutional_anchor"]["cost_threshold"] == 0.20
     assert "volume_profile_breakout" in fi
     assert fi["volume_profile_breakout"]["cost_threshold"] == 0.10
+    assert defaults["funding_trend"]["volume_profile_breakout"]["cost_threshold"] == 0.10
+    assert defaults["liquidation_proximity"]["volume_profile_breakout"]["proximity_threshold"] == 0.65
 
 
 def test_detector_to_category_crypto():
@@ -411,6 +413,8 @@ def test_detector_to_category_crypto():
     assert mapping["grade_selectivity"] == "signal"
     assert mapping["confluence_quality"] == "filter_threshold"
     assert mapping["leverage_utilization"] == "position_sizing"
+    assert mapping["liquidation_proximity"] == "leverage_cap"
+    assert mapping["funding_trend"] == "funding_threshold"
 
 
 def test_empty_crypto_data_graceful():
@@ -421,3 +425,180 @@ def test_empty_crypto_data_graceful():
     assert engine.detect_grade_selectivity("bot1", {}) == []
     assert engine.detect_confluence_quality("bot1", {}) == []
     assert engine.detect_leverage_utilization("bot1", {}) == []
+    assert engine.detect_mtf_alignment_drift("bot1", []) == []
+    assert engine.detect_liquidation_proximity("bot1", []) == []
+    assert engine.detect_symbol_concentration("bot1", []) == []
+    assert engine.detect_session_patterns_24_7("bot1", []) == []
+    assert engine.detect_funding_trend("bot1", []) == []
+
+
+# ---------------------------------------------------------------------------
+# Additional crypto detector coverage
+# ---------------------------------------------------------------------------
+
+def _trade(**overrides) -> dict:
+    base = {
+        "trade_id": "t",
+        "bot_id": "crypto_trader",
+        "strategy_id": "MomentumPullback_M15",
+        "pair": "BTCUSDT",
+        "side": "LONG",
+        "bias_direction": "bullish",
+        "entry_time": "2026-04-01T01:00:00+00:00",
+        "exit_time": "2026-04-01T02:00:00+00:00",
+        "pnl": 10.0,
+        "mae_r": 0.1,
+        "funding_paid": 0.0,
+        "sizing_inputs": {"leverage": 3.0},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_detect_mtf_alignment_drift_positive():
+    engine = _make_engine()
+    trades = [
+        _trade(trade_id=f"a{i}", side="LONG", bias_direction="bullish", pnl=20)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"m{i}", side="SHORT", bias_direction="bullish", pnl=-10)
+        for i in range(6)
+    ]
+
+    suggestions = engine.detect_mtf_alignment_drift("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert suggestions[0].detection_context.detector_name == "mtf_alignment_drift"
+
+
+def test_detect_mtf_alignment_drift_threshold_edge_empty():
+    engine = _make_engine()
+    trades = [
+        _trade(trade_id=f"a{i}", side="LONG", bias_direction="bullish", pnl=10)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"m{i}", side="SHORT", bias_direction="bullish", pnl=-1)
+        for i in range(4)
+    ]
+
+    assert engine.detect_mtf_alignment_drift("crypto_trader", trades) == []
+
+
+def test_detect_mtf_alignment_drift_requires_win_rate_gap():
+    engine = _make_engine()
+    trades = [
+        _trade(trade_id=f"a{i}", side="LONG", bias_direction="bullish", pnl=10 if i < 5 else -10)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"m{i}", side="SHORT", bias_direction="bullish", pnl=8 if i < 3 else -10)
+        for i in range(6)
+    ]
+
+    assert engine.detect_mtf_alignment_drift("crypto_trader", trades) == []
+
+
+def test_detect_liquidation_proximity_positive():
+    engine = _make_engine()
+    trades = [_trade(trade_id="liq", mae_r=0.25, sizing_inputs={"leverage": 4.0})]
+
+    suggestions = engine.detect_liquidation_proximity("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert suggestions[0].detection_context.detector_name == "liquidation_proximity"
+    assert suggestions[0].detection_context.observed_value == 1.0
+
+
+def test_detect_liquidation_proximity_edge_empty():
+    engine = _make_engine()
+    trades = [_trade(trade_id="safe", mae_r=0.2, sizing_inputs={"leverage": 3.5})]
+
+    assert engine.detect_liquidation_proximity("crypto_trader", trades) == []
+
+
+def test_detect_symbol_concentration_positive():
+    engine = _make_engine()
+    trades = [
+        _trade(trade_id=f"btc{i}", pair="BTCUSDT", pnl=-10)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"eth{i}", pair="ETHUSDT", pnl=-1)
+        for i in range(5)
+    ]
+
+    suggestions = engine.detect_symbol_concentration("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert "BTC" in suggestions[0].title
+    assert suggestions[0].detection_context.detector_name == "symbol_concentration"
+
+
+def test_detect_session_patterns_24_7_positive():
+    engine = _make_engine()
+    trades = [
+        _trade(trade_id=f"asia{i}", exit_time=f"2026-04-01T0{i % 5}:00:00+00:00", pnl=-5)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"us{i}", exit_time=f"2026-04-01T1{3 + (i % 5)}:00:00+00:00", pnl=5)
+        for i in range(10)
+    ]
+
+    suggestions = engine.detect_session_patterns_24_7("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert "Asia" in suggestions[0].title
+    assert suggestions[0].detection_context.detector_name == "session_patterns_24_7"
+
+
+def test_detect_funding_trend_positive():
+    engine = _make_engine()
+    trades = []
+    for idx, (date, funding) in enumerate([
+        ("2026-03-01T12:00:00+00:00", 5),
+        ("2026-03-08T12:00:00+00:00", 10),
+        ("2026-03-15T12:00:00+00:00", 20),
+    ]):
+        trades.append(_trade(trade_id=f"fund{idx}", exit_time=date, pnl=100, funding_paid=-funding))
+
+    suggestions = engine.detect_funding_trend("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert suggestions[0].detection_context.detector_name == "funding_trend"
+    assert "BTC" in suggestions[0].title
+
+
+def test_detect_funding_trend_is_per_symbol():
+    engine = _make_engine()
+    trades = []
+    for idx, (date, funding) in enumerate([
+        ("2026-03-01T12:00:00+00:00", 2),
+        ("2026-03-08T12:00:00+00:00", 4),
+        ("2026-03-15T12:00:00+00:00", 20),
+    ]):
+        trades.append(_trade(trade_id=f"sol{idx}", pair="SOLUSDT", exit_time=date, pnl=100, funding_paid=-funding))
+        trades.append(_trade(trade_id=f"btc{idx}", pair="BTCUSDT", exit_time=date, pnl=100, funding_paid=-1))
+
+    suggestions = engine.detect_funding_trend("crypto_trader", trades)
+
+    assert len(suggestions) == 1
+    assert "SOL" in suggestions[0].title
+
+
+def test_build_report_with_crypto_trade_data_runs_new_detectors():
+    engine = _make_engine()
+    summaries = {"crypto_trader": _minimal_bot_summary()}
+    trades = [
+        _trade(trade_id=f"a{i}", side="LONG", bias_direction="bullish", pnl=20)
+        for i in range(10)
+    ] + [
+        _trade(trade_id=f"m{i}", side="SHORT", bias_direction="bullish", pnl=-10)
+        for i in range(6)
+    ]
+
+    report = engine.build_report(summaries, crypto_trade_data={"crypto_trader": trades})
+    detectors_seen = {
+        s.detection_context.detector_name
+        for s in report.suggestions
+        if s.detection_context is not None
+    }
+
+    assert "mtf_alignment_drift" in detectors_seen

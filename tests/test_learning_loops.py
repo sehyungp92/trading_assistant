@@ -1347,6 +1347,8 @@ class TestSharedTierMapping:
             "signal", "structural", "position_sizing", "regime_gate",
             "portfolio_allocation", "portfolio_risk_cap",
             "portfolio_coordination", "portfolio_drawdown_tier",
+            "funding_threshold", "leverage_cap",
+            "confluence_count", "setup_grade_filter",
         }
         assert set(CATEGORY_TO_TIER.keys()) == expected
 

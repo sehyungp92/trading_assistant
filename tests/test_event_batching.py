@@ -68,9 +68,13 @@ class TestEventBatchingConsumption:
         from orchestrator.handlers import Handlers
         from orchestrator.event_stream import EventStream
 
-        mock_runner = AsyncMock()
+        mock_runner = MagicMock()
         mock_runner.invoke = AsyncMock(return_value=MagicMock(
             success=True, response="test report", run_dir="/tmp/run",
+        ))
+        mock_runner.invoke_with_selection = AsyncMock(return_value=(
+            MagicMock(success=True, response="test report", run_dir="/tmp/run"),
+            "claude_max",
         ))
         mock_dispatcher = AsyncMock()
         mock_dispatcher.dispatch = AsyncMock()

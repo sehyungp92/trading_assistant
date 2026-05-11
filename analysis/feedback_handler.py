@@ -7,11 +7,16 @@ recent corrections as context (Ralph Loop V2).
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
+from orchestrator.input_sanitizer import InputSanitizer
+from orchestrator.jsonl_store import append_jsonl
 from schemas.corrections import HumanCorrection, CorrectionType
+
+
+class UnsafeFeedbackError(ValueError):
+    """Raised when inbound feedback fails deterministic sanitization."""
 
 
 class FeedbackHandler:
@@ -20,8 +25,14 @@ class FeedbackHandler:
     def __init__(self, report_id: str) -> None:
         self.report_id = report_id
 
-    def parse(self, text: str) -> HumanCorrection:
+    def parse(self, text: str, source: str = "feedback") -> HumanCorrection:
         """Classify and parse a human feedback message."""
+        text = str(text)
+        sanitized = InputSanitizer().sanitize(text, source=source)
+        if not sanitized.safe:
+            raise UnsafeFeedbackError(sanitized.reason)
+        text = sanitized.content
+
         # Pattern: Trade #<id> ...
         trade_match = re.search(r"[Tt]rade\s*#(\w+)", text)
         if trade_match:
@@ -105,7 +116,5 @@ class FeedbackHandler:
         )
 
     def write_correction(self, correction: HumanCorrection, path: Path) -> None:
-        """Append a correction to the JSONL file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(correction.model_dump(mode="json"), default=str) + "\n")
+        """Append a correction to the JSONL file (P1-6: serialized)."""
+        append_jsonl(path, [correction.model_dump(mode="json")])

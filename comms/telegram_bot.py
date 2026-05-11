@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from comms.base_channel import BaseChannel
 from comms.telegram_handlers import TelegramCallbackResponse
+from orchestrator.input_sanitizer import InputSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,24 @@ class TelegramBotConfig:
     token: str
     chat_id: str
     parse_mode: str = "MarkdownV2"
+    # Inbound allowlists (P0-4). If allowed_chat_ids is empty, only the
+    # configured chat_id is accepted. allowed_user_ids is optional; when
+    # populated, the sender's user.id must also match.
+    allowed_chat_ids: set[str] = field(default_factory=set)
+    allowed_user_ids: set[int] = field(default_factory=set)
+
+    def is_chat_allowed(self, chat_id: str | int | None) -> bool:
+        if chat_id is None:
+            return False
+        normalized = str(chat_id)
+        if self.allowed_chat_ids:
+            return normalized in self.allowed_chat_ids
+        return normalized == str(self.chat_id)
+
+    def is_user_allowed(self, user_id: int | None) -> bool:
+        if not self.allowed_user_ids:
+            return True
+        return user_id is not None and user_id in self.allowed_user_ids
 
 
 def _build_inline_keyboard(keyboard: list[list[dict]]) -> dict:
@@ -37,6 +56,7 @@ class TelegramBotAdapter(BaseChannel):
         self._bot: object | None = None
         self._callback_router = None
         self._polling_task: asyncio.Task | None = None
+        self._sanitizer = InputSanitizer()
 
     def set_callback_router(self, router) -> None:
         """Connect a TelegramCallbackRouter to handle incoming callback queries."""
@@ -86,9 +106,29 @@ class TelegramBotAdapter(BaseChannel):
                 await asyncio.sleep(5)
 
     async def _handle_update(self, update) -> None:
-        """Process a single Telegram update."""
+        """Process a single Telegram update.
+
+        Inbound updates are filtered by chat_id / user_id allowlists (P0-4)
+        before dispatch. Free-text messages are sanitized via InputSanitizer
+        (P0-3) so prompt-injection patterns never reach handlers.
+        """
         if update.callback_query is not None:
             query = update.callback_query
+            chat = getattr(query.message, "chat", None) if query.message is not None else None
+            chat_id = getattr(chat, "id", None)
+            user = getattr(query, "from_user", None)
+            user_id = getattr(user, "id", None)
+            if not self._config.is_chat_allowed(chat_id) or not self._config.is_user_allowed(user_id):
+                logger.warning(
+                    "Rejecting Telegram callback from unauthorized chat=%s user=%s",
+                    chat_id, user_id,
+                )
+                try:
+                    await query.answer(text="Unauthorized")
+                except Exception:
+                    pass
+                return
+
             callback_data = query.data or ""
             try:
                 result = await self._callback_router.dispatch(callback_data)
@@ -112,7 +152,29 @@ class TelegramBotAdapter(BaseChannel):
                 await query.answer(text="Error processing request")
 
         elif update.message is not None and update.message.text:
+            chat = getattr(update.message, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            user = getattr(update.message, "from_user", None)
+            user_id = getattr(user, "id", None)
+            if not self._config.is_chat_allowed(chat_id) or not self._config.is_user_allowed(user_id):
+                logger.warning(
+                    "Rejecting Telegram message from unauthorized chat=%s user=%s",
+                    chat_id, user_id,
+                )
+                return
+
             text = update.message.text.strip()
+            sanitized = self._sanitizer.sanitize(text, source="telegram")
+            if not sanitized.safe:
+                logger.warning("Blocked Telegram message: %s", sanitized.reason)
+                try:
+                    await self.send_message(
+                        "Sorry, your message was blocked by the input filter."
+                    )
+                except Exception:
+                    pass
+                return
+
             if text.startswith("/"):
                 command = text.split()[0].lower()
                 try:

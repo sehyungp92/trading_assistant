@@ -1,8 +1,9 @@
 # tests/test_auto_outcome_measurer.py
 """Tests for automated suggestion outcome measurement."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from schemas.outcome_measurement import OutcomeMeasurement, Verdict
 
@@ -48,6 +49,16 @@ class TestOutcomeMeasurementSchema:
 
 
 class TestAutoOutcomeMeasurer:
+    def test_crypto_categories_have_target_metrics(self):
+        from skills.auto_outcome_measurer import AutoOutcomeMeasurer
+
+        mapping = AutoOutcomeMeasurer.CATEGORY_TO_TARGET_METRIC
+
+        assert mapping["funding_threshold"] == "pnl"
+        assert mapping["leverage_cap"] == "drawdown"
+        assert mapping["confluence_count"] == "win_rate"
+        assert mapping["setup_grade_filter"] == "win_rate"
+
     def test_measure_suggestion_outcome(self, tmp_path):
         from skills.auto_outcome_measurer import AutoOutcomeMeasurer
 
@@ -118,6 +129,72 @@ class TestAutoOutcomeMeasurer:
         assert result is not None
         assert result.pnl_before == 80
         assert result.pnl_after == 140
+
+    def test_progressive_measurement_records_feedback_once_when_selected(self, tmp_path):
+        from schemas.proposal_ledger import ProposalCandidate, ProposalKind, ProposalSource
+        from skills.auto_outcome_measurer import AutoOutcomeMeasurer
+        from skills.proposal_ledger import ProposalLedger
+
+        impl = datetime(2026, 3, 1)
+        for offset in range(-30, 0):
+            day = (impl + timedelta(days=offset)).strftime("%Y-%m-%d")
+            self._write_summaries(tmp_path, day, "bot1", pnl=10, wins=5, total=10)
+        for offset in range(0, 30):
+            day = (impl + timedelta(days=offset)).strftime("%Y-%m-%d")
+            self._write_summaries(tmp_path, day, "bot1", pnl=20, wins=7, total=10)
+
+        findings = tmp_path / "findings"
+        findings.mkdir()
+        (findings / "suggestions.jsonl").write_text(json.dumps({
+            "suggestion_id": "s-feedback",
+            "bot_id": "bot1",
+            "category": "exit_timing",
+            "status": "deployed",
+            "hypothesis_id": "hyp-feedback",
+            "proposal_id": "proposal-feedback",
+        }) + "\n", encoding="utf-8")
+
+        ledger = ProposalLedger(findings)
+        ledger.record_candidate(ProposalCandidate(
+            proposal_id="proposal-feedback",
+            source=ProposalSource.LLM_DAILY,
+            kind=ProposalKind.PARAMETER_CHANGE,
+            bot_id="bot1",
+            title="Improve exits",
+        ))
+        calibration_tracker = MagicMock()
+        hypothesis_library = MagicMock()
+
+        measurer = AutoOutcomeMeasurer(
+            curated_dir=tmp_path,
+            findings_dir=findings,
+            calibration_tracker=calibration_tracker,
+            hypothesis_library=hypothesis_library,
+            proposal_ledger=ledger,
+        )
+
+        selected = measurer.measure_progressive(
+            suggestion_id="s-feedback",
+            bot_id="bot1",
+            implemented_date="2026-03-01",
+        )
+
+        assert selected is not None
+        assert selected.window_days == 30
+        assert calibration_tracker.record_outcome.call_count == 0
+        assert hypothesis_library.record_outcome.call_count == 0
+        assert ledger.get_by_id("proposal-feedback").outcomes == []
+
+        measurer.record_measurement_feedback(selected)
+
+        assert calibration_tracker.record_outcome.call_count == 1
+        hypothesis_library.record_outcome.assert_called_once_with(
+            "hyp-feedback", positive=True,
+        )
+        record = ledger.get_by_id("proposal-feedback")
+        assert record is not None
+        assert len(record.outcomes) == 1
+        assert record.outcomes[0].verdict == "positive"
 
     def _write_summaries(
         self,

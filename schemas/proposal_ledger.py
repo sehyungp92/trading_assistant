@@ -13,6 +13,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from schemas.objective_weights import OBJECTIVE_WEIGHTS_VERSION
+
 
 class ProposalSource(str, Enum):
     LLM_DAILY = "llm_daily"
@@ -74,6 +76,7 @@ class ProposalEvaluation(BaseModel):
     confidence: float = 0.0
     decision: str  # approve/reject/experiment/defer/instrument
     decision_reason: str = ""
+    objective_version: str = OBJECTIVE_WEIGHTS_VERSION
     evidence_paths: list[str] = Field(default_factory=list)
     evaluated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -86,6 +89,7 @@ class ProposalOutcome(BaseModel):
     proposal_id: str
     deployment_id: str = ""
     objective_delta: float = 0.0
+    objective_version: str = OBJECTIVE_WEIGHTS_VERSION
     verdict: str  # improved/regressed/inconclusive/insufficient_data/positive/negative/neutral
     measurement_path: str = ""  # link to OutcomeMeasurement record
     measured_at: datetime = Field(

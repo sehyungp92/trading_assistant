@@ -27,15 +27,42 @@ def _yaml_param(yaml_key: str = "kmp.quality_min") -> ParameterDefinition:
     )
 
 
-def _python_param(python_path: str = "BASE_RISK_PCT") -> ParameterDefinition:
+def _python_param(
+    python_path: str = "BASE_RISK_PCT",
+    file_path: str = "risk.py",
+) -> ParameterDefinition:
     return ParameterDefinition(
         param_name="base_risk_pct",
         bot_id="bot1",
         param_type=ParameterType.PYTHON_CONSTANT,
-        file_path="risk.py",
+        file_path=file_path,
         python_path=python_path,
         current_value=0.02,
         value_type="float",
+    )
+
+
+def _toml_param(toml_path: str, file_path: str = "config.toml") -> ParameterDefinition:
+    return ParameterDefinition(
+        param_name=toml_path.split(".")[-1],
+        bot_id="bot1",
+        param_type=ParameterType.TOML_FIELD,
+        file_path=file_path,
+        python_path=toml_path,  # TOML reuses python_path field for the dotted path
+        current_value=20,
+        value_type="int",
+    )
+
+
+def _json_param(json_path: str, file_path: str = "config.json") -> ParameterDefinition:
+    return ParameterDefinition(
+        param_name=json_path.split(".")[-1],
+        bot_id="bot1",
+        param_type=ParameterType.JSON_FIELD,
+        file_path=file_path,
+        python_path=json_path,
+        current_value=20,
+        value_type="int",
     )
 
 
@@ -138,3 +165,162 @@ class TestFileChangeGenerator:
         ])
         with pytest.raises(ValueError):
             gen.generate_patch_change("algo.py", patch, tmp_path)
+
+    # ----- P1-7: class attribute editing -----
+
+    def test_python_class_attribute_change(self, gen: FileChangeGenerator, tmp_path: Path):
+        """python_path like `StrategySettings.tier_a_min` should patch the
+        `tier_a_min = ...` line inside `class StrategySettings:`."""
+        (tmp_path / "config.py").write_text(
+            "class StrategySettings:\n"
+            "    tier_a_min = 0.65\n"
+            "    tier_b_min = 0.40\n"
+        )
+        param = _python_param("StrategySettings.tier_a_min", file_path="config.py")
+        change = gen.generate_change(param, 0.70, tmp_path)
+        assert change.change_mode == FileChangeMode.PYTHON_CONSTANT
+        assert "tier_a_min = 0.7" in change.new_content
+        assert "tier_b_min = 0.40" in change.new_content  # untouched
+
+    def test_python_class_attribute_with_annotation(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        """Type-annotated class attributes should also patch correctly."""
+        (tmp_path / "config.py").write_text(
+            "class StrategySettings:\n"
+            "    tier_a_min: float = 0.65\n"
+        )
+        param = _python_param("StrategySettings.tier_a_min", file_path="config.py")
+        change = gen.generate_change(param, 0.55, tmp_path)
+        assert "tier_a_min: float = 0.55" in change.new_content
+
+    def test_python_class_attribute_preserves_trailing_comment(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.py").write_text(
+            "class StrategySettings:\n"
+            "    tier_a_min = 0.65  # gate threshold\n"
+        )
+        param = _python_param("StrategySettings.tier_a_min", file_path="config.py")
+        change = gen.generate_change(param, 0.70, tmp_path)
+        assert "tier_a_min = 0.7" in change.new_content
+        assert "# gate threshold" in change.new_content
+
+    def test_python_class_attribute_missing_raises(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.py").write_text("class StrategySettings:\n    pass\n")
+        param = _python_param("StrategySettings.tier_a_min", file_path="config.py")
+        with pytest.raises(ValueError, match="not found"):
+            gen.generate_change(param, 0.70, tmp_path)
+
+    def test_python_subscript_assignment_change(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.py").write_text(
+            'R7C_FLAGS["reversal_engine"] = True  # enabled\n'
+        )
+        param = _python_param("R7C_FLAGS.reversal_engine", file_path="config.py")
+        change = gen.generate_change(param, False, tmp_path)
+        assert 'R7C_FLAGS["reversal_engine"] = False' in change.new_content
+        assert "# enabled" in change.new_content
+
+    def test_python_dict_literal_change(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.py").write_text(
+            "R7C_FLAGS = {\n"
+            "    'reversal_engine': True,\n"
+            "    'breakdown_engine': True,\n"
+            "}\n"
+        )
+        param = _python_param("R7C_FLAGS.reversal_engine", file_path="config.py")
+        change = gen.generate_change(param, False, tmp_path)
+        assert "'reversal_engine': False" in change.new_content
+        assert "'breakdown_engine': True" in change.new_content
+
+    def test_python_multiline_dict_literal_value_fails_closed(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.py").write_text(
+            "R7C_FLAGS = {\n"
+            "    'reversal_engine': [\n"
+            "        True\n"
+            "    ],\n"
+            "}\n"
+        )
+        param = _python_param("R7C_FLAGS.reversal_engine", file_path="config.py")
+
+        with pytest.raises(ValueError, match="not found"):
+            gen.generate_change(param, False, tmp_path)
+
+    # ----- P1-7: TOML editing -----
+
+    def test_toml_field_change(self, gen: FileChangeGenerator, tmp_path: Path):
+        """TOML_FIELD param should update a dotted path while preserving formatting."""
+        (tmp_path / "config.toml").write_text(
+            "# entry signal config\n"
+            "[entry]\n"
+            "ema_fast = 20\n"
+            "ema_slow = 200\n"
+        )
+        param = _toml_param("entry.ema_fast")
+        change = gen.generate_change(param, 12, tmp_path)
+        assert change.change_mode == FileChangeMode.TOML_FIELD
+        assert "ema_fast = 12" in change.new_content
+        assert "ema_slow = 200" in change.new_content
+        assert "# entry signal config" in change.new_content  # comment preserved
+
+    def test_toml_field_missing_section_raises(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.toml").write_text("[risk]\nrisk_pct = 0.01\n")
+        param = _toml_param("entry.ema_fast")
+        with pytest.raises(ValueError, match="TOML section not found"):
+            gen.generate_change(param, 12, tmp_path)
+
+    def test_toml_field_missing_leaf_raises(
+        self, gen: FileChangeGenerator, tmp_path: Path,
+    ):
+        (tmp_path / "config.toml").write_text("[entry]\nema_slow = 200\n")
+        param = _toml_param("entry.ema_fast")
+        with pytest.raises(ValueError, match="TOML key not found"):
+            gen.generate_change(param, 12, tmp_path)
+
+    # ----- JSON editing -----
+
+    @pytest.mark.parametrize(
+        ("path", "new_value", "expected"),
+        [
+            ("strategy.indicators.ema_fast", 12, '"ema_fast": 12'),
+            ("strategy.exits.tp1_r", 1.4, '"tp1_r": 1.4'),
+            ("strategy.entry.entry_on_close", False, '"entry_on_close": false'),
+            ("strategy.entry.mode", "confirm", '"mode": "confirm"'),
+        ],
+    )
+    def test_json_field_change_round_trip(
+        self,
+        gen: FileChangeGenerator,
+        tmp_path: Path,
+        path: str,
+        new_value,
+        expected: str,
+    ):
+        (tmp_path / "config.json").write_text(
+            "{\n"
+            "  \"strategy\": {\n"
+            "    \"indicators\": {\"ema_fast\": 20},\n"
+            "    \"exits\": {\"tp1_r\": 1.2},\n"
+            "    \"entry\": {\"entry_on_close\": true, \"mode\": \"legacy\"}\n"
+            "  }\n"
+            "}\n"
+        )
+        change = gen.generate_change(_json_param(path), new_value, tmp_path)
+        assert change.change_mode == FileChangeMode.JSON_FIELD
+        assert expected in change.new_content
+        assert change.new_content.endswith("\n")
+
+    def test_json_field_missing_path_raises(self, gen: FileChangeGenerator, tmp_path: Path):
+        (tmp_path / "config.json").write_text("{\"strategy\": {\"risk\": {}}}\n")
+        with pytest.raises(ValueError, match="JSON section not found|JSON key not found"):
+            gen.generate_change(_json_param("strategy.risk.max_leverage_major"), 5.0, tmp_path)

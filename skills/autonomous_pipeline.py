@@ -47,6 +47,7 @@ class AutonomousPipeline:
         experiment_tracker: Any | None = None,
         experiment_manager: Any | None = None,
         calibration_tracker: Any | None = None,
+        proposal_ledger: Any | None = None,
         search_log_dir: Path | None = None,
         curated_dir: Path | None = None,
     ) -> None:
@@ -62,6 +63,7 @@ class AutonomousPipeline:
         self._experiment_config_generator = experiment_config_generator
         self._experiment_tracker = experiment_tracker
         self._experiment_manager = experiment_manager
+        self._proposal_ledger = proposal_ledger
         self._calibration_tracker = calibration_tracker
         self._search_log_dir = search_log_dir
         self._curated_dir = curated_dir
@@ -155,6 +157,7 @@ class AutonomousPipeline:
 
             if report.routing == SearchRouting.DISCARD:
                 self._record_search_signal(bot_id, param.category, positive=False)
+                self._record_parameter_search_evaluation(suggestion, report)
                 logger.info(
                     "Search DISCARD for %s: %s", suggestion_id, report.discard_reason,
                 )
@@ -179,6 +182,8 @@ class AutonomousPipeline:
                         "Fast-track: high-reliability backtest for %s/%s — proceeding with confidence",
                         bot_id, param.category,
                     )
+
+            self._record_parameter_search_evaluation(suggestion, report)
 
             # Record calibration prediction for BOTH APPROVE and EXPERIMENT paths
             if self._calibration_tracker and report.baseline_composite > 0:
@@ -474,6 +479,37 @@ class AutonomousPipeline:
         except Exception:
             logger.exception("Failed to record search signal")
 
+    def _record_parameter_search_evaluation(self, suggestion: dict, report) -> None:
+        """Append ParameterSearcher routing as a ProposalLedger evaluation."""
+        ledger = getattr(self, "_proposal_ledger", None)
+        proposal_id = suggestion.get("proposal_id") if isinstance(suggestion, dict) else ""
+        if not ledger or not proposal_id:
+            return
+        try:
+            from schemas.proposal_ledger import ProposalEvaluation
+            decision = {
+                SearchRouting.APPROVE: "approve",
+                SearchRouting.EXPERIMENT: "experiment",
+                SearchRouting.DISCARD: "reject",
+            }.get(report.routing, "defer")
+            ledger.record_evaluation(
+                proposal_id,
+                ProposalEvaluation(
+                    proposal_id=proposal_id,
+                    method="parameter_search",
+                    decision=decision,
+                    decision_reason=getattr(report, "discard_reason", "") or "",
+                    objective_score=float(getattr(report, "best_composite", 0.0) or 0.0),
+                    confidence=min(
+                        1.0,
+                        max(0.0, float(getattr(report, "best_robustness_score", 0.0) or 0.0) / 100.0),
+                    ),
+                    summary=getattr(report, "exploration_summary", "") or "",
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to record parameter-search proposal evaluation", exc_info=True)
+
     def _route_to_experiment(
         self,
         suggestion_id: str,
@@ -489,8 +525,8 @@ class AutonomousPipeline:
         bot_id = suggestion.get("bot_id", "")
 
         # Check experiment cap
-        if self._experiment_tracker:
-            active = self._experiment_tracker.get_active_experiments()
+        if self._experiment_manager:
+            active = self._experiment_manager.get_active()
             bot_active = [e for e in active if getattr(e, "bot_id", "") == bot_id]
             if len(bot_active) >= _MAX_ACTIVE_EXPERIMENTS:
                 logger.info(

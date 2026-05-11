@@ -21,7 +21,7 @@ _DATES = [
     "2026-02-28", "2026-03-01", "2026-03-02",
 ]
 
-_BOTS = ["k_stock_trader", "momentum_trader", "swing_trader"]
+_BOTS = ["k_stock_trader", "momentum_nq_01", "swing_multi_01"]
 
 
 def _make_daily_with_strategies(
@@ -71,9 +71,9 @@ def _build_seven_day_dailies() -> dict[str, list[BotDailySummary]]:
             })
         )
 
-        # momentum_trader: two strategies on NQ
-        dailies["momentum_trader"].append(
-            _make_daily_with_strategies(date, "momentum_trader", {
+        # momentum_nq_01: two strategies on NQ
+        dailies["momentum_nq_01"].append(
+            _make_daily_with_strategies(date, "momentum_nq_01", {
                 "momentum_long": {
                     "trades": 4, "win_count": 2 + (i % 2), "loss_count": 2 - (i % 2),
                     "net_pnl": 80.0 + i * 10, "gross_pnl": 90.0 + i * 10,
@@ -89,9 +89,9 @@ def _build_seven_day_dailies() -> dict[str, list[BotDailySummary]]:
             })
         )
 
-        # swing_trader: two strategies on different instruments
-        dailies["swing_trader"].append(
-            _make_daily_with_strategies(date, "swing_trader", {
+        # swing_multi_01: two strategies on different instruments
+        dailies["swing_multi_01"].append(
+            _make_daily_with_strategies(date, "swing_multi_01", {
                 "ATRSS": {
                     "trades": 2, "win_count": 1, "loss_count": 1,
                     "net_pnl": 60.0 + i * 8, "gross_pnl": 70.0 + i * 8,
@@ -157,10 +157,10 @@ class TestAllocationIntegration:
         assert len(report.strategy_pairs) == 10
         assert len(report.marginal_contributions) == 5
 
-        # momentum_trader strategies should be flagged as same instrument
+        # momentum_nq_01 strategies should be flagged as same instrument
         mt_pairs = [
             p for p in report.strategy_pairs
-            if "momentum_trader" in p.strategy_a and "momentum_trader" in p.strategy_b
+            if "momentum_nq_01" in p.strategy_a and "momentum_nq_01" in p.strategy_b
         ]
         assert len(mt_pairs) == 1
         assert mt_pairs[0].same_instrument is True
@@ -181,8 +181,8 @@ class TestAllocationIntegration:
         # 3 bots
         assert len(report.bot_reports) == 3
 
-        # momentum_trader has NQ concentration warning
-        mt_report = next(r for r in report.bot_reports if r.bot_id == "momentum_trader")
+        # momentum_nq_01 has NQ concentration warning
+        mt_report = next(r for r in report.bot_reports if r.bot_id == "momentum_nq_01")
         assert any("NQ concentration" in n for n in mt_report.special_notes)
 
         # k_stock_trader has single strategy → 100% allocation

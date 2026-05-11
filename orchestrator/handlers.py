@@ -12,11 +12,12 @@ import math
 import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from analysis.context_builder import ContextBuilder
-from orchestrator.agent_runner import AgentRunner, AgentResult
+from orchestrator.agent_runner import AgentRunner
 from orchestrator.event_stream import EventStream
 from orchestrator.memory_consolidator import MemoryConsolidator
 from orchestrator.orchestrator_brain import Action, OrchestratorBrain
@@ -28,6 +29,9 @@ from schemas.notifications import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from schemas.reliability_learning import BugClass
 
 # Minimum total trades across all bots to justify a full agent-runtime invocation.
 # Days with fewer trades get a deterministic summary instead.
@@ -73,6 +77,7 @@ class Handlers:
         run_index: object | None = None,
         proposal_ledger: object | None = None,
         calibration_tracker: object | None = None,
+        scheduled_run_store: object | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -109,6 +114,42 @@ class Handlers:
         self._run_index = run_index
         self._proposal_ledger = proposal_ledger
         self._calibration_tracker = calibration_tracker
+        self._scheduled_run_store = scheduled_run_store
+
+    async def _signal_scheduled_result(
+        self,
+        action: Action,
+        *,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """Mark the originating cron run with the actual handler result."""
+        if self._scheduled_run_store is None:
+            return
+        details = action.details or {}
+        marker = details.get("__scheduled_run__")
+        if not isinstance(marker, dict):
+            return
+        try:
+            scheduled_for = datetime.fromisoformat(marker["scheduled_for"])
+        except (KeyError, ValueError, TypeError):
+            return
+        try:
+            if success:
+                await self._scheduled_run_store.mark_completed(
+                    marker["job_key"],
+                    marker["scope_key"],
+                    scheduled_for,
+                )
+            else:
+                await self._scheduled_run_store.mark_failed(
+                    marker["job_key"],
+                    marker["scope_key"],
+                    scheduled_for,
+                    error=error or "Scheduled handler did not complete successfully",
+                )
+        except Exception:
+            logger.warning("Failed to mark scheduled run result: %s", marker)
 
     async def handle_daily_analysis(self, action: Action) -> None:
         """Run the daily analysis pipeline: quality gate -> assemble -> invoke -> notify."""
@@ -121,6 +162,8 @@ class Handlers:
             run_id = f"{run_id}-{hashlib.sha256(run_scope.encode('utf-8')).hexdigest()[:8]}"
         start_time = datetime.now(timezone.utc)
         self._record_run(run_id, "daily_analysis", "running", started_at=start_time.isoformat())
+        scheduled_success = False
+        scheduled_error = ""
 
         try:
             self._event_stream.broadcast("handler_progress", {
@@ -148,6 +191,7 @@ class Handlers:
             checklist = gate.run()
 
             if not checklist.can_proceed:
+                scheduled_error = f"Quality gate blocked: {', '.join(checklist.blocking_issues)}"
                 logger.warning("Quality gate blocked for %s: %s", run_id, checklist.blocking_issues)
                 self._event_stream.broadcast("daily_analysis_blocked", {
                     "date": date,
@@ -199,6 +243,7 @@ class Handlers:
                     title=f"Daily Summary — {date} (light day)",
                     body=body,
                 )
+                scheduled_success = True
                 return
 
             # Collect event batching counts
@@ -366,21 +411,34 @@ class Handlers:
 
             elapsed = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             status = "completed" if result.success else "failed"
+            scheduled_success = result.success
+            scheduled_error = result.error if not result.success else ""
             self._record_run(
                 run_id, "daily_analysis", status,
                 started_at=start_time.isoformat(),
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 duration_ms=elapsed,
                 error=result.error if not result.success else "",
+                metadata={
+                    "degraded": checklist.overall == "FAIL",
+                    "data_completeness": checklist.data_completeness,
+                },
             )
 
             if result.success:
                 self._write_run_report(run_id, "daily_report.md", final_report)
+                degraded = checklist.overall == "FAIL"
+                title_prefix = "[DEGRADED] " if degraded else ""
+                body_prefix = (
+                    "DEGRADED: quality gate reported incomplete coverage.\n\n"
+                    if degraded
+                    else ""
+                )
                 await self._notify(
                     notification_type="daily_report",
                     priority=NotificationPriority.NORMAL,
-                    title=f"Daily Report — {date}",
-                    body=final_report[:2000],
+                    title=f"{title_prefix}Daily Report — {date}",
+                    body=body_prefix + final_report[:2000],
                 )
             else:
                 await self._notify(
@@ -403,6 +461,13 @@ class Handlers:
                 "date": date,
                 "error": str(exc),
             })
+            scheduled_error = str(exc)
+        finally:
+            await self._signal_scheduled_result(
+                action,
+                success=scheduled_success,
+                error=scheduled_error,
+            )
 
     async def handle_weekly_analysis(self, action: Action) -> None:
         """Run the weekly analysis pipeline: metrics -> strategy -> simulations -> assemble -> invoke -> notify."""
@@ -412,6 +477,8 @@ class Handlers:
         run_id = f"weekly-{week_start}"
         start_time = datetime.now(timezone.utc)
         self._record_run(run_id, "weekly_analysis", "running", started_at=start_time.isoformat())
+        scheduled_success = False
+        scheduled_error = ""
 
         try:
             self._event_stream.broadcast("handler_progress", {
@@ -440,9 +507,6 @@ class Handlers:
                 week_end=week_end,
                 bots=self._bots,
             )
-
-            # Load daily summaries from curated dir
-            from schemas.daily_metrics import BotDailySummary
 
             dailies_by_bot: dict[str, list] = {}
             for bot in self._bots:
@@ -851,7 +915,7 @@ class Handlers:
 
             # Structural hypotheses — JSONL-backed library with adaptive lifecycle
             try:
-                from skills.hypothesis_library import HypothesisLibrary, get_relevant as _get_relevant_legacy
+                from skills.hypothesis_library import HypothesisLibrary
 
                 hypothesis_lib = HypothesisLibrary(self._memory_dir / "findings")
                 active_hypotheses = hypothesis_lib.get_active()
@@ -913,6 +977,25 @@ class Handlers:
                     package.data["transfer_proposals"] = [
                         p.model_dump(mode="json") for p in proposals
                     ]
+                    for proposal in proposals:
+                        pattern_id = getattr(proposal, "pattern_id", "") or ""
+                        target_bot = getattr(proposal, "target_bot", "") or ""
+                        target_strategy_id = getattr(proposal, "target_strategy_id", None) or ""
+                        self._ledger_write_candidate(
+                            source="transfer",
+                            kind_hint="structural_change",
+                            bot_id=target_bot,
+                            strategy_id=target_strategy_id,
+                            title=f"Transfer pattern: {getattr(proposal, 'pattern_title', '') or pattern_id}",
+                            description=getattr(proposal, "rationale", "") or "",
+                            run_id=run_id,
+                            lifecycle_stage=getattr(proposal, "category", "") or "",
+                            evaluation_method="approval",
+                            stable_link_key=(
+                                f"transfer:{pattern_id}:{getattr(proposal, 'source_bot', '')}:"
+                                f"{target_bot}:{target_strategy_id}"
+                            ),
+                        )
             except Exception:
                 logger.error("Transfer proposal building failed — skipping", exc_info=True)
 
@@ -1016,11 +1099,14 @@ class Handlers:
 
             elapsed = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             status = "completed" if result.success else "failed"
+            scheduled_success = result.success
+            scheduled_error = result.error if not result.success else ""
             self._record_run(
                 run_id, "weekly_analysis", status,
                 started_at=start_time.isoformat(),
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 duration_ms=elapsed,
+                error=scheduled_error,
             )
 
             if result.success:
@@ -1045,6 +1131,13 @@ class Handlers:
                 "week_start": week_start,
                 "error": str(exc),
             })
+            scheduled_error = str(exc)
+        finally:
+            await self._signal_scheduled_result(
+                action,
+                success=scheduled_success,
+                error=scheduled_error,
+            )
 
     async def handle_wfo(self, action: Action) -> None:
         """Run the WFO pipeline: runner -> report -> assemble -> invoke -> notify."""
@@ -1054,6 +1147,8 @@ class Handlers:
         run_id = f"wfo-{bot_id}-{data_end}"
         start_time = datetime.now(timezone.utc)
         self._record_run(run_id, "wfo", "running", started_at=start_time.isoformat())
+        scheduled_success = False
+        scheduled_error = ""
 
         try:
             self._event_stream.broadcast("handler_progress", {
@@ -1227,15 +1322,16 @@ class Handlers:
                     calibration_tracker = getattr(self, "_calibration_tracker", None)
                     if calibration_tracker is not None:
                         try:
+                            from schemas.parameter_search import SearchRouting
                             calibration_tracker.record_prediction(
                                 suggestion_id=suggestion_id,
                                 bot_id=bot_id,
                                 param_category="wfo_optimization",
-                                predicted_improvement=float(robustness_score),
+                                predicted_improvement=1.0 + (float(robustness_score) / 100.0),
                                 predicted_routing=(
-                                    "adopt"
+                                    SearchRouting.APPROVE
                                     if report.recommendation == WFORecommendation.ADOPT
-                                    else "experiment"
+                                    else SearchRouting.EXPERIMENT
                                 ),
                             )
                         except Exception:
@@ -1255,13 +1351,17 @@ class Handlers:
                     logger.warning("Failed to record WFO suggestion for %s", bot_id, exc_info=True)
 
             finished_at = datetime.now(timezone.utc)
+            status = "completed" if result.success else "failed"
+            scheduled_success = result.success
+            scheduled_error = result.error if not result.success else ""
             self._record_run(
                 run_id,
                 "wfo",
-                "completed",
+                status,
                 started_at=start_time.isoformat(),
                 finished_at=finished_at.isoformat(),
                 duration_ms=int((finished_at - start_time).total_seconds() * 1000),
+                error=scheduled_error,
             )
 
         except Exception as exc:
@@ -1279,6 +1379,13 @@ class Handlers:
                 finished_at=finished_at.isoformat(),
                 duration_ms=int((finished_at - start_time).total_seconds() * 1000),
                 error=str(exc),
+            )
+            scheduled_error = str(exc)
+        finally:
+            await self._signal_scheduled_result(
+                action,
+                success=scheduled_success,
+                error=scheduled_error,
             )
 
     async def handle_triage(self, action: Action) -> None:
@@ -1329,7 +1436,6 @@ class Handlers:
             # Record recurrence against open reliability interventions
             if self._reliability_tracker is not None:
                 try:
-                    from schemas.reliability_learning import BugClass
                     bug_class = self._map_error_to_bug_class(
                         triage_result.error_event.category.value
                         if triage_result.error_event.category else "unknown"
@@ -1389,7 +1495,6 @@ class Handlers:
                     if self._reliability_tracker is not None and repair_proposal:
                         try:
                             from schemas.reliability_learning import (
-                                BugClass as _BugClass,
                                 ReliabilityIntervention,
                             )
                             _bug_class = self._map_error_to_bug_class(
@@ -1551,6 +1656,7 @@ class Handlers:
                                 run_id=run_id,
                                 evaluation_method="discovery_review",
                                 lifecycle_stage=d.get("lifecycle_stage", "") or "",
+                                stable_link_key=f"discovery:{run_id}:{d.get('pattern_description', '')[:120]}",
                             )
 
                     # Add novel hypotheses to hypothesis library
@@ -1594,11 +1700,13 @@ class Handlers:
                                 source="discovery",
                                 kind_hint="new_strategy",
                                 bot_id=idea.get("bot_id", "") or "",
+                                strategy_id=idea.get("strategy_id", "") or "",
                                 title=idea.get("title", "") or desc[:80] or "strategy_idea",
                                 description=desc,
                                 run_id=run_id,
                                 evaluation_method="experiment",
                                 lifecycle_stage=idea.get("lifecycle_stage", "") or "",
+                                stable_link_key=idea.get("idea_id", "") or "",
                             )
 
                     # High-confidence ideas → structural experiment records
@@ -1701,10 +1809,18 @@ class Handlers:
         if not text:
             return
 
-        from analysis.feedback_handler import FeedbackHandler
+        from analysis.feedback_handler import FeedbackHandler, UnsafeFeedbackError
 
         handler = FeedbackHandler(report_id=report_id)
-        correction = handler.parse(text)
+        try:
+            correction = handler.parse(text, source="handler")
+        except UnsafeFeedbackError as exc:
+            logger.warning("Rejected unsafe feedback for %s: %s", report_id, exc)
+            self._event_stream.broadcast("feedback_rejected", {
+                "report_id": report_id,
+                "reason": str(exc),
+            })
+            return
         corrections_path = self._memory_dir / "findings" / "corrections.jsonl"
         handler.write_correction(correction, corrections_path)
 
@@ -2236,6 +2352,12 @@ class Handlers:
                     f.write(_json.dumps(entry) + "\n")
             except Exception:
                 logger.error("Failed to log validation results", exc_info=True)
+
+            self._record_rejected_validation_proposals(
+                validation=validation,
+                run_id=run_id,
+                source="llm_daily" if agent_type == "daily_analysis" else "llm_weekly",
+            )
 
             return final_report, validation
         except Exception:
@@ -2779,6 +2901,8 @@ class Handlers:
         experiment_id: str = "",
         deployment_id: str = "",
         hypothesis_id: str = "",
+        strategy_id: str = "",
+        stable_link_key: str = "",
         run_id: str = "",
         detector_name: str = "",
         evaluation_method: str = "",
@@ -2831,12 +2955,21 @@ class Handlers:
         }
         kind = kind_map.get(kind_hint.lower(), ProposalKind.PARAMETER_CHANGE)
 
-        proposal_id = make_proposal_id(src, bot_id, kind, title or "untitled")
+        link_key = stable_link_key or suggestion_id or experiment_id or deployment_id
+        proposal_id = make_proposal_id(
+            src,
+            bot_id,
+            kind,
+            title or "untitled",
+            strategy_id=strategy_id or "",
+            link_key=link_key or "",
+        )
         candidate = ProposalCandidate(
             proposal_id=proposal_id,
             source=src,
             kind=kind,
             bot_id=bot_id,
+            strategy_id=strategy_id or "",
             title=title or "untitled",
             description=description or "",
             hypothesis_id=hypothesis_id or "",
@@ -2886,6 +3019,110 @@ class Handlers:
             )
         except Exception:
             logger.warning("Failed to record proposal evaluation", exc_info=True)
+
+    def _record_rejected_validation_proposals(
+        self,
+        validation,
+        run_id: str,
+        source: str,
+    ) -> None:
+        """Mirror validator-rejected proposals into ProposalLedger."""
+        if validation is None or not getattr(self, "_proposal_ledger", None):
+            return
+        try:
+            from schemas.agent_response import CATEGORY_TO_TIER
+        except Exception:
+            CATEGORY_TO_TIER = {}
+
+        for idx, blocked in enumerate(getattr(validation, "blocked_suggestions", []) or []):
+            suggestion = blocked.suggestion
+            category = getattr(suggestion, "category", "") or ""
+            tier = CATEGORY_TO_TIER.get(category, "parameter")
+            strategy_id = getattr(suggestion, "strategy_id", None) or ""
+            suggestion_id = getattr(suggestion, "suggestion_id", "") or ""
+            proposal_id = self._ledger_write_candidate(
+                source=source,
+                kind_hint="structural_change" if tier in ("strategy_variant", "hypothesis") else tier,
+                bot_id=getattr(suggestion, "bot_id", "") or "",
+                strategy_id=strategy_id,
+                title=getattr(suggestion, "title", "") or "rejected suggestion",
+                description=getattr(suggestion, "evidence_summary", "") or "",
+                suggestion_id=suggestion_id,
+                run_id=run_id,
+                evaluation_method="validator",
+                affected_parameters=[
+                    getattr(suggestion, "target_param", "") or ""
+                ] if getattr(suggestion, "target_param", None) else [],
+                stable_link_key=(
+                    suggestion_id or
+                    f"rejected:suggestion:{run_id}:{idx}:{getattr(suggestion, 'title', '')}"
+                ),
+            )
+            self._ledger_write_evaluation(
+                proposal_id,
+                method="validator",
+                decision="reject",
+                decision_reason=getattr(blocked, "reason", "") or "",
+                confidence=float(getattr(suggestion, "confidence", 0.0) or 0.0),
+                summary="Validator rejected LLM suggestion",
+            )
+
+        for idx, blocked in enumerate(getattr(validation, "blocked_structural_proposals", []) or []):
+            proposal = blocked.proposal
+            linked_suggestion_id = getattr(proposal, "linked_suggestion_id", "") or ""
+            proposal_id = self._ledger_write_candidate(
+                source=source,
+                kind_hint="structural_change",
+                bot_id=getattr(proposal, "bot_id", "") or "",
+                title=getattr(proposal, "title", "") or "rejected structural proposal",
+                description=getattr(proposal, "description", "") or getattr(proposal, "evidence", "") or "",
+                suggestion_id=linked_suggestion_id,
+                hypothesis_id=getattr(proposal, "hypothesis_id", "") or "",
+                run_id=run_id,
+                evaluation_method="validator",
+                acceptance_criteria=[
+                    str(c) for c in (getattr(proposal, "acceptance_criteria", []) or [])
+                ],
+                stable_link_key=(
+                    linked_suggestion_id or
+                    getattr(proposal, "hypothesis_id", "") or
+                    f"rejected:structural:{run_id}:{idx}:{getattr(proposal, 'title', '')}"
+                ),
+            )
+            self._ledger_write_evaluation(
+                proposal_id,
+                method="validator",
+                decision="reject",
+                decision_reason=getattr(blocked, "reason", "") or "",
+                confidence=float(getattr(proposal, "confidence", 0.0) or 0.0),
+                summary="Validator rejected structural proposal",
+            )
+
+        for idx, blocked in enumerate(getattr(validation, "blocked_portfolio_proposals", []) or []):
+            proposal = blocked.proposal
+            ptype = getattr(proposal, "proposal_type", "") or ""
+            ptype_str = ptype.value if hasattr(ptype, "value") else str(ptype)
+            proposal_id = self._ledger_write_candidate(
+                source=source,
+                kind_hint="portfolio_change",
+                bot_id="PORTFOLIO",
+                title=f"Portfolio: {ptype_str or 'rejected'}",
+                description=getattr(proposal, "evidence_summary", "") or "",
+                run_id=run_id,
+                evaluation_method="validator",
+                acceptance_criteria=[
+                    str(c) for c in (getattr(proposal, "acceptance_criteria", []) or [])
+                ],
+                stable_link_key=f"rejected:portfolio:{run_id}:{idx}:{ptype_str}",
+            )
+            self._ledger_write_evaluation(
+                proposal_id,
+                method="validator",
+                decision="reject",
+                decision_reason=getattr(blocked, "reason", "") or "",
+                confidence=float(getattr(proposal, "confidence", 0.0) or 0.0),
+                summary="Validator rejected portfolio proposal",
+            )
 
     def _record_suggestions(
         self, suggestions: list, run_id: str,
@@ -2975,10 +3212,14 @@ class Handlers:
                 detector_name = getattr(det_ctx, "detector_name", "") or ""
             elif isinstance(det_ctx, dict):
                 detector_name = det_ctx.get("detector_name", "") or ""
+            # Preserve strategy attribution that StrategySuggestion already carries.
+            _raw_sid = getattr(suggestion, "strategy_id", None)
+            strategy_id_val = _raw_sid if isinstance(_raw_sid, str) and _raw_sid else None
             proposal_id = self._ledger_write_candidate(
                 source="deterministic",
                 kind_hint=tier_val,
                 bot_id=bot_id,
+                strategy_id=strategy_id_val or "",
                 title=title,
                 description=description,
                 suggestion_id=suggestion_id,
@@ -2988,9 +3229,6 @@ class Handlers:
                 affected_parameters=[target_param] if target_param else [],
             )
 
-            # Preserve strategy attribution that StrategySuggestion already carries.
-            _raw_sid = getattr(suggestion, "strategy_id", None)
-            strategy_id_val = _raw_sid if isinstance(_raw_sid, str) and _raw_sid else None
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -3034,9 +3272,19 @@ class Handlers:
 
         Returns a mapping of suggestion_id → title.
         """
-        if not self._suggestion_tracker or validation_result is None:
+        if validation_result is None:
             return {}
-        if not validation_result.approved_suggestions:
+        approved_structural = (
+            getattr(validation_result, "approved_structural_proposals", []) or []
+        )
+        blocked_structural = (
+            getattr(validation_result, "blocked_structural_proposals", []) or []
+        )
+        if not approved_structural and not blocked_structural and parsed is not None:
+            approved_structural = getattr(parsed, "structural_proposals", []) or []
+        if not self._suggestion_tracker or not validation_result.approved_suggestions:
+            if approved_structural:
+                self._record_structural_experiments(approved_structural, run_id)
             return {}
 
         import hashlib
@@ -3045,23 +3293,22 @@ class Handlers:
         # Build structural proposal lookup by explicit linked suggestion id.
         structural_context_map: dict[str, dict] = {}
         fallback_context_by_bot: dict[str, list[dict]] = {}
-        if parsed and parsed.structural_proposals:
-            for proposal in parsed.structural_proposals:
-                context = {
-                    "notes": proposal.description,
-                    "file_changes": [
-                        fc.model_dump(mode="json")
-                        for fc in getattr(proposal, "file_changes", [])
-                    ],
-                    "verification_commands": list(
-                        getattr(proposal, "verification_commands", []) or []
-                    ),
-                    "hypothesis_id": proposal.hypothesis_id,
-                }
-                if proposal.linked_suggestion_id:
-                    structural_context_map[proposal.linked_suggestion_id] = context
-                    continue
-                fallback_context_by_bot.setdefault(proposal.bot_id or "", []).append(context)
+        for proposal in approved_structural:
+            context = {
+                "notes": proposal.description,
+                "file_changes": [
+                    fc.model_dump(mode="json")
+                    for fc in getattr(proposal, "file_changes", [])
+                ],
+                "verification_commands": list(
+                    getattr(proposal, "verification_commands", []) or []
+                ),
+                "hypothesis_id": proposal.hypothesis_id,
+            }
+            if proposal.linked_suggestion_id:
+                structural_context_map[proposal.linked_suggestion_id] = context
+                continue
+            fallback_context_by_bot.setdefault(proposal.bot_id or "", []).append(context)
 
         approved_counts_by_bot: dict[str, int] = {}
         for suggestion in validation_result.approved_suggestions:
@@ -3148,10 +3395,15 @@ class Handlers:
                 if structural_context is not None
                 else None
             )
+            _raw_agent_sid = getattr(suggestion, "strategy_id", None)
+            agent_strategy_id = (
+                _raw_agent_sid if isinstance(_raw_agent_sid, str) and _raw_agent_sid else None
+            )
             ledger_proposal_id = self._ledger_write_candidate(
                 source=source,
                 kind_hint="structural_change" if tier in ("strategy_variant", "hypothesis") else tier,
                 bot_id=bot_id,
+                strategy_id=agent_strategy_id or "",
                 title=title,
                 description=suggestion.evidence_summary or "",
                 suggestion_id=suggestion_id,
@@ -3161,10 +3413,6 @@ class Handlers:
                 affected_parameters=[agent_target_param] if agent_target_param else [],
             )
 
-            _raw_agent_sid = getattr(suggestion, "strategy_id", None)
-            agent_strategy_id = (
-                _raw_agent_sid if isinstance(_raw_agent_sid, str) and _raw_agent_sid else None
-            )
             record = SuggestionRecord(
                 suggestion_id=suggestion_id,
                 bot_id=bot_id,
@@ -3195,14 +3443,14 @@ class Handlers:
             })
 
         # Record structural experiments from approved proposals with acceptance_criteria
-        if parsed and parsed.structural_proposals:
-            self._record_structural_experiments(parsed.structural_proposals, run_id)
+        if approved_structural:
+            self._record_structural_experiments(approved_structural, run_id)
 
         return id_map
 
     def _record_structural_experiments(self, proposals, run_id: str) -> None:
         """Convert structural proposals with acceptance_criteria into experiment records."""
-        if not self._structural_experiment_tracker:
+        if not proposals:
             return
 
         import hashlib
@@ -3210,8 +3458,6 @@ class Handlers:
         from schemas.structural_experiment import AcceptanceCriteria, ExperimentRecord
 
         for proposal in proposals:
-            if not proposal.acceptance_criteria:
-                continue
             # Validate criteria have at least a metric field
             valid_criteria: list[AcceptanceCriteria] = []
             for raw_c in proposal.acceptance_criteria:
@@ -3220,12 +3466,32 @@ class Handlers:
                         valid_criteria.append(AcceptanceCriteria(**raw_c))
                     except Exception:
                         pass
-            if not valid_criteria:
-                continue
+            exp_id = ""
+            if valid_criteria:
+                exp_id = "exp_" + hashlib.sha256(
+                    f"{run_id}:{proposal.bot_id}:{proposal.title}".encode()
+                ).hexdigest()[:12]
 
-            exp_id = "exp_" + hashlib.sha256(
-                f"{run_id}:{proposal.bot_id}:{proposal.title}".encode()
-            ).hexdigest()[:12]
+            self._ledger_write_candidate(
+                source="structural",
+                kind_hint="structural_change",
+                bot_id=proposal.bot_id or "",
+                title=proposal.title or "",
+                description=proposal.description or "",
+                suggestion_id=proposal.linked_suggestion_id or "",
+                experiment_id=exp_id,
+                hypothesis_id=proposal.hypothesis_id or "",
+                stable_link_key=exp_id or proposal.linked_suggestion_id or proposal.hypothesis_id or "",
+                run_id=run_id,
+                evaluation_method="experiment" if valid_criteria else "approval",
+                acceptance_criteria=[
+                    f"{c.metric}:{c.direction}:{c.minimum_change}"
+                    for c in valid_criteria
+                ],
+            )
+
+            if not self._structural_experiment_tracker or not valid_criteria:
+                continue
 
             experiment = ExperimentRecord(
                 experiment_id=exp_id,
@@ -3240,22 +3506,6 @@ class Handlers:
             recorded = self._structural_experiment_tracker.record_experiment(experiment)
             if recorded:
                 logger.info("Recorded structural experiment %s: %s", exp_id, proposal.title)
-                self._ledger_write_candidate(
-                    source="structural",
-                    kind_hint="structural_change",
-                    bot_id=proposal.bot_id or "",
-                    title=proposal.title or "",
-                    description=proposal.description or "",
-                    suggestion_id=proposal.linked_suggestion_id or "",
-                    experiment_id=exp_id,
-                    hypothesis_id=proposal.hypothesis_id or "",
-                    run_id=run_id,
-                    evaluation_method="experiment",
-                    acceptance_criteria=[
-                        f"{c.metric}{c.comparator}{c.threshold}"
-                        for c in valid_criteria
-                    ],
-                )
 
     async def _run_autonomous_pipeline(self, suggestion_ids: dict[str, str], run_id: str) -> None:
         """Run the autonomous pipeline on newly recorded suggestions (if enabled)."""
@@ -3299,7 +3549,7 @@ class Handlers:
     def _record_run(
         self, run_id: str, agent_type: str, status: str,
         started_at: str = "", finished_at: str = "", error: str = "",
-        duration_ms: int = 0,
+        duration_ms: int = 0, metadata: dict | None = None,
     ) -> None:
         """Append a run history entry to the JSONL log."""
         try:
@@ -3314,6 +3564,8 @@ class Handlers:
                 "duration_ms": duration_ms,
                 "error": error,
             }
+            if metadata:
+                entry["metadata"] = metadata
             with open(self._run_history_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
@@ -3409,7 +3661,7 @@ class Handlers:
             from skills.filter_sensitivity_analyzer import FilterSensitivityAnalyzer
             from skills.counterfactual_simulator import CounterfactualSimulator
             from skills.exit_strategy_simulator import ExitStrategySimulator
-            from schemas.exit_simulation import ExitStrategyConfig, ExitStrategyType, ExitSweepResult
+            from schemas.exit_simulation import ExitSweepResult
 
             suggestions = getattr(refinement_report, "suggestions", [])
             counterfactual = CounterfactualSimulator()
@@ -3489,7 +3741,6 @@ class Handlers:
         results: dict = {}
 
         try:
-            from schemas.weekly_metrics import WeeklySummary
             from skills.portfolio_allocator import PortfolioAllocator
             from skills.synergy_analyzer import SynergyAnalyzer
             from skills.strategy_proportion_optimizer import StrategyProportionOptimizer
@@ -3592,14 +3843,13 @@ class Handlers:
                 encoding="utf-8",
             )
 
-            # 6. Interaction analysis (swing_trader only)
-            if "swing_trader" in bot_summaries:
+            # 6. Interaction analysis (swing_multi_01 only)
+            if "swing_multi_01" in bot_summaries:
                 from skills.interaction_analyzer import InteractionAnalyzer
-                from schemas.interaction_analysis import CoordinatorAction
 
-                ia = InteractionAnalyzer(week_start, week_end, bot_id="swing_trader")
+                ia = InteractionAnalyzer(week_start, week_end, bot_id="swing_multi_01")
                 coord_events = self._load_coordinator_events(week_start, week_end)
-                swing_trades = trades_by_bot.get("swing_trader", [])
+                swing_trades = trades_by_bot.get("swing_multi_01", [])
                 interaction_report = ia.compute(coord_events, swing_trades)
                 results["interaction_analysis"] = interaction_report.model_dump(mode="json")
                 (weekly_dir / "interaction_analysis.json").write_text(
@@ -3673,7 +3923,7 @@ class Handlers:
     def _load_coordinator_events(
         self, week_start: str, week_end: str,
     ) -> list:
-        """Load coordinator action events for swing_trader within a date range."""
+        """Load coordinator action events for swing_multi_01 within a date range."""
         from datetime import timedelta
         from schemas.interaction_analysis import CoordinatorAction
 
@@ -3684,7 +3934,7 @@ class Handlers:
         current = start
         while current <= end:
             date_str = current.strftime("%Y-%m-%d")
-            coord_file = self._curated_dir / date_str / "swing_trader" / "coordinator_impact.json"
+            coord_file = self._curated_dir / date_str / "swing_multi_01" / "coordinator_impact.json"
             if not coord_file.exists():
                 current += timedelta(days=1)
                 continue
@@ -3827,6 +4077,16 @@ class Handlers:
         evidence["leverage_data"] = self._aggregate_curated_file(
             "leverage_analysis.json", week_start, week_end, bot_ids,
         )
+        evidence["crypto_trade_data"] = {
+            bot_id: trades for bot_id, trades in trades_by_bot.items()
+            if any(
+                getattr(trade, "funding_paid", 0.0)
+                or getattr(trade, "setup_grade", "")
+                or getattr(trade, "bias_direction", "")
+                or getattr(trade, "sizing_inputs", None)
+                for trade in trades
+            )
+        }
 
         return {key: value for key, value in evidence.items() if value}
 
@@ -4466,7 +4726,12 @@ class Handlers:
         if not self._raw_data_dir.exists():
             return
 
-        from schemas.events import MissedOpportunityEvent, TradeEvent
+        from schemas.events import (
+            HealthReportSnapshot,
+            MissedOpportunityEvent,
+            PipelineFunnelSnapshot,
+            TradeEvent,
+        )
         from skills.build_daily_metrics import DailyMetricsBuilder
 
         findings_dir = self._memory_dir / "findings"
@@ -4505,6 +4770,24 @@ class Handlers:
             coordinator_events = self._load_raw_json_records(bot_raw, "coordinator_action")
             if coordinator_events:
                 kwargs["coordination_events"] = coordinator_events
+
+            funnel_records = (
+                self._load_raw_json_records(bot_raw, "pipeline_funnel")
+                + self._load_raw_json_records(bot_raw, "pipeline_funnels")
+            )
+            if funnel_records:
+                kwargs["funnel_snapshots"] = self._validate_raw_models(
+                    PipelineFunnelSnapshot, funnel_records, "pipeline_funnel", bot_id, date,
+                )
+
+            health_records = (
+                self._load_raw_json_records(bot_raw, "health_report")
+                + self._load_raw_json_records(bot_raw, "health_reports")
+            )
+            if health_records:
+                kwargs["health_snapshots"] = self._validate_raw_models(
+                    HealthReportSnapshot, health_records, "health_report", bot_id, date,
+                )
 
             if not trades and not missed and not kwargs:
                 continue

@@ -75,6 +75,10 @@ def _parse_command_args(raw: str, env_name: str) -> list[str]:
     return parsed
 
 
+def _parse_bool(raw: str) -> bool:
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _parse_bot_timezones(raw: str, bot_ids: list[str]) -> dict[str, BotConfig]:
     """Parse BOT_TIMEZONES env var into BotConfig dict.
 
@@ -137,6 +141,15 @@ class AppConfig(BaseModel):
     relay_hmac_secret: str = ""
     relay_api_key: str = ""
     orchestrator_api_key: str = ""
+    allow_unauthenticated_local: bool = False
+    # Operator-declared bind host. When set to a non-loopback value (anything
+    # other than 127.0.0.1, ::1, or localhost), the lifespan refuses to start
+    # if orchestrator_api_key is empty. See P0-2.
+    bind_host: str = "127.0.0.1"
+    # Worker throughput controls (P1-2). The default 200/30s lets the worker
+    # drain ~tens of thousands of events per minute when the queue is hot.
+    worker_batch_size: int = 200
+    worker_drain_seconds: float = 30.0
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     discord_bot_token: str = ""
@@ -147,7 +160,7 @@ class AppConfig(BaseModel):
     smtp_pass: str = ""
     email_from: str = ""
     email_to: str = ""
-    data_dir: str = "."
+    data_dir: str = "data"
     log_level: str = "INFO"
     bot_config_dir: str = "data/bot_configs"
     bot_repo_dir: str = "."
@@ -207,6 +220,12 @@ class AppConfig(BaseModel):
             relay_hmac_secret=env.get("RELAY_HMAC_SECRET", ""),
             relay_api_key=env.get("RELAY_API_KEY", ""),
             orchestrator_api_key=env.get("ORCHESTRATOR_API_KEY", ""),
+            allow_unauthenticated_local=_parse_bool(
+                env.get("ALLOW_UNAUTHENTICATED_LOCAL", "false"),
+            ),
+            bind_host=env.get("BIND_HOST", env.get("UVICORN_HOST", "127.0.0.1")),
+            worker_batch_size=int(env.get("WORKER_BATCH_SIZE", "200")),
+            worker_drain_seconds=float(env.get("WORKER_DRAIN_SECONDS", "30")),
             telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""),
             discord_bot_token=env.get("DISCORD_BOT_TOKEN", ""),
@@ -217,7 +236,7 @@ class AppConfig(BaseModel):
             smtp_pass=env.get("SMTP_PASS", ""),
             email_from=env.get("EMAIL_FROM", ""),
             email_to=env.get("EMAIL_TO", ""),
-            data_dir=env.get("DATA_DIR", "."),
+            data_dir=env.get("DATA_DIR", "data"),
             log_level=env.get("LOG_LEVEL", "INFO"),
             bot_config_dir=env.get("BOT_CONFIG_DIR", "data/bot_configs"),
             bot_repo_dir=env.get("BOT_REPO_DIR", "."),

@@ -1,6 +1,6 @@
 """Signal health schemas — per-component signal quality metrics.
 
-Used by SignalHealthAnalyzer to assess momentum_trader signal_evolution data.
+Used by SignalHealthAnalyzer to assess momentum_nq_01 signal_evolution data.
 """
 from __future__ import annotations
 

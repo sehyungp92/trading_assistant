@@ -48,7 +48,11 @@ class TestMetricsEndpoint:
         from orchestrator.app import create_app
         from orchestrator.config import AppConfig
 
-        config = AppConfig(bot_ids=[], data_dir="/tmp/test_metrics")
+        config = AppConfig(
+            bot_ids=[],
+            data_dir="/tmp/test_metrics",
+            allow_unauthenticated_local=True,
+        )
         with patch("orchestrator.app.EventQueue") as MockQueue, \
              patch("orchestrator.app.TaskRegistry") as MockRegistry:
             mock_q = AsyncMock()

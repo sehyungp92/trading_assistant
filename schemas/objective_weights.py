@@ -37,6 +37,8 @@ from __future__ import annotations
 import math
 
 
+OBJECTIVE_WEIGHTS_VERSION: str = "objective_weights_v1"
+
 # Full 6-component weights (sum = 1.0)
 W_EXPECTED_R: float = 0.30
 W_CALMAR: float = 0.20

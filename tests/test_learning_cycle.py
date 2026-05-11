@@ -471,7 +471,11 @@ class TestLearningDashboard:
     def test_dashboard_endpoint_exists(self, tmp_path: Path):
         """Dashboard endpoint is registered on the app."""
         from orchestrator.app import create_app
-        app = create_app(db_dir=str(tmp_path))
+        from orchestrator.config import AppConfig
+        app = create_app(
+            db_dir=str(tmp_path),
+            config=AppConfig(allow_unauthenticated_local=True),
+        )
         routes = [r.path for r in app.routes]
         assert "/learning/dashboard" in routes
 
@@ -479,9 +483,13 @@ class TestLearningDashboard:
     async def test_dashboard_returns_structure(self, tmp_path: Path):
         """Dashboard returns expected keys."""
         from orchestrator.app import create_app
+        from orchestrator.config import AppConfig
         from httpx import AsyncClient, ASGITransport
 
-        app = create_app(db_dir=str(tmp_path))
+        app = create_app(
+            db_dir=str(tmp_path),
+            config=AppConfig(allow_unauthenticated_local=True),
+        )
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:

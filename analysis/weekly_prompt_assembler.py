@@ -8,11 +8,14 @@ rather than mechanically reviewing 34 checklist items.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
 from schemas.prompt_package import PromptPackage
+
+logger = logging.getLogger(__name__)
 
 _FOCUSED_WEEKLY_INSTRUCTIONS = """\
 You are analyzing a week of trading data. A deterministic triage system has
@@ -268,7 +271,7 @@ across all that bot's strategies.
     {{"bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "metric": "pnl|win_rate|drawdown|sharpe", "direction": "improve|decline|stable", "confidence": 0.0-1.0, "timeframe_days": 7, "reasoning": "..."}}
   ],
   "suggestions": [
-    {{"suggestion_id": "#abc123", "bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
+    {{"suggestion_id": "#abc123", "bot_id": "...", "strategy_id": "TPC|ATRSS|...|null", "category": "exit_timing|filter_threshold|stop_loss|signal|structural|position_sizing|regime_gate|funding_threshold|leverage_cap|confluence_count|setup_grade_filter", "title": "...", "expected_impact": "...", "confidence": 0.0-1.0, "evidence_summary": "...", "proposed_value": 0.5, "target_param": "param_name"}}
   ],
   "structural_proposals": [
     {{"hypothesis_id": "REQUIRED: use id from structural_hypotheses if matching, else null", "bot_id": "...", "title": "...", "description": "...", "reversibility": "easy|moderate|hard", "evidence": "...", "estimated_complexity": "low|medium|high", "acceptance_criteria": [{{"metric": "...", "direction": "improve|not_degrade", "minimum_change": 0.0, "observation_window_days": 14, "minimum_trade_count": 20}}]}}
@@ -285,6 +288,14 @@ This bot trades crypto perpetual futures. Apply the following weekly-specific gu
 
 **Funding trend**: Week-over-week funding cost trajectory. Is it growing? If funding_pct_of_gross
 exceeded 15% any day this week, flag as a structural cost concern.
+
+**Funnel trend**: If crypto_funnel_trends is present, compare conversion rates across the
+week. A worsening setup-to-confirmation or confirmation-to-entry conversion should be
+handled as a funnel/process question before changing risk.
+
+**Health gating**: If health_summary shows degraded or critical days, separate bot/process
+health from trading-edge conclusions. Strategy changes should not be justified by periods
+with stale feeds, repeated disconnects, or severe alert bursts.
 
 **Grade calibration**: Rolling 7-day A vs B performance. Is the grade split still justified?
 If B-grade trades lost money on aggregate this week, recommend disabling B entries.
@@ -420,48 +431,36 @@ class WeeklyPromptAssembler:
 
     def _load_data(self) -> dict:
         data: dict = {}
+        data_load_errors: list[dict] = []
 
         weekly_dir = self.curated_dir / "weekly" / self.week_start
-        summary_path = weekly_dir / "weekly_summary.json"
-        if summary_path.exists():
-            data["weekly_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
-
-        refinement_path = weekly_dir / "refinement_report.json"
-        if refinement_path.exists():
-            data["refinement_report"] = json.loads(refinement_path.read_text(encoding="utf-8"))
-
-        wow_path = weekly_dir / "week_over_week.json"
-        if wow_path.exists():
-            data["week_over_week"] = json.loads(wow_path.read_text(encoding="utf-8"))
+        for key, filename in [
+            ("weekly_summary", "weekly_summary.json"),
+            ("refinement_report", "refinement_report.json"),
+            ("week_over_week", "week_over_week.json"),
+            ("allocation_analysis", "allocation_analysis.json"),
+            ("structural_analysis", "structural_analysis.json"),
+            ("regime_conditional_analysis", "regime_conditional_analysis.json"),
+            ("interaction_analysis", "interaction_analysis.json"),
+            ("allocation_drift", "allocation_drift.json"),
+        ]:
+            path = weekly_dir / filename
+            if path.exists():
+                loaded = self._safe_load_json(path, data_load_errors)
+                if loaded is not None:
+                    data[key] = loaded
 
         data["daily_reports"] = self._load_daily_reports()
-        data["portfolio_risk_cards"] = self._load_risk_cards()
+        data["portfolio_risk_cards"] = self._load_risk_cards(data_load_errors)
+        funnel_trends = self._load_crypto_daily_file("funnel_analysis.json", data_load_errors)
+        if funnel_trends:
+            data["crypto_funnel_trends"] = funnel_trends
+        health_summaries = self._load_crypto_daily_file("health_summary.json", data_load_errors)
+        if health_summaries:
+            data["crypto_health_summaries"] = health_summaries
 
-        # Load allocation analysis if present
-        alloc_path = weekly_dir / "allocation_analysis.json"
-        if alloc_path.exists():
-            data["allocation_analysis"] = json.loads(alloc_path.read_text(encoding="utf-8"))
-
-        # Load structural analysis if present
-        structural_path = weekly_dir / "structural_analysis.json"
-        if structural_path.exists():
-            data["structural_analysis"] = json.loads(structural_path.read_text(encoding="utf-8"))
-
-        # Load regime-conditional analysis if present
-        regime_path = weekly_dir / "regime_conditional_analysis.json"
-        if regime_path.exists():
-            data["regime_conditional_analysis"] = json.loads(regime_path.read_text(encoding="utf-8"))
-
-        # Load interaction analysis if present
-        interaction_path = weekly_dir / "interaction_analysis.json"
-        if interaction_path.exists():
-            data["interaction_analysis"] = json.loads(interaction_path.read_text(encoding="utf-8"))
-
-        # Load allocation drift analysis if present
-        drift_path = weekly_dir / "allocation_drift.json"
-        if drift_path.exists():
-            data["allocation_drift"] = json.loads(drift_path.read_text(encoding="utf-8"))
-
+        if data_load_errors:
+            data["data_load_errors"] = data_load_errors
         return data
 
     def _load_daily_reports(self) -> list[dict]:
@@ -477,13 +476,27 @@ class WeeklyPromptAssembler:
                 })
         return reports
 
-    def _load_risk_cards(self) -> list[dict]:
+    def _load_risk_cards(self, data_load_errors: list[dict]) -> list[dict]:
         cards: list[dict] = []
         for date_str in self._week_dates():
             card_path = self.curated_dir / date_str / "portfolio_risk_card.json"
             if card_path.exists():
-                cards.append(json.loads(card_path.read_text(encoding="utf-8")))
+                loaded = self._safe_load_json(card_path, data_load_errors)
+                if isinstance(loaded, dict):
+                    cards.append(loaded)
         return cards
+
+    def _load_crypto_daily_file(self, filename: str, data_load_errors: list[dict]) -> list[dict]:
+        records: list[dict] = []
+        for date_str in self._week_dates():
+            for bot in self.bots:
+                path = self.curated_dir / date_str / bot / filename
+                if not path.exists():
+                    continue
+                loaded = self._safe_load_json(path, data_load_errors)
+                if isinstance(loaded, dict):
+                    records.append({"date": date_str, "bot_id": bot, "data": loaded})
+        return records
 
     def _list_data_files(self) -> list[str]:
         files: list[str] = []
@@ -495,12 +508,34 @@ class WeeklyPromptAssembler:
             "allocation_drift.json",
         ]:
             path = weekly_dir / name
-            if path.exists():
+            if path.exists() and self._json_file_loadable(path):
                 files.append(str(path))
         for date_str in self._week_dates():
             for report_path in self._find_daily_report_paths(date_str):
                 files.append(str(report_path))
+            for bot in self.bots:
+                for name in ("funnel_analysis.json", "health_summary.json"):
+                    path = self.curated_dir / date_str / bot / name
+                    if path.exists() and self._json_file_loadable(path):
+                        files.append(str(path))
         return files
+
+    @staticmethod
+    def _safe_load_json(path: Path, errors: list[dict]) -> object | None:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Skipping malformed weekly JSON %s: %s", path, exc)
+            errors.append({"path": str(path), "error": str(exc)})
+            return None
+
+    @staticmethod
+    def _json_file_loadable(path: Path) -> bool:
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        return True
 
     def _week_dates(self) -> list[str]:
         """Generate the 7 date strings for this week."""

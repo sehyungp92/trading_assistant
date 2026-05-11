@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Awaitable
@@ -16,6 +17,7 @@ from orchestrator.conversation_tracker import ConversationTracker
 from orchestrator.db.queue import EventQueue
 from orchestrator.event_stream import EventStream
 from orchestrator.orchestrator_brain import OrchestratorBrain, Action, ActionType
+from orchestrator.subagent import CapacityExceeded
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.tz_utils import bot_trading_date
 from schemas.bot_config import BotConfig
@@ -60,6 +62,23 @@ class Worker:
         if self._event_stream:
             self._event_stream.broadcast(event_type, data)
 
+    async def drain(self, batch_size: int = 200, time_budget_seconds: float = 30.0) -> int:
+        """Process pending events until the queue is empty or the time budget expires.
+
+        P1-2: replaces the old 10-events-per-minute ceiling. Returns the
+        cumulative count of events processed during this call.
+        """
+        deadline = time.monotonic() + max(0.0, float(time_budget_seconds))
+        total = 0
+        while True:
+            processed = await self.process_batch(limit=batch_size)
+            total += processed
+            if processed == 0:
+                break
+            if time.monotonic() >= deadline:
+                break
+        return total
+
     async def process_batch(self, limit: int = 10) -> int:
         """Process up to `limit` pending events. Returns count processed."""
         events = await self._queue.claim(limit=limit)
@@ -96,6 +115,14 @@ class Worker:
                 await self._queue.ack(event_id)
                 processed += 1
                 self._emit("event_processing_complete", {"event_id": event_id})
+            except CapacityExceeded as exc:
+                # Transient back-pressure: requeue without consuming a retry slot.
+                logger.warning("Subagent capacity for event %s — requeueing: %s", event_id, exc)
+                self._emit(
+                    "event_requeued_capacity",
+                    {"event_id": event_id, "reason": str(exc)},
+                )
+                await self._queue.requeue(event_id)
             except Exception as exc:
                 logger.exception("Failed to process event %s", event_id)
                 self._emit("event_processing_error", {"event_id": event_id, "error": str(exc)})

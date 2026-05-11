@@ -144,3 +144,67 @@ class TestConfigRegistry:
     def test_unknown_bot_returns_none(self, registry: ConfigRegistry):
         assert registry.get_profile("nonexistent") is None
         assert registry.get_parameter("nonexistent", "x") is None
+
+    def test_excludes_unsupported_parameter_when_repo_file_available(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "config.py").write_text("SUPPORTED = 1\n", encoding="utf-8")
+        cfg = tmp_path / "bot_configs"
+        cfg.mkdir()
+        (cfg / "bot.yaml").write_text(yaml.dump({
+            "bot_id": "bot",
+            "repo_dir": str(repo),
+            "parameters": [
+                {
+                    "param_name": "supported",
+                    "param_type": "PYTHON_CONSTANT",
+                    "file_path": "config.py",
+                    "python_path": "SUPPORTED",
+                    "current_value": 1,
+                    "value_type": "int",
+                },
+                {
+                    "param_name": "missing",
+                    "param_type": "PYTHON_CONSTANT",
+                    "file_path": "config.py",
+                    "python_path": "MISSING.value",
+                    "current_value": 1,
+                    "value_type": "int",
+                },
+            ],
+        }), encoding="utf-8")
+
+        registry = ConfigRegistry(cfg)
+
+        assert registry.get_parameter("bot", "supported") is not None
+        assert registry.get_parameter("bot", "missing") is None
+        assert any("missing" in err for err in registry.load_errors)
+
+    def test_loads_json_field_parameter_when_path_resolves(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        (repo / "config" / "strategies").mkdir(parents=True)
+        (repo / "config" / "strategies" / "momentum.json").write_text(
+            '{"strategy": {"indicators": {"ema_fast": 20}}}\n',
+            encoding="utf-8",
+        )
+        cfg = tmp_path / "bot_configs"
+        cfg.mkdir()
+        (cfg / "crypto.yaml").write_text(yaml.dump({
+            "bot_id": "crypto",
+            "repo_dir": str(repo),
+            "parameters": [{
+                "param_name": "ema_fast",
+                "param_type": "JSON_FIELD",
+                "file_path": "config/strategies/momentum.json",
+                "python_path": "strategy.indicators.ema_fast",
+                "current_value": 20,
+                "value_type": "int",
+            }],
+        }), encoding="utf-8")
+
+        registry = ConfigRegistry(cfg)
+
+        param = registry.get_parameter("crypto", "ema_fast")
+        assert param is not None
+        assert param.param_type == ParameterType.JSON_FIELD
+        assert registry.load_errors == []

@@ -224,6 +224,7 @@ cp .env.example .env
 pytest tests/
 
 # Start the orchestrator
+export ALLOW_UNAUTHENTICATED_LOCAL=true  # local loopback dev only
 uvicorn orchestrator.app:app --reload
 ```
 
@@ -250,7 +251,7 @@ Copy `.env.example` to `.env` and configure:
 | `DISCORD_BOT_TOKEN` | No | Discord bot token |
 | `DISCORD_CHANNEL_ID` | No | Discord channel for reports |
 | `SMTP_HOST/PORT/USER/PASS` | No | Email delivery configuration |
-| `DATA_DIR` | No | Base data directory (default: `.`) |
+| `DATA_DIR` | No | Base data directory (default: `data`) |
 
 See `orchestrator/config.py` for all settings.
 
@@ -328,8 +329,9 @@ Three-tier permission gates (auto / requires_approval / requires_double_approval
 ## Commands
 
 ```bash
-# Start the orchestrator
-uvicorn orchestrator.app:app --host 0.0.0.0 --port 8000
+# Start the orchestrator (default: loopback only)
+export ALLOW_UNAUTHENTICATED_LOCAL=true
+uvicorn orchestrator.app:app --host 127.0.0.1 --port 8000
 
 # Manual task triggers
 python -m orchestrator.scheduler --run-now daily_report
@@ -346,6 +348,34 @@ pytest tests/
 pytest tests/ -k "integration"
 pytest tests/test_handlers.py -v
 ```
+
+### Exposing the orchestrator beyond localhost
+
+The control plane exposes mutating endpoints (`/ingest`, `/feedback`,
+`/agent/preferences`, dead-letter reprocess, cancel subagent, etc.). Binding
+to a non-loopback host without authentication would let anyone reachable
+inject events or change preferences.
+
+The app **refuses to start** when bound to a non-loopback host with no API
+key configured. Two env vars are involved:
+
+- `ORCHESTRATOR_API_KEY` — required header `X-Api-Key` for all endpoints
+  except `/health`. Pick a long random value.
+- `ALLOW_UNAUTHENTICATED_LOCAL` — explicit local-dev escape hatch. Leave this
+  `false` outside loopback-only development.
+- `BIND_HOST` — declare the host you intend to pass to `uvicorn --host`.
+  Without an API key, startup is allowed only when this is loopback and
+  `ALLOW_UNAUTHENTICATED_LOCAL=true`.
+
+```bash
+export ORCHESTRATOR_API_KEY="$(openssl rand -hex 32)"
+export BIND_HOST="0.0.0.0"
+uvicorn orchestrator.app:app --host 0.0.0.0 --port 8000
+```
+
+Prefer running behind a reverse proxy that terminates TLS and adds the
+`X-Api-Key` header from a secret store; do not put the raw orchestrator on
+the public internet even with an API key set.
 
 ## Tech Stack
 

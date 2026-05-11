@@ -167,6 +167,7 @@ class TestAppDeploymentMonitorWiring:
         config = AppConfig(
             data_dir=str(tmp_path),
             deployment_monitoring_enabled=False,
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
 
@@ -178,6 +179,7 @@ class TestAppDeploymentMonitorWiring:
         config = AppConfig(
             data_dir=str(tmp_path),
             deployment_monitoring_enabled=True,
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
 

@@ -13,6 +13,12 @@ from schemas.wfo_results import SimulationMetrics
 class ParameterType(str, Enum):
     YAML_FIELD = "YAML_FIELD"
     PYTHON_CONSTANT = "PYTHON_CONSTANT"
+    # P1-7: TOML dotted-path field (e.g. `entry.ema_fast` in a .toml file).
+    # Reuses the python_path field on ParameterDefinition for the path.
+    TOML_FIELD = "TOML_FIELD"
+    # JSON dotted-path field (e.g. `strategy.indicators.ema_fast` in a .json
+    # file). Reuses the python_path field for the path.
+    JSON_FIELD = "JSON_FIELD"
 
 
 class ChangeKind(str, Enum):
@@ -32,6 +38,8 @@ class FileChangeMode(str, Enum):
     FILE_REPLACE = "file_replace"
     YAML_FIELD = "yaml_field"
     PYTHON_CONSTANT = "python_constant"
+    TOML_FIELD = "toml_field"
+    JSON_FIELD = "json_field"
     UNIFIED_DIFF = "unified_diff"
 
 
@@ -58,6 +66,16 @@ class ParameterDefinition(BaseModel):
             raise ValueError("yaml_key is required when param_type is YAML_FIELD")
         if self.param_type == ParameterType.PYTHON_CONSTANT and not self.python_path:
             raise ValueError("python_path is required when param_type is PYTHON_CONSTANT")
+        if self.param_type == ParameterType.TOML_FIELD and not self.python_path:
+            raise ValueError(
+                "python_path (used as TOML dotted path) is required when "
+                "param_type is TOML_FIELD"
+            )
+        if self.param_type == ParameterType.JSON_FIELD and not self.python_path:
+            raise ValueError(
+                "python_path (used as JSON dotted path) is required when "
+                "param_type is JSON_FIELD"
+            )
         if self.valid_range is not None and self.valid_range[0] >= self.valid_range[1]:
             raise ValueError("valid_range[0] must be less than valid_range[1]")
         return self

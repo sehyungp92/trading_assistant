@@ -90,7 +90,7 @@ strategies:
     adverse_regimes: [ranging]
     holding_period: multi_day
     risk:
-      unit_risk_dollars: 150.0
+      unit_risk_dollars: 100.0
       daily_stop_R: 2.0
       max_heat_R: 4.00
       tp_ratio: 1.5
@@ -116,7 +116,7 @@ strategies:
     adverse_regimes: [ranging]
     holding_period: intraday
     risk:
-      unit_risk_dollars: 150.0
+      unit_risk_dollars: 100.0
       daily_stop_R: 2.0
       max_heat_R: 4.00
       tp_ratio: 0.0
@@ -142,7 +142,7 @@ strategies:
     adverse_regimes: [ranging]
     holding_period: intraday
     risk:
-      unit_risk_dollars: 300.0
+      unit_risk_dollars: 50.0
       daily_stop_R: 3.0
       max_heat_R: 1.50
       tp_ratio: 2.0
@@ -185,7 +185,7 @@ strategies:
     adverse_regimes: [trending_up, trending_down]
     holding_period: intraday
     risk:
-      unit_risk_dollars: 300.0
+      unit_risk_dollars: 50.0
       daily_stop_R: 3.0
       max_heat_R: 2.00
       tp_ratio: 2.0
@@ -204,7 +204,7 @@ strategies:
     adverse_regimes: [ranging]
     holding_period: intraday
     risk:
-      unit_risk_dollars: 300.0
+      unit_risk_dollars: 200.0
       daily_stop_R: 3.0
       max_heat_R: 2.00
       tp_ratio: 1.5
@@ -223,7 +223,7 @@ strategies:
     adverse_regimes: [trending_up, ranging]
     holding_period: intraday
     risk:
-      unit_risk_dollars: 300.0
+      unit_risk_dollars: 50.0
       daily_stop_R: 3.0
       max_heat_R: 2.00
       tp_ratio: 0.0
@@ -355,7 +355,7 @@ strategies:
       tp_ratio: 2.0
     allocation:
       base_risk_pct: 0.0075
-    macro_regime_sensitivity: {}
+    macro_regime_sensitivity: {G: 1.0, R: 1.0, S: 0.5, D: 0.7}
     entry_types: [PULLBACK_LONG, PULLBACK_SHORT]
     key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, adx_entry]
     analysis_focus:
@@ -393,7 +393,7 @@ strategies:
       tp_ratio: 2.0
     allocation:
       base_risk_pct: 0.0075
-    macro_regime_sensitivity: {}
+    macro_regime_sensitivity: {G: 1.1, R: 1.0, S: 0.4, D: 0.8}
     entry_types: [ON_CLOSE_LONG, ON_CLOSE_SHORT, ON_BREAKOUT_LONG, ON_BREAKOUT_SHORT]
     key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, h1_adx]
     analysis_focus:
@@ -431,7 +431,7 @@ strategies:
       tp_ratio: 2.0
     allocation:
       base_risk_pct: 0.0075
-    macro_regime_sensitivity: {}
+    macro_regime_sensitivity: {G: 0.8, R: 0.9, S: 1.1, D: 0.6}
     entry_types: [BREAKOUT_LONG, BREAKOUT_SHORT]
     key_metadata_fields: [setup_grade, confluence_count, funding_rate, bias_direction, volume_surge]
     analysis_focus:

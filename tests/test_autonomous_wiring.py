@@ -167,7 +167,10 @@ class TestRecordSuggestionsConfidence:
 class TestAppWiring:
     def test_feature_flag_off_no_autonomous(self, tmp_path: Path):
         """When AUTONOMOUS_ENABLED is false, autonomous_pipeline should be None."""
-        config = AppConfig(autonomous_enabled=False)
+        config = AppConfig(
+            autonomous_enabled=False,
+            allow_unauthenticated_local=True,
+        )
         from orchestrator.app import create_app
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.autonomous_pipeline is None
@@ -192,6 +195,7 @@ class TestAppWiring:
         config = AppConfig(
             autonomous_enabled=True,
             bot_config_dir=str(cfg_dir),
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
         app = create_app(db_dir=str(tmp_path), config=config)
@@ -220,6 +224,7 @@ class TestAppWiring:
             bot_config_dir=str(cfg_dir),
             telegram_bot_token="test_token",
             telegram_chat_id="123",
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
         app = create_app(db_dir=str(tmp_path), config=config)
@@ -247,6 +252,7 @@ class TestAppWiring:
         config = AppConfig(
             autonomous_enabled=True,
             bot_config_dir=str(cfg_dir),
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
         app = create_app(db_dir=str(tmp_path), config=config)
@@ -274,6 +280,7 @@ class TestAppWiring:
             bot_config_dir=str(cfg_dir),
             telegram_bot_token="test_token",
             telegram_chat_id="123",
+            allow_unauthenticated_local=True,
         )
         from orchestrator.app import create_app
         app = create_app(db_dir=str(tmp_path), config=config)

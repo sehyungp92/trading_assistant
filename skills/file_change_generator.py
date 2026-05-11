@@ -1,10 +1,14 @@
 """Generate validated file changes for bot repository updates."""
 from __future__ import annotations
 
+import ast
 import difflib
+import json
 import re
 from pathlib import Path
 from typing import Any
+
+import tomlkit
 
 from schemas.autonomous_pipeline import (
     FileChange,
@@ -40,6 +44,18 @@ class FileChangeGenerator:
             )
             change_mode = FileChangeMode.PYTHON_CONSTANT
             metadata = {"python_path": param.python_path or ""}
+        elif param.param_type == ParameterType.TOML_FIELD:
+            modified = self._modify_toml_field(
+                original, param.python_path or "", new_value,
+            )
+            change_mode = FileChangeMode.TOML_FIELD
+            metadata = {"toml_path": param.python_path or ""}
+        elif param.param_type == ParameterType.JSON_FIELD:
+            modified = self._modify_json_field(
+                original, param.python_path or "", new_value,
+            )
+            change_mode = FileChangeMode.JSON_FIELD
+            metadata = {"json_path": param.python_path or ""}
         else:
             raise ValueError(f"Unsupported param_type: {param.param_type}")
 
@@ -164,6 +180,8 @@ class FileChangeGenerator:
         python_path: str,
         new_value: Any,
     ) -> str:
+        # Fast-path: module-level constant or rebound `Class.attr = X` line.
+        # Matches both `tier_a_min = 0.65` and `StrategySettings.tier_a_min = 0.65`.
         pattern = re.compile(
             rf"^(?P<indent>\s*){re.escape(python_path)}\s*=\s*(?P<value>.+?)\s*$",
             re.MULTILINE,
@@ -174,9 +192,301 @@ class FileChangeGenerator:
             return f"{indent}{python_path} = {self._format_python_value(new_value)}"
 
         modified, count = pattern.subn(repl, content, count=1)
-        if count == 0:
-            raise ValueError(f"Python constant not found: {python_path}")
-        return modified
+        if count > 0:
+            return modified
+
+        if "." in python_path:
+            subscript_modified = self._modify_python_subscript_assignment(
+                content, python_path, new_value,
+            )
+            if subscript_modified is not None:
+                return subscript_modified
+
+            # P1-7: AST fallback for class attributes — `class Foo: bar = 0.65`
+            # where the file line is just `    bar = 0.65` with no `Foo.` prefix.
+            class_modified = self._modify_python_class_attribute(
+                content, python_path, new_value,
+            )
+            if class_modified is not None:
+                return class_modified
+
+            dict_modified = self._modify_python_dict_literal(
+                content, python_path, new_value,
+            )
+            if dict_modified is not None:
+                return dict_modified
+
+        raise ValueError(f"Python constant not found: {python_path}")
+
+    def _modify_python_subscript_assignment(
+        self,
+        content: str,
+        dotted_path: str,
+        new_value: Any,
+    ) -> str | None:
+        """Patch `FOO["bar"] = value` for dotted path `FOO.bar`."""
+        parts = dotted_path.split(".")
+        if len(parts) != 2:
+            return None
+        root, key = parts
+        pattern = re.compile(
+            rf"^(?P<indent>\s*){re.escape(root)}\s*\[\s*"
+            rf"(?P<quote>['\"]){re.escape(key)}(?P=quote)\s*\]\s*=\s*"
+            rf"(?P<value>.*?)(?P<comment>\s+#.*)?(?P<newline>\r?\n?)$",
+            re.MULTILINE,
+        )
+
+        def repl(match: re.Match[str]) -> str:
+            quote = match.group("quote")
+            comment = match.group("comment") or ""
+            newline = match.group("newline") or ""
+            return (
+                f"{match.group('indent')}{root}[{quote}{key}{quote}] = "
+                f"{self._format_python_value(new_value)}{comment}{newline}"
+            )
+
+        modified, count = pattern.subn(repl, content, count=1)
+        return modified if count > 0 else None
+
+    def _modify_python_class_attribute(
+        self,
+        content: str,
+        dotted_path: str,
+        new_value: Any,
+    ) -> str | None:
+        """Locate `class <Prefix>: <attr> = ...` and replace the assignment.
+
+        Supports `ClassName.attr` (one-level) and `Outer.Inner.attr` (nested).
+        Returns the modified content or None if no match.
+        """
+        parts = dotted_path.split(".")
+        class_chain, attr_name = parts[:-1], parts[-1]
+        if not class_chain:
+            return None
+
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return None
+
+        target = self._find_class_attribute_assignment(tree, class_chain, attr_name)
+        if target is None:
+            return None
+
+        lines = content.splitlines(keepends=True)
+        # ast line numbers are 1-indexed.
+        line_idx = target.lineno - 1
+        if line_idx < 0 or line_idx >= len(lines):
+            return None
+        original_line = lines[line_idx]
+
+        # Preserve leading whitespace + optional trailing comment.
+        match = re.match(
+            rf"^(?P<indent>\s*){re.escape(attr_name)}\s*"
+            rf"(?P<annotation>:\s*[^=]+?)?\s*=\s*"
+            rf"(?P<value>.+?)\s*(?P<comment>#.*)?(?P<newline>\r?\n?)$",
+            original_line,
+        )
+        if match is None:
+            return None
+        indent = match.group("indent")
+        annotation = match.group("annotation") or ""
+        comment = match.group("comment") or ""
+        newline = match.group("newline") or ""
+        rendered_value = self._format_python_value(new_value)
+        if comment:
+            new_line = f"{indent}{attr_name}{annotation} = {rendered_value}  {comment}{newline}"
+        else:
+            new_line = f"{indent}{attr_name}{annotation} = {rendered_value}{newline}"
+        lines[line_idx] = new_line
+        return "".join(lines)
+
+    @staticmethod
+    def _find_class_attribute_assignment(
+        node: ast.AST,
+        class_chain: list[str],
+        attr_name: str,
+    ) -> ast.AST | None:
+        """Walk the AST to find `class <chain>: <attr> = ...`."""
+        target_class_name = class_chain[0]
+        remaining = class_chain[1:]
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef) and child.name == target_class_name:
+                if remaining:
+                    found = FileChangeGenerator._find_class_attribute_assignment(
+                        child, remaining, attr_name,
+                    )
+                    if found is not None:
+                        return found
+                else:
+                    for stmt in child.body:
+                        if isinstance(stmt, ast.Assign):
+                            for tgt in stmt.targets:
+                                if isinstance(tgt, ast.Name) and tgt.id == attr_name:
+                                    return stmt
+                        elif isinstance(stmt, ast.AnnAssign):
+                            if (
+                                isinstance(stmt.target, ast.Name)
+                                and stmt.target.id == attr_name
+                            ):
+                                return stmt
+        return None
+
+    def _modify_python_dict_literal(
+        self,
+        content: str,
+        dotted_path: str,
+        new_value: Any,
+    ) -> str | None:
+        """Patch `FOO = {"bar": value}` for dotted path `FOO.bar`."""
+        parts = dotted_path.split(".")
+        if len(parts) != 2:
+            return None
+        root, key = parts
+
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return None
+
+        value_node = self._find_dict_literal_value(tree, root, key)
+        if value_node is None:
+            return None
+        return self._replace_ast_node_source(
+            content,
+            value_node,
+            self._format_python_value(new_value),
+        )
+
+    @staticmethod
+    def _find_dict_literal_value(
+        tree: ast.AST,
+        root_name: str,
+        key_name: str,
+    ) -> ast.AST | None:
+        for node in ast.walk(tree):
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                if any(
+                    isinstance(target, ast.Name) and target.id == root_name
+                    for target in node.targets
+                ):
+                    value = node.value
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == root_name
+            ):
+                value = node.value
+
+            if not isinstance(value, ast.Dict):
+                continue
+            for key_node, item_node in zip(value.keys, value.values):
+                if (
+                    isinstance(key_node, ast.Constant)
+                    and isinstance(key_node.value, str)
+                    and key_node.value == key_name
+                ):
+                    return item_node
+        return None
+
+    @staticmethod
+    def _replace_ast_node_source(content: str, node: ast.AST, replacement: str) -> str | None:
+        if not all(
+            hasattr(node, attr)
+            for attr in ("lineno", "col_offset", "end_lineno", "end_col_offset")
+        ):
+            return None
+        lines = content.splitlines(keepends=True)
+        start_line = node.lineno - 1
+        end_line = node.end_lineno - 1
+        if start_line < 0 or end_line >= len(lines):
+            return None
+        if start_line == end_line:
+            line = lines[start_line]
+            lines[start_line] = (
+                line[:node.col_offset]
+                + replacement
+                + line[node.end_col_offset:]
+            )
+            return "".join(lines)
+
+        return None
+
+    def _modify_toml_field(
+        self,
+        content: str,
+        toml_path: str,
+        new_value: Any,
+    ) -> str:
+        """Update a dotted TOML path (e.g. `entry.ema_fast`) preserving formatting.
+
+        Uses tomlkit so comments, blank lines, and key ordering survive.
+        """
+        if not toml_path:
+            raise ValueError("toml_path is required")
+        try:
+            doc = tomlkit.parse(content)
+        except Exception as exc:
+            raise ValueError(f"Could not parse TOML: {exc}") from exc
+
+        parts = toml_path.split(".")
+        cursor: Any = doc
+        for key in parts[:-1]:
+            if key not in cursor:
+                raise ValueError(f"TOML section not found: {key} (in {toml_path})")
+            cursor = cursor[key]
+        leaf = parts[-1]
+        if leaf not in cursor:
+            raise ValueError(f"TOML key not found: {toml_path}")
+        cursor[leaf] = new_value
+        return tomlkit.dumps(doc)
+
+    def _modify_json_field(
+        self,
+        content: str,
+        json_path: str,
+        new_value: Any,
+    ) -> str:
+        """Update a dotted JSON path (e.g. `strategy.indicators.ema_fast`).
+
+        Preserves the source file's indent and trailing newline. Bools, ints,
+        floats, and strings are written as-is.
+        """
+        if not json_path:
+            raise ValueError("json_path is required")
+        try:
+            doc = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Could not parse JSON: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise ValueError("JSON root must be an object")
+
+        parts = json_path.split(".")
+        cursor: Any = doc
+        for key in parts[:-1]:
+            if not isinstance(cursor, dict) or key not in cursor:
+                raise ValueError(f"JSON section not found: {key} (in {json_path})")
+            cursor = cursor[key]
+        leaf = parts[-1]
+        if not isinstance(cursor, dict) or leaf not in cursor:
+            raise ValueError(f"JSON key not found: {json_path}")
+        cursor[leaf] = new_value
+
+        indent = self._infer_json_indent(content)
+        rendered = json.dumps(doc, indent=indent)
+        if content.endswith("\n") and not rendered.endswith("\n"):
+            rendered += "\n"
+        return rendered
+
+    @staticmethod
+    def _infer_json_indent(content: str) -> int:
+        """Infer indent width from the first indented line. Default to 2."""
+        for line in content.splitlines():
+            stripped = line.lstrip(" ")
+            if stripped and stripped != line:
+                return len(line) - len(stripped)
+        return 2
 
     def _apply_unified_diff(
         self,

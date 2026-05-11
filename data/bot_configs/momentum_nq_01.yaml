@@ -1,0 +1,979 @@
+bot_id: momentum_nq_01
+repo_url: git@github.com:sehyungp92/trading.git
+repo_dir: /repos/trading
+default_branch: main
+allowed_edit_paths:
+  - strategies/momentum/*
+  - config/*
+  - tests/*
+structural_context_paths:
+  - strategies/momentum/*
+  - strategies/core/*
+  - strategies/contracts.py
+  - libs/*
+  - apps/*
+  - instrumentation/*
+  - regime/*
+  - config/*
+  - tests/*
+verification_commands:
+  - pytest tests -q
+strategies:
+  - DownturnDominator_v1
+  - NQDTC_v2.1
+  - VdubusNQ_v4
+  - NQ_REGIME
+parameters:
+  # === DownturnDominator_v1 — Risk ===
+  - param_name: BASE_RISK_PCT
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: BASE_RISK_PCT
+    current_value: 0.004
+    valid_range: [0.001, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: DAILY_STOP_R
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: DAILY_STOP_R
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: HEAT_CAP_R
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: HEAT_CAP_R
+    current_value: 3.5
+    valid_range: [1.0, 6.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: PORTFOLIO_DAILY_STOP_R
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: PORTFOLIO_DAILY_STOP_R
+    current_value: 2.75
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: MAX_LEVERAGE_MULT
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: MAX_LEVERAGE_MULT
+    current_value: 20.0
+    valid_range: [1.0, 50.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+
+  # === DownturnDominator_v1 — Ablation Flags ===
+  - param_name: reversal_engine
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.reversal_engine
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: breakdown_engine
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.breakdown_engine
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: fade_engine
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.fade_engine
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: use_composite_regime
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.use_composite_regime
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: use_volatility_states
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.use_volatility_states
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: use_shock_block
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.use_shock_block
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: fade_oscillation_gate
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.fade_cap_gate
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: tiered_exits
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.tiered_exits
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: climax_exit
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.climax_exit
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: vwap_failure_exit
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.vwap_failure_exit
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: daily_circuit_breaker
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.daily_circuit_breaker
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: true
+  - param_name: directional_entry_caps
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.directional_entry_caps
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: true
+  - param_name: friction_gate
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.friction_gate
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: block_counter_regime
+    strategy_id: DownturnDominator_v1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/downturn/config.py
+    python_path: R7C_FLAGS.block_counter_regime
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Risk ===
+  - param_name: BASE_RISK_PCT
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BASE_RISK_PCT
+    current_value: 0.0045
+    valid_range: [0.001, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: FRICTION_CAP
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: FRICTION_CAP
+    current_value: 0.10
+    valid_range: [0.02, 0.30]
+    value_type: float
+    category: risk_management
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Box compression / entry ===
+  - param_name: BOX_HEIGHT_MIN_ATR_SHORT
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BOX_HEIGHT_MIN_ATR_SHORT
+    current_value: 0.35
+    valid_range: [0.10, 1.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: BOX_HEIGHT_MIN_ATR_LONG
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BOX_HEIGHT_MIN_ATR_LONG
+    current_value: 0.30
+    valid_range: [0.10, 1.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: CONTAINMENT_MIN
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: CONTAINMENT_MIN
+    current_value: 0.85
+    valid_range: [0.50, 0.99]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: VIOL_MAX
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: VIOL_MAX
+    current_value: 4
+    valid_range: [1, 10]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: M_BREAK
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: M_BREAK
+    current_value: 8
+    valid_range: [3, 20]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Session / hour gates (ablation) ===
+  - param_name: RTH_ENTRIES_ENABLED
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: RTH_ENTRIES_ENABLED
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BLOCK_ETH_SHORTS
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BLOCK_ETH_SHORTS
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BLOCK_RTH_DEGRADED
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BLOCK_RTH_DEGRADED
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BLOCK_04_ET
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BLOCK_04_ET
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BLOCK_06_ET
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BLOCK_06_ET
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BLOCK_12_ET
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BLOCK_12_ET
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Box hysteresis & dirty-box recovery ===
+  - param_name: BOX_BUCKET_HYSTERESIS
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BOX_BUCKET_HYSTERESIS
+    current_value: 2
+    valid_range: [1, 8]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: DIRTY_TIMEOUT_MULT
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: DIRTY_TIMEOUT_MULT
+    current_value: 2.0
+    valid_range: [0.5, 5.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: DIRTY_DEPTH_FRAC
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: DIRTY_DEPTH_FRAC
+    current_value: 0.55
+    valid_range: [0.20, 1.00]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: DIRTY_RESET_SHIFT_ATR
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: DIRTY_RESET_SHIFT_ATR
+    current_value: 0.25
+    valid_range: [0.05, 1.00]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Trend / chop classifiers ===
+  - param_name: K_SLOPE
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: K_SLOPE
+    current_value: 0.10
+    valid_range: [0.02, 0.30]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: ADX_TRENDING
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: ADX_TRENDING
+    current_value: 25
+    valid_range: [15, 40]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: ADX_RANGE
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: ADX_RANGE
+    current_value: 20
+    valid_range: [10, 30]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: CHOP_ATR_PCTL_1
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: CHOP_ATR_PCTL_1
+    current_value: 75
+    valid_range: [50, 95]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: CHOP_VWAP_CROSS_1
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: CHOP_VWAP_CROSS_1
+    current_value: 5
+    valid_range: [2, 12]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: CHOP_SIZE_MULT
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: CHOP_SIZE_MULT
+    current_value: 0.70
+    valid_range: [0.20, 1.20]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — Breakout displacement gates ===
+  - param_name: Q_DISP
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: Q_DISP
+    current_value: 0.10
+    valid_range: [0.02, 0.50]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: Q_DISP_TIGHT_BOX
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: Q_DISP_TIGHT_BOX
+    current_value: 0.05
+    valid_range: [0.01, 0.30]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: BREAKOUT_REJECT_RANGE_MULT
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BREAKOUT_REJECT_RANGE_MULT
+    current_value: 1.8
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: BREAKOUT_REJECT_BODY_RATIO
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BREAKOUT_REJECT_BODY_RATIO
+    current_value: 0.30
+    valid_range: [0.10, 0.80]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: BREAKOUT_REJECT_RVOL
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: BREAKOUT_REJECT_RVOL
+    current_value: 2.0
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # === NQDTC_v2.1 — News / continuation ===
+  - param_name: NEWS_BLACKOUT_MINUTES
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: NEWS_BLACKOUT_MINUTES
+    current_value: 30
+    valid_range: [5, 120]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: HARD_EXPIRY_EXTENSION
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: HARD_EXPIRY_EXTENSION
+    current_value: 12
+    valid_range: [4, 30]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: CONTINUATION_R_PROXY
+    strategy_id: NQDTC_v2.1
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nqdtc/config.py
+    python_path: CONTINUATION_R_PROXY
+    current_value: 2.0
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # === VdubusNQ_v4 — Risk ===
+  - param_name: BASE_RISK_PCT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: BASE_RISK_PCT
+    current_value: 0.0065
+    valid_range: [0.002, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: HEAT_CAP_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: HEAT_CAP_MULT
+    current_value: 3.5
+    valid_range: [1.0, 6.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: DAILY_BREAKER_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: DAILY_BREAKER_MULT
+    current_value: -2.0
+    valid_range: [-5.0, -1.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: MAX_LONGS_PER_DAY
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: MAX_LONGS_PER_DAY
+    current_value: 2
+    valid_range: [1, 6]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: MAX_SHORTS_PER_DAY
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: MAX_SHORTS_PER_DAY
+    current_value: 2
+    valid_range: [1, 6]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+
+  # === VdubusNQ_v4 — Stops ===
+  - param_name: MIN_STOP_POINTS
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: MIN_STOP_POINTS
+    current_value: 20
+    valid_range: [5, 60]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: MAX_STOP_POINTS
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: MAX_STOP_POINTS
+    current_value: 120
+    valid_range: [40, 200]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: ATR_STOP_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: ATR_STOP_MULT
+    current_value: 1.4
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STRUCTURE_STOP_ATR_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: STRUCTURE_STOP_ATR_MULT
+    current_value: 0.10
+    valid_range: [0.03, 0.40]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # === VdubusNQ_v4 — Entry gates ===
+  - param_name: VWAP_CAP_CORE
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: VWAP_CAP_CORE
+    current_value: 0.85
+    valid_range: [0.50, 1.00]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: VWAP_CAP_OPEN_EVE
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: VWAP_CAP_OPEN_EVE
+    current_value: 0.935
+    valid_range: [0.50, 1.00]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: VWAP_CAP_EVENING
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: VWAP_CAP_EVENING
+    current_value: 0.35
+    valid_range: [0.10, 0.80]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: TOUCH_LOOKBACK_15M
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: TOUCH_LOOKBACK_15M
+    current_value: 8
+    valid_range: [3, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: USE_TYPE_B
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: USE_TYPE_B
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: USE_LATE_SHOULDER
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: USE_LATE_SHOULDER
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === VdubusNQ_v4 — Class size multipliers ===
+  - param_name: CLASS_MULT_PREDATOR
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: CLASS_MULT_PREDATOR
+    current_value: 1.00
+    valid_range: [0.30, 1.50]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: CLASS_MULT_NOPRED
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: CLASS_MULT_NOPRED
+    current_value: 0.70
+    valid_range: [0.20, 1.20]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: CLASS_MULT_FLIP
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: CLASS_MULT_FLIP
+    current_value: 0.50
+    valid_range: [0.10, 1.00]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: PYRAMID_ADD_RISK_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: PYRAMID_ADD_RISK_MULT
+    current_value: 0.50
+    valid_range: [0.10, 1.50]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: LATE_SHOULDER_VWAP_CAP
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: LATE_SHOULDER_VWAP_CAP
+    current_value: 0.60
+    valid_range: [0.30, 0.95]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: LATE_SHOULDER_CLASS_MULT
+    strategy_id: VdubusNQ_v4
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/vdub/config.py
+    python_path: LATE_SHOULDER_CLASS_MULT
+    current_value: 0.50
+    valid_range: [0.10, 1.20]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+
+  # === NQ_REGIME — Risk ===
+  - param_name: BASE_RISK_PCT
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: BASE_RISK_PCT
+    current_value: 0.006
+    valid_range: [0.002, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: DAILY_STOP_R
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: DAILY_STOP_R
+    current_value: 3.0
+    valid_range: [1.0, 6.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: HEAT_CAP_R
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: HEAT_CAP_R
+    current_value: 1.5
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: PORTFOLIO_DAILY_STOP_R
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: PORTFOLIO_DAILY_STOP_R
+    current_value: 2.75
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: MAX_TRADES_PER_DAY
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: MAX_TRADES_PER_DAY
+    current_value: 4
+    valid_range: [1, 10]
+    value_type: int
+    category: risk_management
+    is_safety_critical: false
+  - param_name: MAX_LOSSES_PER_DAY
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: MAX_LOSSES_PER_DAY
+    current_value: 2
+    valid_range: [1, 5]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+  - param_name: RISK_PCT_A_PLUS
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: RISK_PCT_A_PLUS
+    current_value: 0.0075
+    valid_range: [0.002, 0.02]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: true
+  - param_name: RISK_PCT_A
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: RISK_PCT_A
+    current_value: 0.005
+    valid_range: [0.001, 0.015]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: true
+  - param_name: RISK_PCT_B
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: RISK_PCT_B
+    current_value: 0.0025
+    valid_range: [0.0005, 0.01]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: true
+
+  # === NQ_REGIME — Regime gating / entry ===
+  - param_name: REGIME_MIN_CONFIDENCE
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: REGIME_MIN_CONFIDENCE
+    current_value: 0.65
+    valid_range: [0.40, 0.90]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: REGIME_MIN_MARGIN
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: REGIME_MIN_MARGIN
+    current_value: 0.15
+    valid_range: [0.05, 0.40]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: STRUCTURAL_MIN_SCORE
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: STRUCTURAL_MIN_SCORE
+    current_value: 8
+    valid_range: [4, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: REVERSION_MIN_SCORE
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: REVERSION_MIN_SCORE
+    current_value: 8
+    valid_range: [4, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: SECOND_WIND_MIN_SCORE
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: SECOND_WIND_MIN_SCORE
+    current_value: 8
+    valid_range: [4, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+
+  # === NQ_REGIME — Exit / Targets ===
+  - param_name: TARGET1_QTY_FRACTION
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: TARGET1_QTY_FRACTION
+    current_value: 0.40
+    valid_range: [0.20, 0.80]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TARGET2_QTY_FRACTION
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: TARGET2_QTY_FRACTION
+    current_value: 0.30
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: PROFIT_FLOOR_TRIGGER_R
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: PROFIT_FLOOR_TRIGGER_R
+    current_value: 0.5
+    valid_range: [0.2, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: MFE_RATCHET_TRIGGER_R
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: MFE_RATCHET_TRIGGER_R
+    current_value: 1.0
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # === NQ_REGIME — Module enables (ablation) ===
+  - param_name: ENABLE_STRUCTURAL_EXPANSION
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: ENABLE_STRUCTURAL_EXPANSION
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: ENABLE_LIQUIDITY_REVERSION
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: ENABLE_LIQUIDITY_REVERSION
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: ENABLE_SECOND_WIND
+    strategy_id: NQ_REGIME
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/momentum/nq_regime/config.py
+    python_path: ENABLE_SECOND_WIND
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false

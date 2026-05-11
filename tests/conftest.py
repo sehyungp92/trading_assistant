@@ -1,9 +1,12 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
+import os
 
 import pytest
 import aiosqlite
+
+os.environ.setdefault("ALLOW_UNAUTHENTICATED_LOCAL", "true")
 
 # Import shared fixtures so they are available to all test files.
 # pytest auto-discovers fixtures defined in conftest.py or imported here.

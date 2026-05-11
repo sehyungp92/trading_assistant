@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tzdata>=2024.1",
     "filelock>=3.13.0",
+    "tomlkit>=0.13.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-n auto --dist loadfile"
 filterwarnings = [
+    "error::RuntimeWarning",
     "ignore:'audioop' is deprecated:DeprecationWarning",
 ]
 

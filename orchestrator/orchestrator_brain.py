@@ -148,8 +148,11 @@ class OrchestratorBrain:
         severity = payload.get("severity", "MEDIUM").upper()
 
         if severity == "CRITICAL":
+            # P1-1: alert immediately AND persist to raw daily store so daily
+            # reports can attribute the failure correctly.
             return [
                 Action(type=ActionType.ALERT_IMMEDIATE, event_id=event_id, bot_id=bot_id, details=payload),
+                *self._queue_for_daily_event(event_id, bot_id, event, "error"),
             ]
         elif severity == "HIGH":
             error_type = payload.get("error_type", "unknown")
@@ -163,8 +166,10 @@ class OrchestratorBrain:
                 details["urgency"] = "error_storm"
                 details["error_count"] = count
 
+            # P1-1: spawn triage AND persist to raw daily store.
             return [
                 Action(type=ActionType.SPAWN_TRIAGE, event_id=event_id, bot_id=bot_id, details=details),
+                *self._queue_for_daily_event(event_id, bot_id, event, "error"),
             ]
         elif severity == "LOW":
             return [Action(
@@ -245,6 +250,12 @@ class OrchestratorBrain:
     def _handle_daily_snapshot(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return self._queue_for_daily_event(event_id, bot_id, event, "daily_snapshot")
 
+    def _handle_pipeline_funnel(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return self._queue_for_daily_event(event_id, bot_id, event, "pipeline_funnel")
+
+    def _handle_health_report(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+        return self._queue_for_daily_event(event_id, bot_id, event, "health_report")
+
     def _handle_order(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         return self._queue_for_daily_event(event_id, bot_id, event, "order")
 
@@ -321,8 +332,11 @@ class OrchestratorBrain:
 
     _handlers: dict = {
         "trade": _handle_trade,
+        "instrumented_trades": _handle_trade,
         "missed_opportunity": _handle_missed_opportunity,
+        "missed_opportunities": _handle_missed_opportunity,
         "error": _handle_error,
+        "errors": _handle_bot_error,
         "heartbeat": _handle_heartbeat,
         "daily_analysis_trigger": _handle_daily_analysis_trigger,
         "weekly_summary_trigger": _handle_weekly_summary_trigger,
@@ -330,6 +344,11 @@ class OrchestratorBrain:
         "notification_trigger": _handle_notification_trigger,
         "coordinator_action": _handle_coordinator_action,
         "daily_snapshot": _handle_daily_snapshot,
+        "daily_snapshots": _handle_daily_snapshot,
+        "pipeline_funnel": _handle_pipeline_funnel,
+        "pipeline_funnels": _handle_pipeline_funnel,
+        "health_report": _handle_health_report,
+        "health_reports": _handle_health_report,
         "order": _handle_order,
         "process_quality": _handle_process_quality,
         "bot_error": _handle_bot_error,

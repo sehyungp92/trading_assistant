@@ -37,6 +37,8 @@ class ScheduledRunStore:
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._db_path)
         await self.db.execute("PRAGMA journal_mode=WAL")
+        # P1-9: wait on writer-lock contention rather than failing fast.
+        await self.db.execute("PRAGMA busy_timeout=5000")
         await self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS scheduled_runs (
@@ -144,6 +146,23 @@ class ScheduledRunStore:
         row = await cursor.fetchone()
         return bool(row and row["status"] == "completed")
 
+    async def get_status(
+        self,
+        job_key: str,
+        scope_key: str,
+        scheduled_for: datetime,
+    ) -> str | None:
+        cursor = await self.db.execute(
+            """
+            SELECT status
+            FROM scheduled_runs
+            WHERE job_key = ? AND scope_key = ? AND scheduled_for = ?
+            """,
+            (job_key, scope_key, _to_iso(scheduled_for)),
+        )
+        row = await cursor.fetchone()
+        return row["status"] if row else None
+
     async def mark_started(
         self,
         job_key: str,
@@ -167,6 +186,39 @@ class ScheduledRunStore:
                 error = ''
             """,
             (job_key, scope_key, _to_iso(scheduled_for), started),
+        )
+        await self.db.commit()
+
+    async def mark_enqueued(
+        self,
+        job_key: str,
+        scope_key: str,
+        scheduled_for: datetime,
+        *,
+        started_at: str | None = None,
+        enqueued_at: str | None = None,
+    ) -> None:
+        """Trigger has been enqueued; downstream handler still owes mark_completed.
+
+        Used for daily/weekly/WFO/triage cron jobs where the cron only enqueues
+        a trigger event and the actual report/analysis runs asynchronously.
+        """
+        started = started_at or _to_iso(datetime.now(timezone.utc))
+        enqueued = enqueued_at or _to_iso(datetime.now(timezone.utc))
+        await self.db.execute(
+            """
+            INSERT INTO scheduled_runs (
+                job_key, scope_key, scheduled_for, status, started_at, finished_at, error
+            )
+            VALUES (?, ?, ?, 'enqueued', ?, ?, '')
+            ON CONFLICT(job_key, scope_key, scheduled_for)
+            DO UPDATE SET
+                status = 'enqueued',
+                started_at = COALESCE(NULLIF(scheduled_runs.started_at, ''), excluded.started_at),
+                finished_at = excluded.finished_at,
+                error = ''
+            """,
+            (job_key, scope_key, _to_iso(scheduled_for), started, enqueued),
         )
         await self.db.commit()
 

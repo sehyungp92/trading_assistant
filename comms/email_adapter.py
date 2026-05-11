@@ -70,8 +70,11 @@ class EmailAdapter(BaseChannel):
         smtp = self._create_smtp()
         await smtp.connect()
 
+        # P3-1: STARTTLS and login are independent. Some providers accept
+        # plaintext-auth on submission ports; others require STARTTLS first.
         if self._config.use_tls:
             await smtp.starttls()
+        if self._config.username and self._config.password:
             await smtp.login(self._config.username, self._config.password)
 
         await smtp.send_message(msg)

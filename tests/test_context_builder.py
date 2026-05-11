@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,7 +21,7 @@ from schemas.strategy_profile import (
 )
 from orchestrator.session_store import SessionStore
 from schemas.bug_triage import ErrorEvent, BugSeverity, ErrorCategory
-from skills.failure_log import FailureEntry, FailureLog
+from skills.failure_log import FailureEntry
 from skills.triage_context_builder import TriageContextBuilder, TriageContext
 
 
@@ -66,16 +66,6 @@ def strategy_registry() -> StrategyRegistry:
                 family="stock",
                 archetype="intraday_momentum",
                 asset_class="equity",
-            ),
-            "BRS_R9": StrategyProfile(
-                display_name="Bear Regime Swing R9",
-                bot_id="swing_multi_01",
-                family="swing",
-                archetype="bear_regime_swing",
-                asset_class="mixed",
-                entry_types=["S1_PULLBACK", "S2_BREAKDOWN"],
-                regime_model="5_state_bear",
-                analysis_focus=["regime_identification_accuracy"],
             ),
             "DownturnDominator_v1": StrategyProfile(
                 display_name="Downturn Multi-Engine Bear",
@@ -237,6 +227,41 @@ class TestLoadRejectedSuggestions:
     def test_missing_suggestions_file_returns_empty(self, tmp_path):
         ctx = ContextBuilder(memory_dir=tmp_path)
         assert ctx.load_rejected_suggestions() == []
+
+
+class TestLoadRecentProposalOutcomes:
+    def test_includes_old_candidate_with_recent_outcome(self, tmp_path: Path):
+        from schemas.proposal_ledger import (
+            ProposalCandidate,
+            ProposalKind,
+            ProposalOutcome,
+            ProposalSource,
+        )
+        from skills.proposal_ledger import ProposalLedger
+
+        findings = tmp_path / "findings"
+        ledger = ProposalLedger(findings)
+        ledger.record_candidate(ProposalCandidate(
+            proposal_id="old-candidate",
+            source=ProposalSource.LLM_DAILY,
+            kind=ProposalKind.PARAMETER_CHANGE,
+            bot_id="bot1",
+            title="Old proposal with fresh evidence",
+            proposed_at=datetime.now(timezone.utc) - timedelta(days=45),
+        ))
+        ledger.record_outcome("old-candidate", ProposalOutcome(
+            proposal_id="old-candidate",
+            verdict="positive",
+            objective_delta=0.08,
+            measured_at=datetime.now(timezone.utc),
+        ))
+
+        ctx = ContextBuilder(memory_dir=tmp_path)
+        outcomes = ctx.load_recent_proposal_outcomes("bot1", days=30)
+
+        assert len(outcomes) == 1
+        assert outcomes[0]["proposal_id"] == "old-candidate"
+        assert outcomes[0]["title"] == "Old proposal with fresh evidence"
 
 
 class TestBasePackageWithFailureLog:
@@ -542,11 +567,6 @@ class TestBasePackageInjection:
         pkg = ctx.base_package(strategy_registry=strategy_registry)
 
         profiles = pkg.data["strategy_profiles"]
-        brs = profiles["BRS_R9"]
-        assert brs["entry_types"] == ["S1_PULLBACK", "S2_BREAKDOWN"]
-        assert brs["regime_model"] == "5_state_bear"
-        assert brs["analysis_focus"] == ["regime_identification_accuracy"]
-
         downturn = profiles["DownturnDominator_v1"]
         assert downturn["sub_engines"] == ["REVERSAL", "BREAKDOWN", "FADE"]
         assert downturn["key_metadata_fields"] == ["engine_tag", "composite_regime_at_entry"]

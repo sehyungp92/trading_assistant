@@ -725,18 +725,18 @@ class ResponseValidator:
                 )
 
         # Gate 2: Funding threshold loosening requires evidence of blocked profitable trades
-        if target == "funding_extreme":
+        if target in ("funding_extreme", "funding_extreme_threshold"):
             proposed = suggestion.proposed_value
             if proposed is not None:
                 evidence = (suggestion.evidence_summary or "").lower()
                 if "blocked" not in evidence and "profitable" not in evidence:
                     return (
-                        "Changing funding_extreme threshold requires evidence "
+                        "Changing funding extreme threshold requires evidence "
                         "of profitable trades blocked by the current threshold"
                     )
 
         # Gate 3: Risk-pct on crypto always treated as safety-critical (10% threshold)
-        if target in ("risk_pct_a", "risk_pct_b"):
+        if target in ("risk_pct_a_plus", "risk_pct_a", "risk_pct_b"):
             # Enforce that crypto risk_pct suggestions have strong evidence
             conf = suggestion.confidence
             if conf < 0.7:

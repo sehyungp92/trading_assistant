@@ -7,14 +7,41 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 from schemas.memory import MemoryIndex
 from schemas.prompt_package import PromptPackage
+
+logger = logging.getLogger(__name__)
 
 _POLICY_FILES = ["agent.md", "trading_rules.md", "soul.md"]
 _FINDINGS_MAX_AGE_DAYS = 90
 _FINDINGS_MAX_ENTRIES = 50
+
+
+def _safe_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file tolerantly (P2-1).
+
+    Skips and logs malformed lines instead of crashing. A single corrupt
+    findings line should not block daily/weekly prompt assembly.
+    """
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("Could not read %s", path)
+        return out
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Skipping malformed JSON line %s:%d", path, n)
+            continue
+        if isinstance(entry, dict):
+            out.append(entry)
+    return out
 
 
 def _parse_timestamp(entry: dict) -> datetime | None:
@@ -165,13 +192,7 @@ class ContextBuilder:
         Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
         If bot_id is provided, only returns corrections relevant to that bot.
         """
-        corrections_path = self._memory_dir / "findings" / "corrections.jsonl"
-        if not corrections_path.exists():
-            return []
-        corrections: list[dict] = []
-        for line in corrections_path.read_text(encoding="utf-8").strip().splitlines():
-            if line.strip():
-                corrections.append(json.loads(line))
+        corrections = _safe_jsonl(self._memory_dir / "findings" / "corrections.jsonl")
         filtered = _filter_by_bot(corrections, bot_id) if bot_id else corrections
         return _apply_temporal_window(filtered)
 
@@ -183,12 +204,7 @@ class ContextBuilder:
         Drops entries pinned to retired strategies.
         """
         path = self._memory_dir / "findings" / "failure-log.jsonl"
-        if not path.exists():
-            return []
-        entries: list[dict] = []
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if line.strip():
-                entries.append(json.loads(line))
+        entries = _safe_jsonl(path)
         filtered = _filter_by_bot(entries, bot_id) if bot_id else entries
         filtered = _filter_inactive_strategies(filtered, self._get_strategy_registry())
         return _apply_temporal_window(filtered)
@@ -199,14 +215,9 @@ class ContextBuilder:
         Drops entries pinned to retired strategies.
         """
         path = self._memory_dir / "findings" / "suggestions.jsonl"
-        if not path.exists():
-            return []
-        rejected: list[dict] = []
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if line.strip():
-                rec = json.loads(line)
-                if rec.get("status") == "rejected":
-                    rejected.append(rec)
+        rejected = [
+            rec for rec in _safe_jsonl(path) if rec.get("status") == "rejected"
+        ]
         rejected = _filter_inactive_strategies(rejected, self._get_strategy_registry())
         return _apply_temporal_window(rejected)
 
@@ -234,17 +245,16 @@ class ContextBuilder:
             reliable_outcomes for backward compatibility.
         """
         path = self._memory_dir / "findings" / "outcomes.jsonl"
-        if not path.exists():
+        entries = _safe_jsonl(path)
+        if not entries:
             return [], []
         seen: dict[str, dict] = {}
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if line.strip():
-                entry = json.loads(line)
-                sid = entry.get("suggestion_id", "")
-                if sid:
-                    seen[sid] = entry
-                else:
-                    seen[id(entry)] = entry  # type: ignore[assignment]
+        for entry in entries:
+            sid = entry.get("suggestion_id", "")
+            if sid:
+                seen[sid] = entry
+            else:
+                seen[id(entry)] = entry  # type: ignore[assignment]
 
         min_rank = self._QUALITY_RANK.get(min_quality.lower(), 2)
         reliable: list[dict] = []
@@ -269,13 +279,7 @@ class ContextBuilder:
         Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
         """
         path = self._memory_dir / "findings" / "allocation_history.jsonl"
-        if not path.exists():
-            return []
-        entries: list[dict] = []
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if line.strip():
-                entries.append(json.loads(line))
-        return _apply_temporal_window(entries)
+        return _apply_temporal_window(_safe_jsonl(path))
 
     def list_policy_files(self) -> list[str]:
         """List paths to included policy files (for context_files tracking)."""
@@ -680,22 +684,11 @@ class ContextBuilder:
         Returns suggestions with unresolved status, applying temporal window
         (90d, 30-entry cap) and dropping entries pinned to retired strategies.
         """
-        path = self._memory_dir / "findings" / "suggestions.jsonl"
-        if not path.exists():
-            return []
-        active: list[dict] = []
-        active_statuses = {
-            "proposed",
-            "accepted",
-            "merged",
-            "deployed",
-        }
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if line.strip():
-                rec = json.loads(line)
-                status = rec.get("status", "")
-                if status in active_statuses:
-                    active.append(rec)
+        active_statuses = {"proposed", "accepted", "merged", "deployed"}
+        active = [
+            rec for rec in _safe_jsonl(self._memory_dir / "findings" / "suggestions.jsonl")
+            if rec.get("status", "") in active_statuses
+        ]
         active = _filter_inactive_strategies(active, self._get_strategy_registry())
         return _apply_temporal_window(active, max_entries=30)
 
@@ -712,17 +705,30 @@ class ContextBuilder:
             from skills.proposal_ledger import ProposalLedger
 
             ledger = ProposalLedger(self._memory_dir / "findings")
-            recs = ledger.list_recent(days=days)
+            recs = ledger.list_all()
         except Exception:
             return []
 
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         out: list[dict] = []
         for rec in recs:
             if bot_id and rec.candidate.bot_id != bot_id:
                 continue
             if not rec.outcomes:
                 continue
-            latest = rec.outcomes[-1]
+            latest = max(
+                rec.outcomes,
+                key=lambda o: (
+                    o.measured_at.replace(tzinfo=timezone.utc)
+                    if o.measured_at.tzinfo is None
+                    else o.measured_at
+                ),
+            )
+            measured_at = latest.measured_at
+            if measured_at.tzinfo is None:
+                measured_at = measured_at.replace(tzinfo=timezone.utc)
+            if measured_at < cutoff:
+                continue
             out.append({
                 "proposal_id": rec.candidate.proposal_id,
                 "bot_id": rec.candidate.bot_id,
@@ -731,9 +737,7 @@ class ContextBuilder:
                 "title": rec.candidate.title,
                 "verdict": latest.verdict,
                 "objective_delta": latest.objective_delta,
-                "measured_at": latest.measured_at.isoformat()
-                    if hasattr(latest.measured_at, "isoformat")
-                    else str(latest.measured_at),
+                "measured_at": measured_at.isoformat(),
             })
         out.sort(key=lambda r: r["measured_at"], reverse=True)
         return out[:max_entries]
@@ -1434,7 +1438,11 @@ class ContextBuilder:
                 if isinstance(raw_lessons, str):
                     items = [raw_lessons] if raw_lessons.strip() else []
                 else:
-                    items = [l for l in (raw_lessons or []) if isinstance(l, str) and l.strip()]
+                    items = [
+                        lesson_text
+                        for lesson_text in (raw_lessons or [])
+                        if isinstance(lesson_text, str) and lesson_text.strip()
+                    ]
                 for lesson in items:
                     if lesson not in seen:
                         seen.add(lesson)
@@ -1442,7 +1450,7 @@ class ContextBuilder:
             if all_lessons:
                 signals.append(
                     "Causal lessons learned:\n"
-                    + "\n".join(f"  - {l}" for l in all_lessons[:5])
+                    + "\n".join(f"  - {lesson}" for lesson in all_lessons[:5])
                 )
 
         if len(signals) < 2:
@@ -1620,6 +1628,7 @@ class ContextBuilder:
         # Learning signals — high value for improvement
         "active_suggestions",
         "rejected_suggestions",
+        "recent_proposal_outcomes",
         "category_scorecard",
         "regime_stratified_scores",
         "prediction_accuracy_by_metric",
@@ -1665,6 +1674,7 @@ class ContextBuilder:
             "self_assessment",
             "last_week_synthesis",
             "outcome_measurements",
+            "recent_proposal_outcomes",
             "forecast_meta_analysis",
             "category_scorecard",
             "regime_stratified_scores",
@@ -1716,6 +1726,7 @@ class ContextBuilder:
         "wfo": [
             # WFO cares about optimization, backtest reliability, parameters
             "backtest_reliability",
+            "recent_proposal_outcomes",
             "regime_config_history",
             "search_reports",
             "regime_parameter_analysis",
@@ -1750,6 +1761,7 @@ class ContextBuilder:
         "outcome_reasoning": [
             # Reasoning about why suggestions worked/failed
             "outcome_measurements",
+            "recent_proposal_outcomes",
             "category_scorecard",
             "regime_stratified_scores",
             "active_suggestions",

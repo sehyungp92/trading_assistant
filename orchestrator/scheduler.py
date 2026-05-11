@@ -50,6 +50,11 @@ class ScheduledJobSpec:
     coalesce: bool | None = None
     catchup_limit: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # When True, spec.execute() only enqueues a trigger; the downstream
+    # handler is responsible for marking the final scheduled-run result with
+    # the same scheduled_for. The scheduler marks the run as 'enqueued'
+    # until the handler signals success/failure. See P1-3.
+    awaits_completion: bool = False
 
     @property
     def is_cron(self) -> bool:
@@ -471,6 +476,7 @@ def build_scheduled_job_specs(
         default_misfire_grace_time=43200,
         default_coalesce=True,
         variant_fns=daily_analysis_fns,
+        awaits_completion=True,
     )
     _append_cron_specs(
         specs,
@@ -484,6 +490,7 @@ def build_scheduled_job_specs(
         default_minute=config.weekly_analysis_minute,
         default_misfire_grace_time=172800,
         default_coalesce=True,
+        awaits_completion=True,
     )
     _append_cron_specs(
         specs,
@@ -498,6 +505,7 @@ def build_scheduled_job_specs(
         default_misfire_grace_time=172800,
         default_coalesce=True,
         variant_fns=wfo_fns,
+        awaits_completion=True,
     )
 
     _append_interval_spec(
@@ -801,7 +809,11 @@ class ScheduledJobRunner:
             )
             raise
 
-        await self._run_store.mark_completed(spec.job_key, spec.scope_key, occurrence)
+        if spec.awaits_completion:
+            # Trigger is enqueued; the handler will mark the final result.
+            await self._run_store.mark_enqueued(spec.job_key, spec.scope_key, occurrence)
+        else:
+            await self._run_store.mark_completed(spec.job_key, spec.scope_key, occurrence)
         return True
 
 
@@ -839,6 +851,7 @@ def _append_cron_specs(
     default_misfire_grace_time: int | None = None,
     default_coalesce: bool | None = None,
     variant_fns: list[dict] | None = None,
+    awaits_completion: bool = False,
 ) -> None:
     if variant_fns:
         for i, trigger_def in enumerate(variant_fns):
@@ -860,6 +873,7 @@ def _append_cron_specs(
                 coalesce=trigger_def.get("coalesce", default_coalesce),
                 catchup_limit=trigger_def.get("catchup_limit", catchup_limit),
                 metadata=dict(trigger_def.get("metadata", {})),
+                awaits_completion=trigger_def.get("awaits_completion", awaits_completion),
             ))
         return
 
@@ -878,6 +892,7 @@ def _append_cron_specs(
         misfire_grace_time=default_misfire_grace_time,
         coalesce=default_coalesce,
         catchup_limit=catchup_limit,
+        awaits_completion=awaits_completion,
     ))
 
 

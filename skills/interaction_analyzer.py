@@ -1,4 +1,4 @@
-"""Interaction analyzer — coordinator event analysis for swing_trader.
+"""Interaction analyzer — coordinator event analysis for swing_multi_01.
 
 Deterministic pipeline. No LLM calls. Analyzes coordinator actions (stop-tightening,
 size-boosting, overlay signals) and estimates their impact on trade outcomes.
@@ -16,13 +16,13 @@ from schemas.events import TradeEvent
 
 
 class InteractionAnalyzer:
-    """Analyzes coordinator interaction effects on swing_trader trades."""
+    """Analyzes coordinator interaction effects on swing_multi_01 trades."""
 
     def __init__(
         self,
         week_start: str,
         week_end: str,
-        bot_id: str = "swing_trader",
+        bot_id: str = "swing_multi_01",
     ) -> None:
         self.week_start = week_start
         self.week_end = week_end
@@ -37,7 +37,7 @@ class InteractionAnalyzer:
 
         Args:
             coordinator_events: parsed coordinator action events
-            trades: swing_trader trades for the period
+            trades: swing_multi_01 trades for the period
         """
         if not coordinator_events:
             return InteractionReport(

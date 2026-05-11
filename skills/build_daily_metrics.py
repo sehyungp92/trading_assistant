@@ -17,7 +17,13 @@ from filelock import FileLock, Timeout
 
 logger = logging.getLogger(__name__)
 
-from schemas.events import TradeEvent, MissedOpportunityEvent
+from schemas.events import (
+    HealthReportSnapshot,
+    MissedOpportunityEvent,
+    PipelineFunnelSnapshot,
+    TradeEvent,
+    normalize_strategy_id,
+)
 from schemas.exit_efficiency import ExitEfficiencyStats
 from schemas.factor_attribution import FactorAttribution, FactorStats
 from schemas.daily_metrics import (
@@ -1481,6 +1487,8 @@ class DailyMetricsBuilder:
         process_quality_events: list[dict] | None = None,
         stop_adjustment_events: list[dict] | None = None,
         post_exit_events: list[dict] | None = None,
+        funnel_snapshots: list[PipelineFunnelSnapshot] | None = None,
+        health_snapshots: list[HealthReportSnapshot] | None = None,
         strategy_registry=None,
     ) -> Path:
         """Write all curated files to base_dir/<date>/<bot_id>/. Returns output dir.
@@ -1508,6 +1516,8 @@ class DailyMetricsBuilder:
                     process_quality_events=process_quality_events,
                     stop_adjustment_events=stop_adjustment_events,
                     post_exit_events=post_exit_events,
+                    funnel_snapshots=funnel_snapshots,
+                    health_snapshots=health_snapshots,
                     strategy_registry=strategy_registry,
                 )
         except Timeout:
@@ -1533,6 +1543,8 @@ class DailyMetricsBuilder:
         process_quality_events: list[dict] | None = None,
         stop_adjustment_events: list[dict] | None = None,
         post_exit_events: list[dict] | None = None,
+        funnel_snapshots: list[PipelineFunnelSnapshot] | None = None,
+        health_snapshots: list[HealthReportSnapshot] | None = None,
         strategy_registry=None,
     ) -> Path:
         """Inner write — caller must hold the per-(date, bot) write lock."""
@@ -1806,6 +1818,18 @@ class DailyMetricsBuilder:
         if leverage:
             self._write_json(output_dir / "leverage_analysis.json", leverage)
 
+        if funnel_snapshots:
+            self._write_jsonl(output_dir / "funnel_snapshots.jsonl", funnel_snapshots)
+            funnel_analysis = self._build_funnel_analysis(funnel_snapshots)
+            if funnel_analysis:
+                self._write_json(output_dir / "funnel_analysis.json", funnel_analysis)
+
+        if health_snapshots:
+            self._write_jsonl(output_dir / "health_snapshots.jsonl", health_snapshots)
+            health_summary = self._build_health_summary(health_snapshots)
+            if health_summary:
+                self._write_json(output_dir / "health_summary.json", health_summary)
+
         # Write applied regime config from snapshot (per-bot, varies by family)
         if daily_snapshot:
             applied_config = daily_snapshot.get("applied_regime_config")
@@ -1974,6 +1998,216 @@ class DailyMetricsBuilder:
             "per_grade": per_grade,
             "worst_mae_r": round(worst_mae_r, 4),
             "near_liquidation_count": near_liq,
+        }
+
+    def _build_funnel_analysis(
+        self, snapshots: list[PipelineFunnelSnapshot],
+    ) -> dict | None:
+        """Summarize crypto strategy funnel conversion and drop-off stages."""
+        if not snapshots:
+            return None
+
+        stages = [
+            "bars_received",
+            "indicators_ready",
+            "setups_detected",
+            "confirmations",
+            "entries_attempted",
+            "fills",
+            "trades_closed",
+        ]
+        totals = {stage: 0 for stage in stages}
+        per_strategy: dict[str, dict] = {}
+        per_symbol: dict[str, dict] = {}
+        assessments: Counter[str] = Counter()
+
+        for snapshot in snapshots:
+            strategy_id = normalize_strategy_id(self.bot_id, snapshot.strategy_id) or "unknown"
+            assessment = snapshot.assessment or "unknown"
+            assessments[assessment] += 1
+            funnel = snapshot.funnel or self._flat_funnel_from_snapshot(snapshot)
+            strategy_totals = per_strategy.setdefault(
+                strategy_id, {stage: 0 for stage in stages},
+            )
+            for stage in stages:
+                stage_values = funnel.get(stage, {})
+                if isinstance(stage_values, dict):
+                    stage_total = sum(
+                        int(value or 0) for value in stage_values.values()
+                        if isinstance(value, (int, float))
+                    )
+                    for symbol, value in stage_values.items():
+                        if isinstance(value, (int, float)):
+                            symbol_totals = per_symbol.setdefault(
+                                str(symbol), {s: 0 for s in stages},
+                            )
+                            symbol_totals[stage] += int(value)
+                elif isinstance(stage_values, (int, float)):
+                    stage_total = int(stage_values)
+                else:
+                    stage_total = 0
+                totals[stage] += stage_total
+                strategy_totals[stage] += stage_total
+
+        conversion_rates = self._funnel_conversion_rates(totals)
+        top_dropoff = self._top_funnel_dropoff(totals, conversion_rates)
+
+        return {
+            "coverage": len(snapshots),
+            "stage_totals": totals,
+            "conversion_rates": conversion_rates,
+            "top_dropoff": top_dropoff,
+            "assessment_counts": dict(assessments),
+            "per_strategy_breakdown": {
+                sid: {
+                    "stage_totals": values,
+                    "conversion_rates": self._funnel_conversion_rates(values),
+                }
+                for sid, values in per_strategy.items()
+            },
+            "per_symbol_breakdown": {
+                symbol: {
+                    "stage_totals": values,
+                    "conversion_rates": self._funnel_conversion_rates(values),
+                }
+                for symbol, values in per_symbol.items()
+            },
+        }
+
+    @staticmethod
+    def _flat_funnel_from_snapshot(snapshot: PipelineFunnelSnapshot) -> dict:
+        signals = snapshot.signals_generated
+        qualified = snapshot.setups_qualified or signals
+        return {
+            "bars_received": signals,
+            "indicators_ready": signals,
+            "setups_detected": qualified,
+            "confirmations": snapshot.confirmations_passed,
+            "entries_attempted": snapshot.entries_taken,
+            "fills": snapshot.entries_taken,
+            "trades_closed": snapshot.wins + snapshot.losses,
+        }
+
+    @staticmethod
+    def _funnel_conversion_rates(totals: dict[str, int]) -> dict[str, float]:
+        pairs = [
+            ("bars_to_indicators", "bars_received", "indicators_ready"),
+            ("indicators_to_setups", "indicators_ready", "setups_detected"),
+            ("setups_to_confirmations", "setups_detected", "confirmations"),
+            ("confirmations_to_entries", "confirmations", "entries_attempted"),
+            ("entries_to_fills", "entries_attempted", "fills"),
+            ("fills_to_closed", "fills", "trades_closed"),
+        ]
+        rates: dict[str, float] = {}
+        for label, before, after in pairs:
+            denominator = totals.get(before, 0)
+            rates[label] = round(totals.get(after, 0) / denominator, 4) if denominator else 0.0
+        return rates
+
+    @staticmethod
+    def _top_funnel_dropoff(
+        totals: dict[str, int], conversion_rates: dict[str, float],
+    ) -> dict:
+        labels = {
+            "bars_to_indicators": ("bars_received", "indicators_ready"),
+            "indicators_to_setups": ("indicators_ready", "setups_detected"),
+            "setups_to_confirmations": ("setups_detected", "confirmations"),
+            "confirmations_to_entries": ("confirmations", "entries_attempted"),
+            "entries_to_fills": ("entries_attempted", "fills"),
+            "fills_to_closed": ("fills", "trades_closed"),
+        }
+        candidates: list[dict] = []
+        for label, (before, after) in labels.items():
+            before_count = totals.get(before, 0)
+            after_count = totals.get(after, 0)
+            if before_count <= 0:
+                continue
+            candidates.append({
+                "stage": label,
+                "from": before,
+                "to": after,
+                "lost": max(before_count - after_count, 0),
+                "conversion_rate": conversion_rates.get(label, 0.0),
+            })
+        if not candidates:
+            return {}
+        return min(candidates, key=lambda item: (item["conversion_rate"], -item["lost"]))
+
+    def _build_health_summary(
+        self, snapshots: list[HealthReportSnapshot],
+    ) -> dict | None:
+        """Summarize process-health telemetry for prompt gating."""
+        if not snapshots:
+            return None
+
+        latest = snapshots[-1]
+        reports = [snapshot.report or self._flat_health_report(snapshot) for snapshot in snapshots]
+        alerts: list[dict] = []
+        max_last_bar_age = 0.0
+        max_queue_depth = 0
+        max_funding_drift = 0.0
+        websocket_disconnects = 0
+        error_count = 0
+
+        for snapshot, report in zip(snapshots, reports):
+            for alert in report.get("alerts", []) if isinstance(report, dict) else []:
+                if isinstance(alert, dict):
+                    alerts.append(alert)
+            data_flow = report.get("data_flow", {}) if isinstance(report, dict) else {}
+            if isinstance(data_flow, dict):
+                for item in data_flow.values():
+                    if isinstance(item, dict):
+                        age = item.get("last_bar_age_sec", 0)
+                        if isinstance(age, (int, float)):
+                            max_last_bar_age = max(max_last_bar_age, float(age))
+            system = report.get("system", {}) if isinstance(report, dict) else {}
+            if isinstance(system, dict):
+                error_count = max(error_count, int(system.get("total_errors", 0) or 0))
+            max_queue_depth = max(max_queue_depth, int(snapshot.queue_depth or 0))
+            websocket_disconnects += int(snapshot.websocket_disconnects_24h or 0)
+            for value in snapshot.funding_drift_per_symbol.values():
+                if isinstance(value, (int, float)):
+                    max_funding_drift = max(max_funding_drift, abs(float(value)))
+
+        severity_rank = {"healthy": 0, "warning": 1, "degraded": 2, "error": 2, "critical": 3}
+        worst_alert_rank = 0
+        for alert in alerts:
+            sev = str(alert.get("severity", "")).lower()
+            worst_alert_rank = max(worst_alert_rank, severity_rank.get(sev, 0))
+        latest_report = latest.report or {}
+        latest_assessment = (
+            latest.severity
+            or latest_report.get("assessment", "")
+            or "unknown"
+        )
+
+        return {
+            "coverage": len(snapshots),
+            "latest_timestamp": latest.timestamp,
+            "latest_assessment": latest_assessment,
+            "high_severity_alert_count": sum(
+                1 for alert in alerts
+                if str(alert.get("severity", "")).lower() in {"error", "critical", "high"}
+            ),
+            "worst_alert_rank": worst_alert_rank,
+            "max_last_bar_age_sec": round(max_last_bar_age, 2),
+            "max_queue_depth": max_queue_depth,
+            "websocket_disconnects_24h": websocket_disconnects,
+            "error_count_24h": max(error_count, max(int(s.error_count_24h or 0) for s in snapshots)),
+            "max_funding_drift": round(max_funding_drift, 6),
+            "alerts": alerts[:20],
+        }
+
+    @staticmethod
+    def _flat_health_report(snapshot: HealthReportSnapshot) -> dict:
+        return {
+            "assessment": snapshot.severity,
+            "system": {"total_errors": snapshot.error_count_24h},
+            "alerts": [{
+                "severity": snapshot.severity,
+                "name": "health_report",
+                "message": snapshot.notes,
+            }] if snapshot.severity else [],
         }
 
     def _atomic_write_text(self, path: Path, content: str) -> None:

@@ -187,6 +187,80 @@ class TestExperimentPersistenceInPipeline:
         )
         assert pipeline._experiment_manager is None
 
+    def test_route_to_experiment_cap_uses_experiment_manager_active(self):
+        """A/B cap is based on ExperimentManager active experiments for the bot."""
+        from skills.autonomous_pipeline import AutonomousPipeline
+
+        experiment_manager = MagicMock()
+        experiment_manager.get_active.return_value = [
+            MagicMock(bot_id="bot1"),
+            MagicMock(bot_id="bot1"),
+            MagicMock(bot_id="bot2"),
+        ]
+        config_gen = MagicMock()
+
+        pipeline = AutonomousPipeline(
+            config_registry=MagicMock(),
+            backtester=MagicMock(),
+            approval_tracker=MagicMock(),
+            suggestion_tracker=MagicMock(),
+            experiment_config_generator=config_gen,
+            experiment_manager=experiment_manager,
+        )
+
+        result = pipeline._route_to_experiment(
+            suggestion_id="s1",
+            suggestion={"suggestion_id": "s1", "bot_id": "bot1", "title": "Test"},
+            report=MagicMock(best_value=0.5, exploration_summary="test"),
+            param=MagicMock(param_name="threshold", current_value=0.3, value_type="float"),
+        )
+
+        assert result is None
+        experiment_manager.get_active.assert_called_once()
+        config_gen.generate_from_suggestion.assert_not_called()
+
+    def test_records_parameter_search_evaluation_on_existing_proposal(self, tmp_path):
+        """Parameter search routing appends a ProposalEvaluation for the candidate."""
+        from schemas.parameter_search import SearchRouting
+        from schemas.proposal_ledger import ProposalCandidate, ProposalKind, ProposalSource
+        from skills.autonomous_pipeline import AutonomousPipeline
+        from skills.proposal_ledger import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "findings")
+        ledger.record_candidate(ProposalCandidate(
+            proposal_id="proposal-param",
+            source=ProposalSource.LLM_DAILY,
+            kind=ProposalKind.PARAMETER_CHANGE,
+            bot_id="bot1",
+            title="Tune threshold",
+        ))
+        pipeline = AutonomousPipeline(
+            config_registry=MagicMock(),
+            backtester=MagicMock(),
+            approval_tracker=MagicMock(),
+            suggestion_tracker=MagicMock(),
+            proposal_ledger=ledger,
+        )
+        report = MagicMock(
+            routing=SearchRouting.EXPERIMENT,
+            best_composite=0.82,
+            best_robustness_score=55.0,
+            exploration_summary="marginal but plausible",
+            discard_reason="",
+        )
+
+        pipeline._record_parameter_search_evaluation(
+            {"proposal_id": "proposal-param"},
+            report,
+        )
+
+        record = ledger.get_by_id("proposal-param")
+        assert record is not None
+        assert len(record.evaluations) == 1
+        assert record.evaluations[0].method == "parameter_search"
+        assert record.evaluations[0].decision == "experiment"
+        assert record.evaluations[0].confidence == pytest.approx(0.55)
+
     @pytest.mark.asyncio
     async def test_route_to_experiment_persists_config(self, tmp_path):
         """_route_to_experiment calls ExperimentManager.create_experiment."""
@@ -197,9 +271,6 @@ class TestExperimentPersistenceInPipeline:
         mock_config = MagicMock()
         mock_config.experiment_id = "exp_abc"
         config_gen.generate_from_suggestion.return_value = mock_config
-
-        tracker = MagicMock()
-        tracker.get_active_experiments.return_value = []
 
         registry = MagicMock()
         profile = MagicMock()
@@ -212,7 +283,6 @@ class TestExperimentPersistenceInPipeline:
             approval_tracker=MagicMock(),
             suggestion_tracker=MagicMock(),
             experiment_config_generator=config_gen,
-            experiment_tracker=tracker,
             experiment_manager=experiment_manager,
         )
 
@@ -248,9 +318,6 @@ class TestExperimentPersistenceInPipeline:
         mock_config.experiment_id = "exp_abc"
         config_gen.generate_from_suggestion.return_value = mock_config
 
-        tracker = MagicMock()
-        tracker.get_active_experiments.return_value = []
-
         registry = MagicMock()
         profile = MagicMock()
         profile.verification_commands = []
@@ -262,7 +329,6 @@ class TestExperimentPersistenceInPipeline:
             approval_tracker=MagicMock(),
             suggestion_tracker=MagicMock(),
             experiment_config_generator=config_gen,
-            experiment_tracker=tracker,
             experiment_manager=experiment_manager,
         )
 

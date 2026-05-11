@@ -125,7 +125,7 @@ class StrategyProfile(BaseModel):
     regime_model: str = ""
     key_metadata_fields: list[str] = []
     analysis_focus: list[str] = []
-    macro_regime_sensitivity: dict[str, str] = {}  # G/R/S/D → full/reduced/minimal/disabled
+    macro_regime_sensitivity: dict[str, str | float] = {}  # G/R/S/D -> label or sizing multiplier
     exit_profile: ExitProfile | None = None
 
 

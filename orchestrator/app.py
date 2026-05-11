@@ -27,12 +27,14 @@ from orchestrator.catchup import StartupCatchup, bootstrap_run_store_from_histor
 from orchestrator.latency_tracker import LatencyTracker
 from orchestrator.config import AppConfig
 from orchestrator.conversation_tracker import ConversationTracker
+from orchestrator.data_paths import resolve_data_dirs
 from orchestrator.db.queue import EventQueue
 from orchestrator.event_stream import AuditTrailConsumer, EventStream
 from orchestrator.handlers import Handlers
+from orchestrator.input_sanitizer import InputSanitizer
 from orchestrator.memory_consolidator import MemoryConsolidator
 from orchestrator.monitoring import MonitoringCheck, MonitoringLoop
-from orchestrator.orchestrator_brain import OrchestratorBrain
+from orchestrator.orchestrator_brain import Action, ActionType, OrchestratorBrain
 from orchestrator.scheduler import (
     SchedulerConfig,
     ScheduledJobRunner,
@@ -43,7 +45,7 @@ from orchestrator.scheduler import (
 from orchestrator.scheduled_runs import ScheduledRunStore
 from orchestrator.session_store import SessionStore
 from orchestrator.skills_registry import SkillsRegistry
-from orchestrator.subagent import SubagentManager
+from orchestrator.subagent import CapacityExceeded, SubagentManager
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.worker import Worker
 from schemas.agent_preferences import (
@@ -86,6 +88,13 @@ def _build_scheduled_event(
         f"{job_key}-{_scope_token(scope_key)}-"
         f"{scheduled_for.strftime('%Y%m%dT%H%M')}"
     )
+    payload = dict(payload)
+    # Embed scheduled-run identity so handlers can signal cron completion (P1-3).
+    payload.setdefault("__scheduled_run__", {
+        "job_key": job_key,
+        "scope_key": scope_key,
+        "scheduled_for": scheduled_for.isoformat(),
+    })
     return {
         "event_id": event_id,
         "bot_id": bot_id,
@@ -96,7 +105,28 @@ def _build_scheduled_event(
     }
 
 
-def _normalize_queue_event(event: dict) -> dict:
+# P1-4: hard cap on /ingest payload size. 256 KB is generous for any single
+# event we expect; bigger payloads are almost always bugs or attacks.
+_MAX_INGEST_PAYLOAD_BYTES = 256 * 1024
+
+# bot_ids that are allowed to ingest events even when not in config.bot_ids.
+# These are system-internal sources (scheduler triggers, user feedback, etc.).
+_SYSTEM_BOT_IDS = frozenset({"system", "scheduler", "user", "orchestrator"})
+
+
+def _check_ingest_payload_size(payload: str) -> None:
+    payload_bytes = len(payload.encode("utf-8"))
+    if payload_bytes > _MAX_INGEST_PAYLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Payload too large: {payload_bytes} bytes "
+                f"(max {_MAX_INGEST_PAYLOAD_BYTES})"
+            ),
+        )
+
+
+def _normalize_queue_event(event: dict, allowed_bot_ids: set[str] | None = None) -> dict:
     normalized = dict(event)
     missing = [
         field for field in ("event_id", "bot_id", "event_type", "payload")
@@ -108,6 +138,22 @@ def _normalize_queue_event(event: dict) -> dict:
             detail=f"Missing required event field(s): {', '.join(missing)}",
         )
 
+    for field in ("event_id", "bot_id", "event_type"):
+        if not isinstance(normalized[field], str) or not normalized[field].strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{field}' must be a non-empty string",
+            )
+
+    bot_id = normalized["bot_id"]
+    if allowed_bot_ids is not None:
+        permitted = allowed_bot_ids | _SYSTEM_BOT_IDS
+        if bot_id not in permitted:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown bot_id: {bot_id!r}",
+            )
+
     payload = normalized["payload"]
     if isinstance(payload, (dict, list)):
         normalized["payload"] = json.dumps(payload)
@@ -116,6 +162,39 @@ def _normalize_queue_event(event: dict) -> dict:
             status_code=400,
             detail="'payload' must be a JSON string, object, or array",
         )
+
+    _check_ingest_payload_size(normalized["payload"])
+
+    if normalized.get("event_type") == "user_feedback":
+        try:
+            feedback_payload = json.loads(normalized["payload"])
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=400,
+                detail="user_feedback payload must be a JSON object",
+            )
+        if not isinstance(feedback_payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="user_feedback payload must be a JSON object",
+            )
+        feedback_text = feedback_payload.get("text")
+        if feedback_text is None or not str(feedback_text).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="user_feedback payload requires non-empty text",
+            )
+        sanitized = InputSanitizer().sanitize(str(feedback_text), source="ingest")
+        if not sanitized.safe:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feedback rejected: {sanitized.reason}",
+            )
+        feedback_payload["text"] = sanitized.content
+        feedback_payload.setdefault("intent", sanitized.intent)
+        normalized["payload"] = json.dumps(feedback_payload)
+
+    _check_ingest_payload_size(normalized["payload"])
 
     received_at = normalized.setdefault("received_at", _utc_now().isoformat())
     normalized.setdefault("exchange_timestamp", received_at)
@@ -281,16 +360,44 @@ async def _expire_approvals_with_notification(
                 logger.warning("Failed to send expiry notification for %s", rid)
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _enforce_public_bind_requires_auth(config: AppConfig) -> None:
+    """Refuse to start without API auth unless local dev explicitly opts out.
+
+    P0-2: the auth middleware short-circuits when ORCHESTRATOR_API_KEY is empty.
+    That is now allowed only for an explicit loopback-only dev configuration.
+    """
+    host = (config.bind_host or "").strip().lower()
+    if config.orchestrator_api_key:
+        return
+    if config.allow_unauthenticated_local and host in _LOOPBACK_HOSTS:
+        return
+    raise RuntimeError(
+        "Orchestrator refusing to start without ORCHESTRATOR_API_KEY. Set an "
+        "API key, or for local-only development set "
+        "ALLOW_UNAUTHENTICATED_LOCAL=true and bind to 127.0.0.1/localhost. "
+        f"Current BIND_HOST={config.bind_host!r}."
+    )
+
+
 def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> FastAPI:
     """Factory function. Tests inject a temp directory for DB files."""
     if config is None:
         config = AppConfig.from_env()
+    _enforce_public_bind_requires_auth(config)
     if db_dir is None:
         db_dir = config.data_dir
 
     db_path = Path(db_dir)
-    raw_data_dir = db_path / "raw"
-    curated_dir = db_path / "data" / "curated"
+    data_dirs = resolve_data_dirs(db_path)
+    raw_data_dir = data_dirs.raw_data_dir
+    curated_dir = data_dirs.curated_dir
+    logger.info(
+        "Resolved data dirs: db=%s raw=%s curated=%s legacy_curated=%s",
+        db_path, raw_data_dir, curated_dir, data_dirs.legacy_curated_dir,
+    )
     queue = EventQueue(db_path=str(db_path / "events.db"))
     registry = TaskRegistry(db_path=str(db_path / "tasks.db"))
     scheduled_run_store = ScheduledRunStore(db_path=str(db_path / "scheduled_runs.db"))
@@ -472,7 +579,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             event_stream=event_stream,
             parameter_searcher=parameter_searcher,
             experiment_config_generator=None,
-            experiment_tracker=None,
+            proposal_ledger=proposal_ledger,
             calibration_tracker=calibration_tracker,
             search_log_dir=db_path / "memory" / "findings",
             curated_dir=curated_dir,
@@ -615,6 +722,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         run_index=run_index,
         proposal_ledger=proposal_ledger,
         calibration_tracker=calibration_tracker,
+        scheduled_run_store=scheduled_run_store,
     )
 
     # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)
@@ -629,14 +737,27 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     worker.on_alert = handlers.handle_alert
     worker.on_heartbeat = handlers.handle_heartbeat
     worker.on_notification = handlers.handle_notification
-    # Long-running handlers are spawned via SubagentManager
-    worker.on_triage = lambda action: subagent_mgr.spawn(
+
+    async def _spawn_or_raise(agent_type: str, coro):
+        agent_id = await subagent_mgr.spawn(agent_type, coro)
+        if agent_id is None:
+            running = len(subagent_mgr.get_running())
+            raise CapacityExceeded(
+                f"No subagent slot for {agent_type} "
+                f"({running}/{subagent_mgr.max_concurrent} in use)"
+            )
+        return agent_id
+
+    # Long-running handlers are spawned via SubagentManager. CapacityExceeded
+    # propagates to the worker so the trigger event is nacked and retried
+    # rather than silently acked.
+    worker.on_triage = lambda action: _spawn_or_raise(
         "triage", lambda a=action: handlers.handle_triage(a))
-    worker.on_daily_analysis = lambda action: subagent_mgr.spawn(
+    worker.on_daily_analysis = lambda action: _spawn_or_raise(
         "daily_analysis", lambda a=action: handlers.handle_daily_analysis(a))
-    worker.on_weekly_analysis = lambda action: subagent_mgr.spawn(
+    worker.on_weekly_analysis = lambda action: _spawn_or_raise(
         "weekly_analysis", lambda a=action: handlers.handle_weekly_analysis(a))
-    worker.on_wfo = lambda action: subagent_mgr.spawn(
+    worker.on_wfo = lambda action: _spawn_or_raise(
         "wfo", lambda a=action: handlers.handle_wfo(a))
     worker.on_feedback = handlers.handle_feedback
 
@@ -849,7 +970,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     from skills.proactive_scanner import ProactiveScanner
 
     scanner = ProactiveScanner()
-    curated_dir = db_path / "data" / "curated"
 
     async def _morning_scan(
         bot_ids: list[str] | None = None,
@@ -954,6 +1074,84 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         proposal_ledger=proposal_ledger,
     )
 
+    def _lookup_proposal_id(
+        suggestion_id: str = "",
+        experiment_id: str = "",
+    ) -> str:
+        """Find a ProposalLedger id from an existing suggestion or experiment link."""
+        if suggestion_id:
+            try:
+                for suggestion in suggestion_tracker.load_all():
+                    if (
+                        suggestion.get("suggestion_id") == suggestion_id
+                        and suggestion.get("proposal_id")
+                    ):
+                        return suggestion["proposal_id"]
+            except Exception:
+                logger.warning("Failed to lookup proposal id for suggestion %s", suggestion_id)
+        if experiment_id or suggestion_id:
+            try:
+                for record in proposal_ledger.list_all():
+                    candidate = record.candidate
+                    if experiment_id and candidate.experiment_id == experiment_id:
+                        return candidate.proposal_id
+                    if suggestion_id and candidate.suggestion_id == suggestion_id:
+                        return candidate.proposal_id
+            except Exception:
+                logger.warning("Failed to lookup proposal id for experiment %s", experiment_id)
+        return ""
+
+    def _experiment_result_delta(result, experiment) -> float:
+        metrics = {m.variant_name: m for m in getattr(result, "variant_metrics", [])}
+        variants = getattr(experiment, "variants", []) or []
+        if len(variants) >= 2:
+            control = metrics.get(variants[0].name)
+            treatment = metrics.get(variants[1].name)
+            metric_attr = {
+                "pnl": "avg_pnl",
+                "sharpe": "sharpe",
+                "win_rate": "win_rate",
+                "profit_factor": "profit_factor",
+            }.get(getattr(experiment, "success_metric", "pnl"), "avg_pnl")
+            if control is not None and treatment is not None:
+                return float(
+                    (getattr(treatment, metric_attr, 0.0) or 0.0)
+                    - (getattr(control, metric_attr, 0.0) or 0.0)
+                )
+        return float(getattr(result, "effect_size", 0.0) or 0.0)
+
+    def _structural_objective_delta(gt_before, gt_after, actual_values: list[float]) -> float:
+        before_composite = getattr(gt_before, "composite_score", None)
+        after_composite = getattr(gt_after, "composite_score", None)
+        if before_composite is not None and after_composite is not None:
+            return float(after_composite - before_composite)
+        values = [float(v) for v in actual_values if v is not None]
+        return sum(values) / len(values) if values else 0.0
+
+    def _record_proposal_outcome(
+        *,
+        proposal_id: str,
+        objective_delta: float,
+        verdict: str,
+        measurement_path: Path,
+    ) -> None:
+        if not proposal_id:
+            return
+        try:
+            from schemas.proposal_ledger import ProposalOutcome
+
+            proposal_ledger.record_outcome(
+                proposal_id,
+                ProposalOutcome(
+                    proposal_id=proposal_id,
+                    objective_delta=float(objective_delta or 0.0),
+                    verdict=verdict,
+                    measurement_path=str(measurement_path),
+                ),
+            )
+        except Exception:
+            logger.warning("Failed to record proposal outcome for %s", proposal_id)
+
     async def _measure_outcomes(scheduled_for: datetime | None = None) -> None:
         """Measure outcomes of deployed suggestions and link to hypotheses."""
         suggestions = suggestion_tracker.load_all()
@@ -999,21 +1197,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     with open(enhanced_path, "a", encoding="utf-8") as f:
                         f.write(result.model_dump_json() + "\n")
 
+                    outcome_measurer.record_measurement_feedback(result)
                     suggestion_tracker.mark_measured(sid)
 
-                    # Only update hypothesis for high/medium quality verdicts
                     verdict_str = result.verdict.value if hasattr(result.verdict, "value") else str(result.verdict)
-                    is_decisive = verdict_str in ("positive", "negative")
-
-                    # Link hypothesis outcome if suggestion has hypothesis_id
-                    hyp_id = s.get("hypothesis_id")
-                    if hyp_id and is_decisive:
-                        try:
-                            hypothesis_library.record_outcome(
-                                hyp_id, positive=(verdict_str == "positive"),
-                            )
-                        except Exception:
-                            logger.warning("Failed to record hypothesis outcome for %s", hyp_id)
 
                     # Promote linked patterns on positive outcome
                     if verdict_str == "positive":
@@ -1046,9 +1233,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     # Link hypothesis outcome if suggestion has hypothesis_id
                     po_verdict = po.get("verdict", "")
                     po_hyp_id = None
+                    po_proposal_id = None
                     for s in deployed:
                         if s.get("suggestion_id") == po_sid:
                             po_hyp_id = s.get("hypothesis_id")
+                            po_proposal_id = s.get("proposal_id")
                             break
                     if po_hyp_id and po_verdict in ("positive", "negative"):
                         try:
@@ -1056,7 +1245,18 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                                 po_hyp_id, positive=(po_verdict == "positive"),
                             )
                         except Exception:
-                            logger.warning("Failed to record hypothesis outcome for portfolio %s", po_hyp_id)
+                            logger.warning(
+                                "Failed to record hypothesis outcome for portfolio %s",
+                                po_hyp_id,
+                            )
+                    _record_proposal_outcome(
+                        proposal_id=po_proposal_id or "",
+                        objective_delta=float(po.get("composite_delta", 0.0) or 0.0),
+                        verdict=po_verdict or "inconclusive",
+                        measurement_path=(
+                            db_path / "memory" / "findings" / "portfolio_outcomes.jsonl"
+                        ),
+                    )
             if portfolio_outcomes:
                 logger.info("Measured %d portfolio outcomes", len(portfolio_outcomes))
         except Exception:
@@ -1266,7 +1466,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         try:
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             action = Action(
-                action_type="discovery_analysis",
+                type=ActionType.LOG_UNKNOWN,
+                event_id=f"discovery-{date}",
                 bot_id="",
                 details={"date": date, "bots": config.bot_ids},
             )
@@ -1288,7 +1489,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             cycle = LearningCycle(
                 curated_dir=curated_dir,
                 memory_dir=db_path / "memory",
-                runs_dir=runs_dir,
+                runs_dir=db_path / "runs",
                 bots=config.bot_ids,
                 suggestion_tracker=suggestion_tracker,
                 hypothesis_library=hypothesis_library,
@@ -1393,6 +1594,21 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             "winner": result.winner,
                             "p_value": result.p_value,
                         })
+                        proposal_verdict = {
+                            "adopt_treatment": "positive",
+                            "keep_control": "negative",
+                        }.get(result.recommendation, "inconclusive")
+                        _record_proposal_outcome(
+                            proposal_id=_lookup_proposal_id(
+                                suggestion_id=getattr(exp, "source_suggestion_id", "") or "",
+                                experiment_id=exp.experiment_id,
+                            ),
+                            objective_delta=_experiment_result_delta(result, exp),
+                            verdict=proposal_verdict,
+                            measurement_path=(
+                                db_path / "memory" / "findings" / "experiment_results.jsonl"
+                            ),
+                        )
                         # Escalate: link back to suggestion and hypothesis
                         if result.recommendation == "adopt_treatment":
                             if getattr(exp, "source_suggestion_id", None) and suggestion_tracker:
@@ -1520,6 +1736,19 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                             hypothesis_library.record_outcome(exp.hypothesis_id, positive=passed)
                         except Exception:
                             logger.warning("Failed to record hypothesis outcome for %s", exp.hypothesis_id)
+                    _record_proposal_outcome(
+                        proposal_id=_lookup_proposal_id(
+                            suggestion_id=exp.suggestion_id or "",
+                            experiment_id=exp.experiment_id,
+                        ),
+                        objective_delta=_structural_objective_delta(
+                            gt_before, gt_after, actual_values,
+                        ),
+                        verdict="positive" if passed else "negative",
+                        measurement_path=(
+                            db_path / "memory" / "findings" / "structural_experiments.jsonl"
+                        ),
+                    )
                 except Exception:
                     logger.exception("Failed to evaluate structural experiment %s", exp.experiment_id)
         except Exception:
@@ -1535,7 +1764,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         return f"bots:{','.join(sorted(bot_ids))}"
 
     async def _worker_job(scheduled_for: datetime | None = None) -> None:
-        await worker.process_batch()
+        # P1-2: drain until empty or time budget exhausted instead of capping
+        # at the legacy 10-events-per-minute default.
+        await worker.drain(
+            batch_size=config.worker_batch_size,
+            time_budget_seconds=config.worker_drain_seconds,
+        )
 
     async def _monitoring_job(scheduled_for: datetime | None = None) -> None:
         await monitoring_loop.run_all()
@@ -1761,6 +1995,23 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # P1-5: refuse to start a second orchestrator process against the
+        # same data directory. JSONL stores and scheduler state are
+        # single-writer; a second process would duplicate cron firings,
+        # interleave append-rewrite cycles, and cause silent data loss.
+        from filelock import FileLock, Timeout as _LockTimeout
+        lock_path = db_path / ".orchestrator.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        process_lock = FileLock(str(lock_path))
+        try:
+            process_lock.acquire(timeout=0)
+        except _LockTimeout:
+            raise RuntimeError(
+                f"Another orchestrator is already running against {db_path}. "
+                f"Lockfile: {lock_path}. Refusing to start a second process — "
+                "this system is single-writer by design."
+            )
+        app.state.process_lock = process_lock
         try:
             await queue.initialize()
             await registry.initialize()
@@ -1800,7 +2051,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     app.state.telegram_healthy = False
                     # Surface to operators via remaining channels (Discord, email).
                     try:
-                        from schemas.notifications import NotificationPayload, NotificationPriority
                         degraded_payload = NotificationPayload(
                             notification_type="telegram_polling_failure",
                             priority=NotificationPriority.CRITICAL,
@@ -1919,6 +2169,12 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         await registry.close()
         await scheduled_run_store.close()
         run_index.close()
+        # P1-5: release the single-process lock last so a restart isn't
+        # blocked by a leaked lock file.
+        try:
+            process_lock.release()
+        except Exception:
+            logger.warning("Failed to release orchestrator lockfile", exc_info=True)
 
     app = FastAPI(title="Trading Assistant Orchestrator", lifespan=lifespan)
     app.state.start_time = datetime.now(timezone.utc)
@@ -1973,7 +2229,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     @app.get("/health")
     async def health():
-        scheduler_ok = hasattr(app.state, "scheduler") and app.state.scheduler is not None
+        # P3-2: don't just check that the scheduler attribute exists — also
+        # confirm APScheduler reports itself as running.
+        scheduler_obj = getattr(app.state, "scheduler", None) if hasattr(app.state, "scheduler") else None
+        scheduler_ok = bool(scheduler_obj) and bool(getattr(scheduler_obj, "running", False))
         telegram_healthy = getattr(app.state, "telegram_healthy", True)
         all_ok = scheduler_ok and telegram_healthy
         return {
@@ -1990,6 +2249,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
         pending = await queue.count_pending()
         dead_count = await queue.count_dead_letters()
+        oldest_age = await queue.oldest_pending_age_seconds()
         running = subagent_mgr.get_running()
         uptime = (datetime.now(timezone.utc) - app.state.start_time).total_seconds()
         error_rate = brain.get_error_rate_1h()
@@ -2012,12 +2272,17 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             delivery_latency_p95=agg.p95,
             delivery_latency_max=agg.max,
             per_bot_latency=per_bot,
+            oldest_pending_age_seconds=oldest_age,
         ).model_dump(mode="json")
 
     @app.post("/ingest")
     async def ingest_event(event: dict):
-        """Direct event ingest — bypasses relay, useful for testing."""
-        event = _normalize_queue_event(event)
+        """Direct event ingest — bypasses relay, useful for testing.
+
+        Validates envelope (P1-4): bot_id must be in config.bot_ids or a
+        known system source; payload must fit within 256 KB.
+        """
+        event = _normalize_queue_event(event, allowed_bot_ids=set(config.bot_ids))
         # Record latency for directly ingested events too
         ex_ts = event.get("exchange_timestamp", "")
         rx_ts = event.get("received_at", "")
@@ -2103,15 +2368,28 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         _save_notification_prefs(prefs, prefs_path)
         return prefs.model_dump()
 
+    feedback_sanitizer = InputSanitizer()
+
     @app.post("/feedback")
     async def submit_feedback(body: dict):
         """Submit user feedback (approve/reject suggestions, corrections).
 
-        Enqueues a user_feedback event that flows through brain → worker → handle_feedback.
+        All inbound text is passed through InputSanitizer (P0-3) before
+        enqueueing, so prompt-injection patterns never reach the corrections
+        store or downstream agent prompts.
         """
         text = body.get("text", "")
         if not text:
             raise HTTPException(status_code=400, detail="'text' field is required")
+
+        sanitized = feedback_sanitizer.sanitize(text, source="api")
+        if not sanitized.safe:
+            logger.warning("Blocked feedback (api): %s", sanitized.reason)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feedback rejected: {sanitized.reason}",
+            )
+
         import secrets
 
         event_time = _utc_now()
@@ -2120,14 +2398,19 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             "bot_id": body.get("bot_id", "user"),
             "event_id": f"feedback-{event_time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(6)}",
             "payload": json.dumps({
-                "text": text,
+                "text": sanitized.content,
                 "report_id": body.get("report_id", "unknown"),
+                "intent": sanitized.intent,
             }),
             "exchange_timestamp": event_time.isoformat(),
             "received_at": event_time.isoformat(),
         }
         inserted = await queue.enqueue(feedback_event)
-        return {"inserted": inserted, "event_id": feedback_event["event_id"]}
+        return {
+            "inserted": inserted,
+            "event_id": feedback_event["event_id"],
+            "intent": sanitized.intent,
+        }
 
     @app.get("/sessions")
     async def list_sessions(agent_type: str | None = None, date: str | None = None):

@@ -54,15 +54,17 @@ class TestAppConfig:
     def test_from_env_defaults(self, monkeypatch):
         # Clear all relevant env vars
         for key in ["BOT_IDS", "RELAY_URL", "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN",
-                     "SMTP_HOST", "SMTP_USER", "DATA_DIR", "LOG_LEVEL"]:
+                     "SMTP_HOST", "SMTP_USER", "DATA_DIR", "LOG_LEVEL",
+                     "ALLOW_UNAUTHENTICATED_LOCAL"]:
             monkeypatch.delenv(key, raising=False)
         config = AppConfig.from_env()
         assert config.bot_ids == []
         assert config.relay_url == ""
         assert config.telegram_bot_token == ""
-        assert config.data_dir == "."
+        assert config.data_dir == "data"
         assert config.log_level == "INFO"
         assert config.smtp_port == 587
+        assert config.allow_unauthenticated_local is False
 
     def test_direct_construction(self):
         config = AppConfig(bot_ids=["a", "b"], relay_url="http://test")

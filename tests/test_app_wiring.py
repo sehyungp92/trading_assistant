@@ -2,6 +2,7 @@
 """Tests for app.py wiring — channel adapters, config, scanner, prefs persistence."""
 import json
 import os
+import inspect
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -28,6 +29,10 @@ from schemas.notifications import (
     NotificationPreferences,
 )
 from comms.dispatcher import NotificationDispatcher
+
+
+def _local_config(**kwargs) -> AppConfig:
+    return AppConfig(allow_unauthenticated_local=True, **kwargs)
 
 
 class TestAppConfigFromEnv:
@@ -76,6 +81,12 @@ class TestAppConfigFromEnv:
             config = AppConfig.from_env(dotenv_path=dotenv_path)
 
         assert config.bot_ids == ["env_bot"]
+
+    def test_allow_unauthenticated_local_from_env(self):
+        with patch.dict(os.environ, {"ALLOW_UNAUTHENTICATED_LOCAL": "true"}, clear=False):
+            config = AppConfig.from_env()
+
+        assert config.allow_unauthenticated_local is True
 
 
 class TestChannelAdapterRegistration:
@@ -202,27 +213,46 @@ class TestAgentPreferencesPersistence:
 
 class TestCreateAppWithConfig:
     def test_bot_ids_passed_to_handlers(self, tmp_path):
-        config = AppConfig(bot_ids=["bot_x", "bot_y"])
+        config = _local_config(bot_ids=["bot_x", "bot_y"])
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.handlers._bots == ["bot_x", "bot_y"]
 
     def test_empty_config_still_creates_app(self, tmp_path):
-        config = AppConfig()
+        config = _local_config()
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.handlers._bots == []
         assert len(app.state.dispatcher.adapters) == 0
 
     def test_config_exposed_on_app_state(self, tmp_path):
-        config = AppConfig(bot_ids=["bot_z"])
+        config = _local_config(bot_ids=["bot_z"])
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.config.bot_ids == ["bot_z"]
 
+    def test_uses_normalized_curated_data_dir(self, tmp_path):
+        (tmp_path / "curated").mkdir()
+        app = create_app(db_dir=str(tmp_path), config=_local_config())
+        assert app.state.handlers._curated_dir == tmp_path / "curated"
+        assert app.state.handlers._raw_data_dir == tmp_path / "raw"
+
+    def test_uses_legacy_curated_dir_when_only_legacy_exists(self, tmp_path):
+        legacy = tmp_path / "data" / "curated"
+        legacy.mkdir(parents=True)
+        app = create_app(db_dir=str(tmp_path), config=_local_config())
+        assert app.state.handlers._curated_dir == legacy
+
+    def test_prefers_normalized_curated_dir_when_both_exist(self, tmp_path):
+        (tmp_path / "curated").mkdir()
+        (tmp_path / "data" / "curated").mkdir(parents=True)
+        app = create_app(db_dir=str(tmp_path), config=_local_config())
+        assert app.state.handlers._curated_dir == tmp_path / "curated"
+
     def test_agent_runner_shares_event_stream(self, tmp_path):
-        app = create_app(db_dir=str(tmp_path), config=AppConfig())
+        app = create_app(db_dir=str(tmp_path), config=_local_config())
         assert app.state.agent_runner._event_stream is app.state.event_stream
 
     def test_agent_runner_receives_launcher_args(self, tmp_path):
         config = AppConfig(
+            allow_unauthenticated_local=True,
             claude_command="wsl.exe",
             claude_command_args=["--", "claude"],
             codex_command="wsl.exe",
@@ -237,7 +267,7 @@ class TestCreateAppWithConfig:
         assert app.state.agent_runner._codex_command_args == ["--", "codex"]
 
     def test_telegram_adapter_wired(self, tmp_path):
-        config = AppConfig(telegram_bot_token="token", telegram_chat_id="123")
+        config = _local_config(telegram_bot_token="token", telegram_chat_id="123")
         app = create_app(db_dir=str(tmp_path), config=config)
         assert NotificationChannel.TELEGRAM in app.state.dispatcher.adapters
 
@@ -249,7 +279,7 @@ class TestCreateAppWithConfig:
             "channels": [{"channel": "telegram", "enabled": True, "chat_id": "saved-123"}]
         }), encoding="utf-8")
 
-        config = AppConfig()
+        config = _local_config()
         app = create_app(db_dir=str(tmp_path), config=config)
         assert len(app.state.notification_preferences.channels) == 1
         assert app.state.notification_preferences.channels[0].chat_id == "saved-123"
@@ -264,13 +294,14 @@ class TestCreateAppWithConfig:
             },
         }), encoding="utf-8")
 
-        app = create_app(db_dir=str(tmp_path), config=AppConfig())
+        app = create_app(db_dir=str(tmp_path), config=_local_config())
 
         assert app.state.agent_preferences.default.provider == AgentProvider.OPENROUTER
         assert app.state.agent_preferences.overrides[AgentWorkflow.TRIAGE].provider == AgentProvider.CODEX_PRO
 
     def test_agent_prefs_seed_from_env_when_missing(self, tmp_path):
         config = AppConfig(
+            allow_unauthenticated_local=True,
             agent_default_provider="zai_coding_plan",
             agent_default_model="glm-5",
             wfo_agent_provider="claude_max",
@@ -285,7 +316,7 @@ class TestCreateAppWithConfig:
         assert app.state.agent_preferences.overrides[AgentWorkflow.WFO].model == "opus"
 
     def test_telegram_settings_router_registered_when_telegram_enabled(self, tmp_path):
-        config = AppConfig(telegram_bot_token="token", telegram_chat_id="123")
+        config = _local_config(telegram_bot_token="token", telegram_chat_id="123")
 
         app = create_app(db_dir=str(tmp_path), config=config)
 
@@ -301,6 +332,7 @@ class TestCreateAppWithConfig:
             encoding="utf-8",
         )
         config = AppConfig(
+            allow_unauthenticated_local=True,
             autonomous_enabled=True,
             bot_config_dir=str(config_dir),
         )
@@ -309,6 +341,18 @@ class TestCreateAppWithConfig:
 
         assert app.state.repo_task_runner is not None
         assert app.state.approval_handler._repo_task_runner is app.state.repo_task_runner
+
+    def test_outcome_wiring_records_selected_feedback_and_portfolio_proposal_outcomes(self):
+        source = inspect.getsource(create_app)
+
+        assert "measure_progressive(" in source
+        assert "record_measurement_feedback(result)" in source
+        assert "po_proposal_id = s.get(\"proposal_id\")" in source
+        assert "proposal_ledger.record_outcome" in source
+        assert "experiment_results.jsonl" in source
+        assert "structural_experiments.jsonl" in source
+        assert "_experiment_result_delta(result, exp)" in source
+        assert "_structural_objective_delta(" in source
 
     @pytest.mark.asyncio
     async def test_lifespan_drains_relay_and_runs_startup_catchup(self, tmp_path):
@@ -322,7 +366,7 @@ class TestCreateAppWithConfig:
             "started_at": datetime.now(timezone.utc).isoformat(),
         }) + "\n", encoding="utf-8")
 
-        config = AppConfig(bot_ids=["bot1"], relay_url="https://relay.example")
+        config = _local_config(bot_ids=["bot1"], relay_url="https://relay.example")
 
         with (
             patch("orchestrator.app.VPSReceiver") as MockReceiver,

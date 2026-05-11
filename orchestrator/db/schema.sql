@@ -18,7 +18,11 @@ CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_events_bot_id ON events(bot_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 
--- Watermark tracking per bot for relay pull protocol
+-- Watermark tracking for relay pull protocol. The relay returns a single
+-- globally-ordered stream and the orchestrator stores one row keyed
+-- "relay". The column is named bot_id for legacy reasons; in practice it
+-- is a free-form stream identifier (typically the literal string "relay").
+-- See orchestrator/adapters/vps_receiver.py and docs/implementation.md.
 CREATE TABLE IF NOT EXISTS watermarks (
     bot_id      TEXT PRIMARY KEY,
     last_event_id TEXT NOT NULL,

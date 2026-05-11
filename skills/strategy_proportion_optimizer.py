@@ -17,7 +17,7 @@ from schemas.proportion_optimization import (
 from schemas.weekly_metrics import StrategyWeeklySummary
 
 # Known single-instrument bots for concentration warnings
-_SINGLE_INSTRUMENT_BOTS = {"momentum_trader"}
+_SINGLE_INSTRUMENT_BOTS = {"momentum_nq_01"}
 
 
 class StrategyProportionOptimizer:

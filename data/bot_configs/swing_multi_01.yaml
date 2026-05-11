@@ -1,0 +1,1144 @@
+bot_id: swing_multi_01
+repo_url: git@github.com:sehyungp92/trading.git
+repo_dir: /repos/trading
+default_branch: main
+allowed_edit_paths:
+  - strategies/swing/*
+  - config/*
+  - tests/*
+structural_context_paths:
+  - strategies/swing/*
+  - strategies/core/*
+  - strategies/contracts.py
+  - libs/*
+  - apps/*
+  - instrumentation/*
+  - regime/*
+  - config/*
+  - tests/*
+verification_commands:
+  - pytest tests -q
+strategies:
+  - ATRSS
+  - AKC_HELIX
+  - TPC
+parameters:
+  # === ATRSS — ATR Swing Strategy ===
+  - param_name: daily_mult
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.daily_mult
+    current_value: 2.2
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: hourly_mult
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.hourly_mult
+    current_value: 3.0
+    valid_range: [1.5, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: chand_mult
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.chand_mult
+    current_value: 3.0
+    valid_range: [1.5, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: adx_on
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.adx_on
+    current_value: 14
+    valid_range: [8, 30]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: adx_off
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.adx_off
+    current_value: 18
+    valid_range: [10, 30]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: base_risk_pct
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.base_risk_pct
+    current_value: 0.024
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: shorts_enabled
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SymbolConfig.shorts_enabled
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === ATRSS — Portfolio risk (module-level) ===
+  - param_name: MAX_PORTFOLIO_HEAT
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: MAX_PORTFOLIO_HEAT
+    current_value: 0.06
+    valid_range: [0.02, 0.15]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: DYNAMIC_RISK_STRONG_TREND_MULT
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: DYNAMIC_RISK_STRONG_TREND_MULT
+    current_value: 1.15
+    valid_range: [1.0, 2.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: DYNAMIC_RISK_WEAK_TREND_MULT
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: DYNAMIC_RISK_WEAK_TREND_MULT
+    current_value: 0.8
+    valid_range: [0.4, 1.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+
+  # === ATRSS — Entry signal / scoring ===
+  - param_name: FAST_CONFIRM_SCORE
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: FAST_CONFIRM_SCORE
+    current_value: 55
+    valid_range: [40, 80]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: FAST_CONFIRM_ADX
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: FAST_CONFIRM_ADX
+    current_value: 22
+    valid_range: [15, 35]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: QUALITY_GATE_THRESHOLD
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: QUALITY_GATE_THRESHOLD
+    current_value: 4.0
+    valid_range: [2.0, 7.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: SCORE_REVERSE_MIN
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: SCORE_REVERSE_MIN
+    current_value: 60
+    valid_range: [40, 80]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: PULLBACK_LOOKBACK
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: PULLBACK_LOOKBACK
+    current_value: 8
+    valid_range: [3, 16]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: PULLBACK_TOUCH_TOLERANCE_ATR
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: PULLBACK_TOUCH_TOLERANCE_ATR
+    current_value: 0.55
+    valid_range: [0.20, 1.20]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # === ATRSS — Filter thresholds (module-level) ===
+  - param_name: ADX_STRONG
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ADX_STRONG
+    current_value: 30
+    valid_range: [20, 50]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: DI_MIN
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: DI_MIN
+    current_value: 10
+    valid_range: [5, 25]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: ADX_MIN_STRUCT
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ADX_MIN_STRUCT
+    current_value: 20
+    valid_range: [10, 35]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === ATRSS — Exit timing (module-level) ===
+  - param_name: BE_TRIGGER_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: BE_TRIGGER_R
+    current_value: 0.75
+    valid_range: [0.25, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: CHANDELIER_TRIGGER_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: CHANDELIER_TRIGGER_R
+    current_value: 1.25
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TP1_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: TP1_R
+    current_value: 1.0
+    valid_range: [0.5, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TP1_FRAC
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: TP1_FRAC
+    current_value: 0.33
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TP2_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: TP2_R
+    current_value: 1.5
+    valid_range: [0.8, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: TP2_FRAC
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: TP2_FRAC
+    current_value: 0.33
+    valid_range: [0.10, 0.60]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: MAX_HOLD_HOURS
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: MAX_HOLD_HOURS
+    current_value: 88
+    valid_range: [24, 240]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STALL_CHECK_HOURS
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: STALL_CHECK_HOURS
+    current_value: 36
+    valid_range: [12, 96]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STALL_MFE_THRESHOLD
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: STALL_MFE_THRESHOLD
+    current_value: 0.4
+    valid_range: [0.1, 1.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # === ATRSS — Add-ons (position_sizing) ===
+  - param_name: ADDON_A_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ADDON_A_R
+    current_value: 1.5
+    valid_range: [0.8, 3.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: ADDON_B_R
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ADDON_B_R
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: ADDON_A_SIZE_MULT
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ADDON_A_SIZE_MULT
+    current_value: 0.5
+    valid_range: [0.1, 1.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: ORDER_EXPIRY_HOURS
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: ORDER_EXPIRY_HOURS
+    current_value: 18
+    valid_range: [4, 48]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+
+  # === ATRSS — Ablation flags ===
+  - param_name: STALL_EXIT_ENABLED
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: STALL_EXIT_ENABLED
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: EARLY_STALL_ENABLED
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: EARLY_STALL_ENABLED
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: FIXED_QTY_REGIME_SCALING_ENABLED
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: FIXED_QTY_REGIME_SCALING_ENABLED
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: PULLBACK_MOMENTUM_FILTER_ENABLED
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: PULLBACK_MOMENTUM_FILTER_ENABLED
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: BREAKOUT_DIRECT_ENTRY
+    strategy_id: ATRSS
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/atrss/config.py
+    python_path: BREAKOUT_DIRECT_ENTRY
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === AKC_HELIX — Swing Divergence ===
+  - param_name: corridor_cap_chop
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.corridor_cap_chop
+    current_value: 1.3
+    valid_range: [0.8, 2.5]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: corridor_cap_trend
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.corridor_cap_trend
+    current_value: 1.6
+    valid_range: [1.0, 3.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: chandelier_lookback
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.chandelier_lookback
+    current_value: 30
+    valid_range: [10, 60]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: base_risk_pct
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.base_risk_pct
+    current_value: 0.009
+    valid_range: [0.003, 0.03]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: corridor_cap_other
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.corridor_cap_other
+    current_value: 1.4
+    valid_range: [0.8, 2.5]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: max_spread_ticks
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.max_spread_ticks
+    current_value: 2
+    valid_range: [1, 8]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: min_stop_floor_dollars
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: SymbolConfig.min_stop_floor_dollars
+    current_value: 100.0
+    valid_range: [25.0, 500.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: false
+
+  # === AKC_HELIX — Portfolio risk caps (module-level) ===
+  - param_name: PORTFOLIO_CAP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: PORTFOLIO_CAP_R
+    current_value: 1.50
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: INSTRUMENT_CAP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: INSTRUMENT_CAP_R
+    current_value: 0.85
+    valid_range: [0.3, 2.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: EXTREME_VOL_CAP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: EXTREME_VOL_CAP_R
+    current_value: 1.25
+    valid_range: [0.4, 3.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: WEEKLY_STOP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: WEEKLY_STOP_R
+    current_value: -5.0
+    valid_range: [-10.0, -2.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: DAILY_STOP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: DAILY_STOP_R
+    current_value: -2.5
+    valid_range: [-6.0, -1.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: CONSEC_STOPS_HALVE
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CONSEC_STOPS_HALVE
+    current_value: 3
+    valid_range: [2, 6]
+    value_type: int
+    category: risk_management
+    is_safety_critical: true
+  - param_name: EMERGENCY_STOP_R
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: EMERGENCY_STOP_R
+    current_value: -2.0
+    valid_range: [-4.0, -1.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+
+  # === AKC_HELIX — Volatility / regime gates ===
+  - param_name: VOLFACTOR_MIN
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: VOLFACTOR_MIN
+    current_value: 0.4
+    valid_range: [0.1, 1.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: VOLFACTOR_MAX
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: VOLFACTOR_MAX
+    current_value: 1.5
+    valid_range: [1.0, 3.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: LOW_VOL_PCT
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: LOW_VOL_PCT
+    current_value: 20.0
+    valid_range: [5.0, 40.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: HIGH_VOL_PCT
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: HIGH_VOL_PCT
+    current_value: 68.0
+    valid_range: [50.0, 90.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: ADX_UPPER_GATE
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: ADX_UPPER_GATE
+    current_value: 60.5
+    valid_range: [40.0, 80.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === AKC_HELIX — Indicator periods ===
+  - param_name: MACD_FAST
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: MACD_FAST
+    current_value: 8
+    valid_range: [4, 20]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: MACD_SLOW
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: MACD_SLOW
+    current_value: 21
+    valid_range: [10, 40]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: MACD_SIGNAL
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: MACD_SIGNAL
+    current_value: 5
+    valid_range: [3, 12]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === AKC_HELIX — Class B / D entry gates ===
+  - param_name: CLASS_B_MIN_ADX
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_B_MIN_ADX
+    current_value: 28.0
+    valid_range: [15.0, 45.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: CLASS_B_BAIL_BARS
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_B_BAIL_BARS
+    current_value: 9
+    valid_range: [3, 20]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: CLASS_B_BAIL_R_THRESH
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_B_BAIL_R_THRESH
+    current_value: -0.35
+    valid_range: [-1.0, 0.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: CLASS_D_REGIME_STREAK_MIN
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_D_REGIME_STREAK_MIN
+    current_value: 2
+    valid_range: [0, 8]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: CLASS_D_MAX_DAILY_EXTENSION_ATR
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_D_MAX_DAILY_EXTENSION_ATR
+    current_value: 3.5
+    valid_range: [1.0, 8.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === AKC_HELIX — Class size multipliers ===
+  - param_name: CLASS_A_SIZE_TREND
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_A_SIZE_TREND
+    current_value: 1.00
+    valid_range: [0.3, 1.5]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: CLASS_A_SIZE_CHOP
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_A_SIZE_CHOP
+    current_value: 0.65
+    valid_range: [0.2, 1.2]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+  - param_name: CLASS_A_SIZE_COUNTER
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_A_SIZE_COUNTER
+    current_value: 0.50
+    valid_range: [0.1, 1.0]
+    value_type: float
+    category: position_sizing
+    is_safety_critical: false
+
+  # === AKC_HELIX — Stops & exits (module-level) ===
+  - param_name: STOP_4H_MULT
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: STOP_4H_MULT
+    current_value: 0.75
+    valid_range: [0.25, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STOP_1H_STD
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: STOP_1H_STD
+    current_value: 0.50
+    valid_range: [0.20, 1.20]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: R_BE
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: R_BE
+    current_value: 1.0
+    valid_range: [0.4, 2.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: R_PARTIAL_2P5
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: R_PARTIAL_2P5
+    current_value: 1.8
+    valid_range: [1.0, 3.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: R_PARTIAL_5
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: R_PARTIAL_5
+    current_value: 6.6
+    valid_range: [3.0, 12.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STALE_4H_BARS
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: STALE_4H_BARS
+    current_value: 15
+    valid_range: [6, 40]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STALE_1H_BARS
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: STALE_1H_BARS
+    current_value: 24
+    valid_range: [10, 60]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: STALE_R_THRESH
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: STALE_R_THRESH
+    current_value: 0.3
+    valid_range: [0.0, 1.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+
+  # === AKC_HELIX — Class enables (ablation) ===
+  - param_name: DISABLE_CLASS_A
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: DISABLE_CLASS_A
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: DISABLE_CLASS_C
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: DISABLE_CLASS_C
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: DISABLE_CIRCUIT_BREAKER
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: DISABLE_CIRCUIT_BREAKER
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: true
+  - param_name: CLASS_D_HIST_SIGN_GATE
+    strategy_id: AKC_HELIX
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/akc_helix/config.py
+    python_path: CLASS_D_HIST_SIGN_GATE
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+
+  # === TPC — Trend Pullback Continuation (per-symbol via TPCSymbolConfig) ===
+  - param_name: risk_a_plus_pct
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.risk_a_plus_pct
+    current_value: 0.025
+    valid_range: [0.005, 0.04]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_a_pct
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.risk_a_pct
+    current_value: 0.016
+    valid_range: [0.004, 0.03]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: risk_b_pct
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.risk_b_pct
+    current_value: 0.01
+    valid_range: [0.002, 0.02]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_risk_pct
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_risk_pct
+    current_value: 0.025
+    valid_range: [0.005, 0.05]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_daily_loss_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_daily_loss_r
+    current_value: 2.0
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_weekly_loss_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_weekly_loss_r
+    current_value: 5.0
+    valid_range: [2.0, 10.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+  - param_name: max_open_risk_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_open_risk_r
+    current_value: 1.5
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: risk_management
+    is_safety_critical: true
+
+  # === TPC — Entry signal / scoring ===
+  - param_name: score_a_plus_min
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.score_a_plus_min
+    current_value: 13
+    valid_range: [8, 20]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: score_a_min
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.score_a_min
+    current_value: 10
+    valid_range: [6, 18]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: score_b_min
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.score_b_min
+    current_value: 9
+    valid_range: [5, 15]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: confirmation_required
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.confirmation_required
+    current_value: 1
+    valid_range: [0, 4]
+    value_type: int
+    category: entry_signal
+    is_safety_critical: false
+  - param_name: volume_expansion_mult
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.volume_expansion_mult
+    current_value: 1.3
+    valid_range: [1.0, 3.0]
+    value_type: float
+    category: entry_signal
+    is_safety_critical: false
+
+  # === TPC — Filter thresholds ===
+  - param_name: min_ma100_slope_atr_4h
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.min_ma100_slope_atr_4h
+    current_value: 0.06
+    valid_range: [0.0, 0.30]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: max_extension_atr_mult
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_extension_atr_mult
+    current_value: 2.0
+    valid_range: [1.0, 4.0]
+    value_type: float
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: atr_period
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.atr_period
+    current_value: 14
+    valid_range: [7, 30]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: pullback_min_bars_1h
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.pullback_min_bars_1h
+    current_value: 3
+    valid_range: [1, 10]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+  - param_name: pullback_max_bars_1h
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.pullback_max_bars_1h
+    current_value: 10
+    valid_range: [4, 30]
+    value_type: int
+    category: filter_threshold
+    is_safety_critical: false
+
+  # === TPC — Exit timing ===
+  - param_name: t1_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.t1_r
+    current_value: 1.5
+    valid_range: [0.5, 3.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t2_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.t2_r
+    current_value: 2.0
+    valid_range: [1.0, 5.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t1_partial_pct
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.t1_partial_pct
+    current_value: 0.45
+    valid_range: [0.20, 0.80]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: t1_stop_r
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.t1_stop_r
+    current_value: 0.4
+    valid_range: [-0.5, 1.5]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: max_stop_atr_mult
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_stop_atr_mult
+    current_value: 1.5
+    valid_range: [0.5, 4.0]
+    value_type: float
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: max_hold_bars_15m
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.max_hold_bars_15m
+    current_value: 36
+    valid_range: [8, 96]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+  - param_name: stall_exit_bars_15m
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.stall_exit_bars_15m
+    current_value: 52
+    valid_range: [20, 120]
+    value_type: int
+    category: exit_timing
+    is_safety_critical: false
+
+  # === TPC — Ablation ===
+  - param_name: longs_enabled
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.longs_enabled
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: shorts_enabled
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.shorts_enabled
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: type_b_enabled
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.type_b_enabled
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: type_c_enabled
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.type_c_enabled
+    current_value: true
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
+  - param_name: addon_enabled
+    strategy_id: TPC
+    param_type: PYTHON_CONSTANT
+    file_path: strategies/swing/tpc/config.py
+    python_path: TPCSymbolConfig.addon_enabled
+    current_value: false
+    valid_values: [true, false]
+    value_type: bool
+    category: ablation
+    is_safety_critical: false
