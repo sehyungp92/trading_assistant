@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from schemas.autonomous_pipeline import (
+from schemas.approval import (
     ApprovalRequest,
     BacktestComparison,
     BacktestContext,
 )
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 from comms.telegram_renderer import TelegramRenderer
 
 

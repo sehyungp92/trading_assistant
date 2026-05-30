@@ -1,5 +1,5 @@
 # tests/test_app_wiring.py
-"""Tests for app.py wiring — channel adapters, config, scanner, prefs persistence."""
+"""Tests for app.py wiring: channel adapters, config, scanner, prefs persistence."""
 import json
 import os
 import inspect
@@ -40,6 +40,13 @@ class TestAppConfigFromEnv:
         env = {
             "CLAUDE_COMMAND_ARGS": '["--","claude"]',
             "CODEX_COMMAND_ARGS": '["--","codex"]',
+            "MONTHLY_BACKTEST_COMMAND": '["python","-m","skills.backtest_runner_client"]',
+            "MONTHLY_OPTIMIZER_SEQUENCE_ENABLED": "false",
+            "MONTHLY_WORKFLOW_CONTRACT_PATH": "MONTHLY_OPTIMIZER_WORKFLOW.md",
+            "MONTHLY_WORKFLOW_CONTRACT_VERSION": "monthly_optimizer_workflow_contract_v1",
+            "MONTHLY_STRATEGY_PLUGIN_CONTRACT_PATH": "strategy_plugin_contract.json",
+            "LEARNING_REVIEW_MODE": "llm_review",
+            "LEARNING_REVIEW_DISABLED_WORKFLOWS": "daily_analysis,monthly_validation",
         }
 
         with patch.dict(os.environ, env, clear=False):
@@ -47,6 +54,13 @@ class TestAppConfigFromEnv:
 
         assert config.claude_command_args == ["--", "claude"]
         assert config.codex_command_args == ["--", "codex"]
+        assert config.monthly_backtest_command == ["python", "-m", "skills.backtest_runner_client"]
+        assert config.monthly_optimizer_sequence_enabled is False
+        assert config.monthly_workflow_contract_path == "MONTHLY_OPTIMIZER_WORKFLOW.md"
+        assert config.monthly_workflow_contract_version == "monthly_optimizer_workflow_contract_v1"
+        assert config.monthly_strategy_plugin_contract_path == "strategy_plugin_contract.json"
+        assert config.learning_review_mode == "llm_review"
+        assert config.learning_review_disabled_workflows == ["daily_analysis", "monthly_validation"]
 
     def test_invalid_command_args_env_falls_back_to_empty_list(self):
         env = {
@@ -228,6 +242,40 @@ class TestCreateAppWithConfig:
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.config.bot_ids == ["bot_z"]
 
+    def test_monthly_support_jobs_only_schedule_when_monthly_enabled(self, tmp_path):
+        disabled_app = create_app(db_dir=str(tmp_path / "off"), config=_local_config(bot_ids=["bot1"]))
+        disabled_job_keys = {spec.job_key for spec in disabled_app.state.scheduled_job_specs}
+        assert "lineage_audit" not in disabled_job_keys
+        assert "market_data_sync" not in disabled_job_keys
+        assert "monthly_validation" not in disabled_job_keys
+
+        enabled_app = create_app(
+            db_dir=str(tmp_path / "on"),
+            config=_local_config(
+                bot_ids=["bot1"],
+                monthly_validation_mode="shadow",
+                monthly_backtest_command=["python", "runner.py", "{manifest}"],
+                monthly_workflow_contract_path="MONTHLY_OPTIMIZER_WORKFLOW.md",
+                monthly_workflow_contract_version="monthly_optimizer_workflow_contract_v1",
+                monthly_strategy_plugin_contract_path="strategy_plugin_contract.json",
+            ),
+        )
+        enabled_job_keys = {spec.job_key for spec in enabled_app.state.scheduled_job_specs}
+        assert "lineage_audit" in enabled_job_keys
+        assert "market_data_sync" in enabled_job_keys
+        assert "monthly_validation" in enabled_job_keys
+        assert enabled_app.state.handlers._monthly_optimizer_sequence_enabled is True
+        assert enabled_app.state.handlers._monthly_backtest_command == ["python", "runner.py", "{manifest}"]
+        assert enabled_app.state.handlers._monthly_workflow_contract_path == "MONTHLY_OPTIMIZER_WORKFLOW.md"
+        assert (
+            enabled_app.state.handlers._monthly_workflow_contract_version
+            == "monthly_optimizer_workflow_contract_v1"
+        )
+        assert (
+            enabled_app.state.handlers._monthly_strategy_plugin_contract_path
+            == "strategy_plugin_contract.json"
+        )
+
     def test_uses_normalized_curated_data_dir(self, tmp_path):
         (tmp_path / "curated").mkdir()
         app = create_app(db_dir=str(tmp_path), config=_local_config())
@@ -304,16 +352,16 @@ class TestCreateAppWithConfig:
             allow_unauthenticated_local=True,
             agent_default_provider="zai_coding_plan",
             agent_default_model="glm-5",
-            wfo_agent_provider="claude_max",
-            wfo_agent_model="opus",
+            daily_agent_provider="claude_max",
+            daily_agent_model="opus",
         )
 
         app = create_app(db_dir=str(tmp_path), config=config)
 
         assert app.state.agent_preferences.default.provider == AgentProvider.ZAI_CODING_PLAN
         assert app.state.agent_preferences.default.model == "glm-5"
-        assert app.state.agent_preferences.overrides[AgentWorkflow.WFO].provider == AgentProvider.CLAUDE_MAX
-        assert app.state.agent_preferences.overrides[AgentWorkflow.WFO].model == "opus"
+        assert app.state.agent_preferences.overrides[AgentWorkflow.DAILY_ANALYSIS].provider == AgentProvider.CLAUDE_MAX
+        assert app.state.agent_preferences.overrides[AgentWorkflow.DAILY_ANALYSIS].model == "opus"
 
     def test_telegram_settings_router_registered_when_telegram_enabled(self, tmp_path):
         config = _local_config(telegram_bot_token="token", telegram_chat_id="123")

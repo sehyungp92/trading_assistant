@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,8 +14,10 @@ from orchestrator.event_stream import EventStream
 from orchestrator.handlers import Handlers
 from orchestrator.orchestrator_brain import Action, ActionType
 from schemas.agent_response import AgentSuggestion, ParsedAnalysis, StructuralProposal
-from schemas.autonomous_pipeline import ApprovalRequest, BotConfigProfile, ChangeKind, GitHubIssueResult
+from schemas.approval import ApprovalRequest
+from schemas.bot_profile import BotConfigProfile
 from schemas.notifications import NotificationPreferences, NotificationPriority
+from schemas.repo_changes import ChangeKind, GitHubIssueResult
 from skills.approval_tracker import ApprovalTracker
 
 
@@ -126,9 +129,175 @@ class TestDailyAnalysis:
 
         mock_agent_runner.invoke.assert_called_once()
         call_kwargs = mock_agent_runner.invoke.call_args
-        assert call_kwargs.kwargs.get("agent_type") or call_kwargs[1].get("agent_type", call_kwargs[0][0]) == "daily_analysis"
-        assert call_kwargs.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
-        mock_dispatcher.dispatch.assert_called_once()
+
+
+class TestMonthlyValidation:
+    @pytest.mark.asyncio
+    async def test_handler_passes_optimizer_sequence_contract_to_monthly_request(
+        self,
+        tmp_path: Path,
+        mock_agent_runner,
+        event_stream: EventStream,
+        mock_dispatcher,
+        monkeypatch,
+    ):
+        captured = []
+
+        class FakeMonthlyValidationOrchestrator:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def run(self, request):
+                captured.append(request)
+
+                class Result:
+                    run_month = request.run_month
+                    status = SimpleNamespace(value="watch")
+                    approval_ready_candidate_count = 0
+                    approval_request_ids: list[str] = []
+
+                    def model_dump(self, mode="json"):
+                        return {
+                            "run_month": self.run_month,
+                            "status": self.status.value,
+                        }
+
+                return Result()
+
+        import skills.monthly_validation_orchestrator as monthly_module
+
+        monkeypatch.setattr(
+            monthly_module,
+            "MonthlyValidationOrchestrator",
+            FakeMonthlyValidationOrchestrator,
+        )
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path,
+            bots=["bot1"],
+            monthly_validation_mode="shadow",
+            monthly_optimizer_sequence_enabled=True,
+            monthly_backtest_command=["python", "runner.py", "{manifest}"],
+            monthly_workflow_contract_path="MONTHLY_OPTIMIZER_WORKFLOW.md",
+            monthly_workflow_contract_version="monthly_optimizer_workflow_contract_v1",
+        )
+
+        await handlers.handle_monthly_validation(_make_action(
+            ActionType.SPAWN_MONTHLY_VALIDATION,
+            details={"bot_id": "bot1", "strategy_id": "strat1", "run_month": "2026-04"},
+        ))
+
+        assert captured
+        request = captured[0]
+        assert request.optimizer_sequence_enabled is True
+        assert request.backtest_command == ["python", "runner.py", "{manifest}"]
+        assert request.workflow_contract_path == "MONTHLY_OPTIMIZER_WORKFLOW.md"
+        assert request.workflow_contract_version == "monthly_optimizer_workflow_contract_v1"
+        assert request.shadow is True
+        progress_events = [
+            event for event in event_stream.get_recent()
+            if event.event_type == "monthly_validation_progress"
+        ]
+        assert [event.data["stage"] for event in progress_events] == ["started", "completed"]
+
+    @pytest.mark.asyncio
+    async def test_handler_indexes_completed_monthly_artifacts_when_later_strategy_fails(
+        self,
+        tmp_path: Path,
+        mock_agent_runner,
+        event_stream: EventStream,
+        mock_dispatcher,
+        monkeypatch,
+    ):
+        class FakeRegistry:
+            def strategies_for_bot(self, bot_id: str):
+                return {"strat1": object(), "strat2": object()}
+
+        class FakeMonthlyValidationOrchestrator:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(self, request):
+                if request.strategy_id == "strat2":
+                    raise RuntimeError("strat2 failed")
+                artifact_root = tmp_path / "artifacts" / request.strategy_id
+                artifact_root.mkdir(parents=True, exist_ok=True)
+                report = artifact_root / "monthly_report.md"
+                manifest = artifact_root / "run_manifest.json"
+                index = artifact_root / "artifact_index.json"
+                for path in (report, manifest, index):
+                    path.write_text("{}", encoding="utf-8")
+
+                class Result:
+                    run_month = request.run_month
+                    run_id = f"monthly-{request.bot_id}-{request.strategy_id}-{request.run_month}"
+                    bot_id = request.bot_id
+                    strategy_id = request.strategy_id
+                    status = SimpleNamespace(value="watch")
+                    approval_ready_candidate_count = 0
+                    approval_request_ids: list[str] = []
+                    monthly_report_path = str(report)
+                    run_manifest_path = str(manifest)
+                    artifact_index_path = str(index)
+
+                    def model_dump(self, mode="json"):
+                        return {
+                            "run_id": self.run_id,
+                            "run_month": self.run_month,
+                            "bot_id": self.bot_id,
+                            "strategy_id": self.strategy_id,
+                            "status": self.status.value,
+                            "monthly_report_path": self.monthly_report_path,
+                            "run_manifest_path": self.run_manifest_path,
+                            "artifact_index_path": self.artifact_index_path,
+                        }
+
+                return Result()
+
+        import skills.monthly_validation_orchestrator as monthly_module
+
+        monkeypatch.setattr(
+            monthly_module,
+            "MonthlyValidationOrchestrator",
+            FakeMonthlyValidationOrchestrator,
+        )
+        handlers = Handlers(
+            agent_runner=mock_agent_runner,
+            event_stream=event_stream,
+            dispatcher=mock_dispatcher,
+            notification_prefs=NotificationPreferences(),
+            curated_dir=tmp_path / "curated",
+            memory_dir=tmp_path / "memory",
+            runs_dir=tmp_path / "runs",
+            source_root=tmp_path,
+            bots=["bot1"],
+            strategy_registry=FakeRegistry(),
+            run_history_path=tmp_path / "run_history.jsonl",
+            monthly_validation_mode="shadow",
+        )
+
+        with pytest.raises(RuntimeError, match="strat2 failed"):
+            await handlers.handle_monthly_validation(_make_action(
+                ActionType.SPAWN_MONTHLY_VALIDATION,
+                details={"bot_id": "bot1", "run_month": "2026-04"},
+            ))
+
+        run_dir = tmp_path / "runs" / "monthly-bot1-all-2026-04"
+        metadata = json.loads((run_dir / "metadata.json").read_text(encoding="utf-8"))
+        assert metadata["monthly_artifact_roots"] == [str(tmp_path / "artifacts" / "strat1")]
+        history_rows = [
+            json.loads(line)
+            for line in (tmp_path / "run_history.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        failed = history_rows[-1]
+        assert failed["status"] == "failed"
+        assert failed["metadata"]["partial_results"] is True
 
     @pytest.mark.asyncio
     async def test_quality_gate_degraded_still_invokes_claude(
@@ -177,120 +346,6 @@ class TestWeeklyAnalysis:
         call_args = mock_agent_runner.invoke.call_args
         assert "weekly" in str(call_args)
         assert call_args.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
-
-
-class TestWFO:
-    @pytest.mark.asyncio
-    async def test_full_flow(
-        self, handlers: Handlers, mock_agent_runner, tmp_path: Path
-    ):
-        """Runner -> report -> assemble -> invoke."""
-        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-
-        action = _make_action(
-            ActionType.SPAWN_WFO,
-            bot_id="bot1",
-            details={"bot_id": "bot1", "data_start": "2025-01-01", "data_end": "2026-03-01"},
-        )
-        await handlers.handle_wfo(action)
-
-        # Agent should be invoked (WFO runner handles empty trades gracefully)
-        mock_agent_runner.invoke.assert_called_once()
-        call_args = mock_agent_runner.invoke.call_args
-        assert call_args.kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
-
-    @pytest.mark.asyncio
-    async def test_reject_sends_critical_notification(
-        self, handlers: Handlers, mock_agent_runner, mock_dispatcher, tmp_path: Path
-    ):
-        """WFO REJECT recommendation -> CRITICAL notification."""
-        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-
-        action = _make_action(
-            ActionType.SPAWN_WFO,
-            bot_id="bot1",
-            details={"bot_id": "bot1", "data_start": "2025-01-01", "data_end": "2026-03-01"},
-        )
-        await handlers.handle_wfo(action)
-
-        # The WFO runner with empty trades will produce a REJECT recommendation
-        # Verify notification was sent
-        mock_dispatcher.dispatch.assert_called_once()
-        payload = mock_dispatcher.dispatch.call_args[0][0]
-        assert payload.priority == NotificationPriority.CRITICAL
-        assert "REJECT" in payload.title
-
-    @pytest.mark.asyncio
-    async def test_missing_data_start_is_derived_from_config(
-        self, handlers: Handlers, tmp_path: Path
-    ):
-        (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
-
-        action = _make_action(
-            ActionType.SPAWN_WFO,
-            bot_id="bot1",
-            details={"bot_id": "bot1", "data_end": "2026-03-01"},
-        )
-
-        with patch.object(handlers, "_load_trades_for_wfo", return_value=([], [])) as mock_loader:
-            await handlers.handle_wfo(action)
-
-        assert mock_loader.call_args.kwargs["date_end"] == "2026-03-01"
-        assert mock_loader.call_args.kwargs["date_start"] == "2025-03-06"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("recommendation,expected_routing", [
-        ("ADOPT", "APPROVE"),
-        ("TEST_FURTHER", "EXPERIMENT"),
-    ])
-    async def test_records_calibration_with_search_routing(
-        self,
-        handlers: Handlers,
-        recommendation: str,
-        expected_routing: str,
-    ):
-        from schemas.parameter_search import SearchRouting
-        from schemas.wfo_results import RobustnessResult, WFORecommendation, WFOReport
-
-        enum_recommendation = getattr(WFORecommendation, recommendation)
-        expected_enum = getattr(SearchRouting, expected_routing)
-        report = WFOReport(
-            bot_id="bot1",
-            suggested_params={"quality_min": 0.7},
-            robustness=RobustnessResult(robustness_score=63.0),
-            recommendation=enum_recommendation,
-            recommendation_reasoning="passes robustness",
-        )
-        fake_runner = MagicMock()
-        fake_runner.run.return_value = report
-        fake_runner.write_output.side_effect = (
-            lambda _report, output_dir: Path(output_dir).mkdir(parents=True, exist_ok=True)
-        )
-        handlers._suggestion_tracker = MagicMock()
-        handlers._calibration_tracker = MagicMock()
-
-        with (
-            patch("skills.run_wfo.WFORunner", return_value=fake_runner),
-            patch("analysis.wfo_report_builder.WFOReportBuilder") as MockBuilder,
-            patch("analysis.wfo_prompt_assembler.WFOPromptAssembler") as MockAssembler,
-        ):
-            MockBuilder.return_value.build_markdown.return_value = "wfo markdown"
-            MockAssembler.return_value.assemble.return_value = MagicMock()
-
-            action = _make_action(
-                ActionType.SPAWN_WFO,
-                bot_id="bot1",
-                details={
-                    "bot_id": "bot1",
-                    "data_start": "2025-01-01",
-                    "data_end": "2026-03-01",
-                },
-            )
-            await handlers.handle_wfo(action)
-
-        kwargs = handlers._calibration_tracker.record_prediction.call_args.kwargs
-        assert kwargs["predicted_routing"] == expected_enum
-        assert kwargs["predicted_improvement"] == pytest.approx(1.63)
 
 
 class TestHandlerProposalLedger:

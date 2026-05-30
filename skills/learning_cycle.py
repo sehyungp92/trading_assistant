@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Callable
 
 from schemas.learning_ledger import LearningLedgerEntry
 from skills._outcome_utils import is_conclusive_outcome, is_positive_outcome
@@ -37,6 +38,9 @@ class LearningCycle:
         experiment_tracker=None,
         prediction_tracker=None,
         calibration_tracker=None,
+        learning_review_mode: str = "deterministic",
+        learning_review_disabled_workflows: list[str] | None = None,
+        learning_review_structured_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         self._curated_dir = curated_dir
         self._memory_dir = memory_dir
@@ -47,6 +51,9 @@ class LearningCycle:
         self._experiment_tracker = experiment_tracker
         self._prediction_tracker = prediction_tracker
         self._calibration_tracker = calibration_tracker
+        self._learning_review_mode = learning_review_mode
+        self._learning_review_disabled_workflows = list(learning_review_disabled_workflows or [])
+        self._learning_review_structured_reviewer = learning_review_structured_reviewer
 
     async def run(
         self, week_start: str, week_end: str,
@@ -116,6 +123,7 @@ class LearningCycle:
         provider_scores_count = 0
         generated_playbooks_count = 0
         harness_results_count = 0
+        learning_review_action_count = 0
 
         benchmark_suite = None
 
@@ -138,10 +146,29 @@ class LearningCycle:
 
         try:
             from skills.harness_eval_runner import HarnessEvalRunner
+            from skills.harness_execution_runner import HarnessExecutionRunner, load_execution_inputs
 
             if benchmark_suite is not None:
-                harness_results = HarnessEvalRunner(findings_dir).evaluate_and_save(benchmark_suite)
-                harness_results_count = len(harness_results)
+                case_dirs = _materialize_strict_harness_cases(
+                    findings_dir=findings_dir,
+                    benchmark_suite=benchmark_suite,
+                )
+                execution_inputs = load_execution_inputs(case_dirs)
+                executable_suite = _executable_benchmark_suite(
+                    benchmark_suite=benchmark_suite,
+                    execution_inputs=execution_inputs,
+                )
+                execution_runner = HarnessExecutionRunner(
+                    memory_dir=self._memory_dir,
+                    output_root=findings_dir / "harness_cases" / "executions",
+                )
+                if executable_suite.cases:
+                    harness_results = HarnessEvalRunner(findings_dir).evaluate_and_save(
+                        executable_suite,
+                        execution_runner=execution_runner,
+                        execution_inputs=execution_inputs,
+                    )
+                    harness_results_count = len(harness_results)
         except Exception:
             logger.exception("Failed to run harness evaluation")
 
@@ -152,6 +179,23 @@ class LearningCycle:
             generated_playbooks_count = len(generated_playbooks)
         except Exception:
             logger.exception("Failed to generate advisory playbooks")
+
+        try:
+            from skills.learning_review_orchestrator import LearningReviewOrchestrator
+
+            review = LearningReviewOrchestrator(
+                findings_dir,
+                review_mode=self._learning_review_mode,
+                runs_dir=self._runs_dir,
+                structured_reviewer=self._learning_review_structured_reviewer,
+                disabled_workflows=self._learning_review_disabled_workflows,
+            ).run(
+                week_start=week_start,
+                week_end=week_end,
+            )
+            learning_review_action_count = len(review.get("actions", []))
+        except Exception:
+            logger.exception("Failed to run post-cycle learning review")
 
         # 5. Select next experiments (max 2 per bot) and record them
         selected_experiments = self._select_next_experiments()
@@ -220,9 +264,9 @@ class LearningCycle:
             self._log_calibration_summary(week_start)
 
         logger.info(
-            "Learning cycle complete: net_improvement=%s, composite_deltas=%s, benchmarks=%d, provider_scores=%d, harness_results=%d, playbooks=%d",
+            "Learning cycle complete: net_improvement=%s, composite_deltas=%s, benchmarks=%d, provider_scores=%d, harness_results=%d, playbooks=%d, learning_review_actions=%d",
             net_improvement, composite_delta, benchmark_case_count, provider_scores_count,
-            harness_results_count, generated_playbooks_count,
+            harness_results_count, generated_playbooks_count, learning_review_action_count,
         )
 
         return entry
@@ -551,3 +595,39 @@ class LearningCycle:
         except Exception:
             logger.warning("Failed to load category overrides")
         return discarded
+
+
+def _materialize_strict_harness_cases(*, findings_dir: Path, benchmark_suite) -> list[Path]:
+    """Materialize only benchmark cases with strict, root-contained provenance."""
+    from skills.harness_case_materializer import (
+        HarnessCaseMaterializationError,
+        HarnessCaseMaterializer,
+    )
+
+    materializer = HarnessCaseMaterializer(findings_dir)
+    case_dirs: list[Path] = []
+    for case in getattr(benchmark_suite, "cases", []):
+        try:
+            case_dirs.append(materializer.materialize_case(case, strict=True))
+        except HarnessCaseMaterializationError as exc:
+            logger.warning(
+                "Skipping non-executable harness case %s: %s",
+                getattr(case, "case_id", "unknown"),
+                exc,
+            )
+    return case_dirs
+
+
+def _executable_benchmark_suite(*, benchmark_suite, execution_inputs):
+    """Return the benchmark subset that has strict materialized replay inputs."""
+    executable_case_ids = {
+        execution_input.case_id
+        for execution_input in execution_inputs
+        if getattr(execution_input, "case_id", "")
+    }
+    return benchmark_suite.model_copy(update={
+        "cases": [
+            case for case in getattr(benchmark_suite, "cases", [])
+            if getattr(case, "case_id", "") in executable_case_ids
+        ],
+    })

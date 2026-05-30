@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from schemas.autonomous_pipeline import PRResult
 from schemas.deployment_monitoring import (
     DeploymentMetricsSnapshot,
     DeploymentRecord,
     DeploymentStatus,
 )
 from schemas.notifications import NotificationPriority
+from schemas.repo_changes import PRResult
 from skills.deployment_monitor import DeploymentMonitor
 
 

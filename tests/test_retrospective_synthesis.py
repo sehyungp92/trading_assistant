@@ -478,28 +478,31 @@ class TestCategoryRecalibration:
 # ── Prompt Injection ──
 
 class TestPromptInjection:
-    def test_weekly_prompt_contains_synthesis_instructions(self):
-        from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
-
-        assert "LEARNING SYNTHESIS" in _FOCUSED_WEEKLY_INSTRUCTIONS
-        assert "what_worked" in _FOCUSED_WEEKLY_INSTRUCTIONS
-        assert "discard" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_daily_prompt_contains_blocked_approaches(self):
+    def test_daily_prompt_contains_feedback_loop_markers(self):
         from analysis.prompt_assembler import _FOCUSED_INSTRUCTIONS
 
-        assert "BLOCKED APPROACHES" in _FOCUSED_INSTRUCTIONS
+        for marker in [
+            "PREDICTION TRACK RECORD",
+            "accuracy < 50%",
+            "accuracy > 70%",
+            "GROUND TRUTH PERFORMANCE",
+            "BLOCKED APPROACHES",
+        ]:
+            assert marker in _FOCUSED_INSTRUCTIONS
 
-    def test_weekly_prompt_contains_ground_truth(self):
+    def test_weekly_prompt_contains_feedback_loop_markers(self):
         from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
 
-        assert "GROUND TRUTH PERFORMANCE" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_daily_prompt_contains_prediction_recalibration(self):
-        from analysis.prompt_assembler import _FOCUSED_INSTRUCTIONS
-
-        assert "PREDICTION TRACK RECORD" in _FOCUSED_INSTRUCTIONS
-        assert "accuracy < 50%" in _FOCUSED_INSTRUCTIONS
+        for marker in [
+            "PREDICTION TRACK RECORD",
+            "systematic biases",
+            "GROUND TRUTH PERFORMANCE",
+            "LEARNING SYNTHESIS",
+            "what_worked",
+            "discard",
+            "STRATEGY IDEAS",
+        ]:
+            assert marker in _FOCUSED_WEEKLY_INSTRUCTIONS
 
 
 # ── Context Builder Integration ──

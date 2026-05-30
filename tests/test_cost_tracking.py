@@ -58,7 +58,7 @@ class TestCostRecordSchema:
     def test_serialization_round_trip(self):
         rec = CostRecord(
             provider="codex_pro",
-            workflow="wfo",
+            workflow="monthly_validation",
             model="gpt-5.4",
             cost_usd=0.12,
             duration_ms=45000,
@@ -121,7 +121,7 @@ class TestCostTracker:
 
     def test_summary_aggregation(self, tracker: CostTracker):
         tracker.record(CostRecord(provider="claude_max", workflow="daily_analysis", cost_usd=0.05, duration_ms=5000, success=True))
-        tracker.record(CostRecord(provider="claude_max", workflow="wfo", cost_usd=0.15, duration_ms=30000, success=True))
+        tracker.record(CostRecord(provider="claude_max", workflow="monthly_validation", cost_usd=0.15, duration_ms=30000, success=True))
         tracker.record(CostRecord(provider="codex_pro", workflow="daily_analysis", cost_usd=0.08, duration_ms=8000, success=False))
 
         s = tracker.summary()
@@ -133,7 +133,7 @@ class TestCostTracker:
         assert abs(s.by_provider["claude_max"] - 0.20) < 1e-9
         assert abs(s.by_provider["codex_pro"] - 0.08) < 1e-9
         assert abs(s.by_workflow["daily_analysis"] - 0.13) < 1e-9
-        assert abs(s.by_workflow["wfo"] - 0.15) < 1e-9
+        assert abs(s.by_workflow["monthly_validation"] - 0.15) < 1e-9
 
     def test_summary_with_days_filter(self, tracker: CostTracker):
         old = CostRecord(
@@ -166,10 +166,10 @@ class TestCostTracker:
 
     def test_by_workflow(self, tracker: CostTracker):
         tracker.record(CostRecord(provider="claude_max", workflow="daily_analysis", cost_usd=0.10))
-        tracker.record(CostRecord(provider="claude_max", workflow="wfo", cost_usd=0.30))
+        tracker.record(CostRecord(provider="claude_max", workflow="monthly_validation", cost_usd=0.30))
         bw = tracker.by_workflow()
         assert abs(bw["daily_analysis"] - 0.10) < 1e-9
-        assert abs(bw["wfo"] - 0.30) < 1e-9
+        assert abs(bw["monthly_validation"] - 0.30) < 1e-9
 
     def test_malformed_line_skipped(self, tracker: CostTracker):
         tracker._path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,11 +265,11 @@ class TestAgentRunnerCostIntegration:
                 cost_usd=0.0, duration_ms=1000, effective_model="gpt-5.4",
                 error="Timeout",
             ),
-            "wfo",
+            "monthly_validation",
             "run-fail",
         )
         records = cost_tracker._load()
         assert len(records) == 1
         assert records[0].success is False
-        assert records[0].workflow == "wfo"
+        assert records[0].workflow == "monthly_validation"
         assert records[0].run_id == "run-fail"

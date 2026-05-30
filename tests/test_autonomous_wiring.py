@@ -175,6 +175,46 @@ class TestAppWiring:
         app = create_app(db_dir=str(tmp_path), config=config)
         assert app.state.autonomous_pipeline is None
 
+    def test_monthly_approval_gated_creates_shared_approval_without_autonomous(
+        self,
+        tmp_path: Path,
+    ):
+        """Monthly approval-gated mode gets approval plumbing without autonomous processing."""
+        config = AppConfig(
+            autonomous_enabled=False,
+            monthly_validation_mode="approval_gated",
+            allow_unauthenticated_local=True,
+        )
+        from orchestrator.app import create_app
+
+        app = create_app(db_dir=str(tmp_path), config=config)
+
+        assert app.state.autonomous_pipeline is None
+        assert app.state.approval_tracker is not None
+        assert app.state.approval_handler is not None
+
+    def test_monthly_approval_callbacks_register_without_autonomous(
+        self,
+        tmp_path: Path,
+    ):
+        """Telegram approval callbacks are shared infrastructure, not autonomous-only."""
+        config = AppConfig(
+            autonomous_enabled=False,
+            monthly_validation_mode="approval_gated",
+            telegram_bot_token="test_token",
+            telegram_chat_id="123",
+            allow_unauthenticated_local=True,
+        )
+        from orchestrator.app import create_app
+
+        app = create_app(db_dir=str(tmp_path), config=config)
+        router = app.state.telegram_callback_router
+
+        assert router is not None
+        assert "approve_suggestion_" in router.handlers
+        assert "reject_suggestion_" in router.handlers
+        assert "cmd_pending" in router.handlers
+
     def test_feature_flag_on_creates_components(self, tmp_path: Path):
         """When AUTONOMOUS_ENABLED is true, autonomous components are created."""
         # Create bot config files

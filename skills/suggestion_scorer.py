@@ -14,7 +14,11 @@ from pathlib import Path
 
 from schemas.agent_response import CATEGORY_TO_TIER
 from schemas.suggestion_scoring import CategoryScore, CategoryScorecard
-from skills._outcome_utils import is_conclusive_outcome, is_positive_outcome
+from skills._outcome_utils import (
+    is_authoritative_outcome,
+    is_conclusive_outcome,
+    is_positive_outcome,
+)
 
 
 # Build reverse mapping: tier → category, plus identity mappings for categories.
@@ -73,7 +77,7 @@ class SuggestionScorer:
             return 0.8
         return 1.0
 
-    def compute_scorecard(self) -> CategoryScorecard:
+    def compute_scorecard(self, *, authoritative_only: bool = False) -> CategoryScorecard:
         """Compute (bot_id, [strategy_id], category) win rates from outcomes.
 
         Emits two row variants per data point:
@@ -87,6 +91,8 @@ class SuggestionScorer:
         """
         suggestions = self._load_suggestions()
         outcomes = self._load_outcomes()
+        if authoritative_only:
+            outcomes = [outcome for outcome in outcomes if is_authoritative_outcome(outcome)]
         category_overrides = self._load_category_overrides()
 
         if not outcomes:
@@ -178,6 +184,10 @@ class SuggestionScorer:
             ))
 
         return CategoryScorecard(scores=scores)
+
+    def compute_authoritative_scorecard(self) -> CategoryScorecard:
+        """Scorecard built only from monthly/follow-up outcomes."""
+        return self.compute_scorecard(authoritative_only=True)
 
     def compute_regime_stratified_scores(self) -> dict[str, dict[str, float]]:
         """Compute win rates stratified by macro regime at implementation time.
@@ -402,9 +412,20 @@ class SuggestionScorer:
         """Extract PnL delta from outcome, supporting bot + portfolio schemas."""
         delta = outcome.get("pnl_delta")
         if delta is None:
-            delta = outcome.get("pnl_delta_7d")
+            delta = outcome.get("composite_delta")
         if delta is None:
-            delta = outcome.get("composite_delta", 0)
+            delta = outcome.get("objective_delta")
+        if delta is None:
+            delta = outcome.get("live_vs_expected_objective_delta")
+        if delta is None:
+            delta_30d = outcome.get("pnl_delta_30d")
+            delta_7d = outcome.get("pnl_delta_7d")
+            try:
+                delta = delta_30d if float(delta_30d) != 0.0 or delta_7d is None else delta_7d
+            except (TypeError, ValueError):
+                delta = delta_30d if delta_30d is not None else delta_7d
+        if delta is None:
+            delta = 0
         try:
             return float(delta)
         except (TypeError, ValueError):

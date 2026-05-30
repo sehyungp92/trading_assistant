@@ -45,6 +45,7 @@ class ScheduledJobSpec:
     hour: int | None = None
     minute: int | None = None
     day_of_week: str | None = None
+    day: int | None = None
     seconds: int | None = None
     misfire_grace_time: int | None = None
     coalesce: bool | None = None
@@ -79,9 +80,6 @@ class SchedulerConfig:
     weekly_analysis_day_of_week: str = "sun"
     weekly_analysis_hour: int = 8
     weekly_analysis_minute: int = 0
-    wfo_day_of_week: str = "sat"
-    wfo_hour: int = 2
-    wfo_minute: int = 0
     stale_error_sweep_interval_seconds: int = 600
     stale_event_recovery_interval_seconds: int = 900
     morning_scan_hour: int = 7
@@ -113,6 +111,14 @@ class SchedulerConfig:
     learning_cycle_day_of_week: str = "sun"
     learning_cycle_hour: int = 11
     learning_cycle_minute: int = 0
+    lineage_audit_hour: int = 6
+    lineage_audit_minute: int = 30
+    market_data_sync_day_of_month: int = 1
+    market_data_sync_hour: int = 1
+    market_data_sync_minute: int = 0
+    monthly_validation_day_of_month: int = 2
+    monthly_validation_hour: int = 3
+    monthly_validation_minute: int = 0
 
 
 def create_scheduler_jobs(
@@ -122,7 +128,6 @@ def create_scheduler_jobs(
     relay_fn: LegacyScheduledFn,
     daily_analysis_fn: LegacyScheduledFn | None = None,
     weekly_analysis_fn: LegacyScheduledFn | None = None,
-    wfo_fn: LegacyScheduledFn | None = None,
     stale_error_sweep_fn: LegacyScheduledFn | None = None,
     stale_event_recovery_fn: LegacyScheduledFn | None = None,
     morning_scan_fn: LegacyScheduledFn | None = None,
@@ -138,10 +143,13 @@ def create_scheduler_jobs(
     reliability_verification_fn: LegacyScheduledFn | None = None,
     discovery_fn: LegacyScheduledFn | None = None,
     learning_cycle_fn: LegacyScheduledFn | None = None,
+    lineage_audit_fn: LegacyScheduledFn | None = None,
+    market_data_sync_fn: LegacyScheduledFn | None = None,
+    monthly_validation_fn: LegacyScheduledFn | None = None,
     daily_analysis_fns: list[dict] | None = None,
     morning_scan_fns: list[dict] | None = None,
     evening_report_fns: list[dict] | None = None,
-    wfo_fns: list[dict] | None = None,
+    monthly_validation_fns: list[dict] | None = None,
 ) -> list[dict]:
     """Build legacy APScheduler-style job definitions."""
     jobs = [
@@ -196,31 +204,6 @@ def create_scheduler_jobs(
             "day_of_week": config.weekly_analysis_day_of_week,
             "hour": config.weekly_analysis_hour,
             "minute": config.weekly_analysis_minute,
-            "misfire_grace_time": 172800,
-            "coalesce": True,
-        })
-
-    if wfo_fns:
-        for i, trigger_def in enumerate(wfo_fns):
-            suffix = trigger_def.get("name_suffix", str(i))
-            jobs.append({
-                "name": f"wfo_{suffix}",
-                "func": trigger_def["fn"],
-                "trigger": "cron",
-                "day_of_week": trigger_def.get("day_of_week", config.wfo_day_of_week),
-                "hour": trigger_def.get("hour", config.wfo_hour),
-                "minute": trigger_def.get("minute", config.wfo_minute),
-                "misfire_grace_time": trigger_def.get("misfire_grace_time", 172800),
-                "coalesce": trigger_def.get("coalesce", True),
-            })
-    elif wfo_fn is not None:
-        jobs.append({
-            "name": "wfo",
-            "func": wfo_fn,
-            "trigger": "cron",
-            "day_of_week": config.wfo_day_of_week,
-            "hour": config.wfo_hour,
-            "minute": config.wfo_minute,
             "misfire_grace_time": 172800,
             "coalesce": True,
         })
@@ -405,6 +388,54 @@ def create_scheduler_jobs(
             "coalesce": True,
         })
 
+    if lineage_audit_fn is not None:
+        jobs.append({
+            "name": "lineage_audit",
+            "func": lineage_audit_fn,
+            "trigger": "cron",
+            "hour": config.lineage_audit_hour,
+            "minute": config.lineage_audit_minute,
+            "misfire_grace_time": 43200,
+            "coalesce": True,
+        })
+
+    if market_data_sync_fn is not None:
+        jobs.append({
+            "name": "market_data_sync",
+            "func": market_data_sync_fn,
+            "trigger": "cron",
+            "day": config.market_data_sync_day_of_month,
+            "hour": config.market_data_sync_hour,
+            "minute": config.market_data_sync_minute,
+            "misfire_grace_time": 172800,
+            "coalesce": True,
+        })
+
+    if monthly_validation_fns:
+        for i, trigger_def in enumerate(monthly_validation_fns):
+            suffix = trigger_def.get("name_suffix", str(i))
+            jobs.append({
+                "name": f"monthly_validation_{suffix}",
+                "func": trigger_def["fn"],
+                "trigger": "cron",
+                "day": trigger_def.get("day", config.monthly_validation_day_of_month),
+                "hour": trigger_def.get("hour", config.monthly_validation_hour),
+                "minute": trigger_def.get("minute", config.monthly_validation_minute),
+                "misfire_grace_time": trigger_def.get("misfire_grace_time", 172800),
+                "coalesce": trigger_def.get("coalesce", True),
+            })
+    elif monthly_validation_fn is not None:
+        jobs.append({
+            "name": "monthly_validation",
+            "func": monthly_validation_fn,
+            "trigger": "cron",
+            "day": config.monthly_validation_day_of_month,
+            "hour": config.monthly_validation_hour,
+            "minute": config.monthly_validation_minute,
+            "misfire_grace_time": 172800,
+            "coalesce": True,
+        })
+
     return jobs
 
 
@@ -415,7 +446,6 @@ def build_scheduled_job_specs(
     relay_fn: TrackedScheduledFn,
     daily_analysis_fn: TrackedScheduledFn | None = None,
     weekly_analysis_fn: TrackedScheduledFn | None = None,
-    wfo_fn: TrackedScheduledFn | None = None,
     stale_error_sweep_fn: TrackedScheduledFn | None = None,
     stale_event_recovery_fn: TrackedScheduledFn | None = None,
     morning_scan_fn: TrackedScheduledFn | None = None,
@@ -431,10 +461,13 @@ def build_scheduled_job_specs(
     reliability_verification_fn: TrackedScheduledFn | None = None,
     discovery_fn: TrackedScheduledFn | None = None,
     learning_cycle_fn: TrackedScheduledFn | None = None,
+    lineage_audit_fn: TrackedScheduledFn | None = None,
+    market_data_sync_fn: TrackedScheduledFn | None = None,
+    monthly_validation_fn: TrackedScheduledFn | None = None,
     daily_analysis_fns: list[dict] | None = None,
     morning_scan_fns: list[dict] | None = None,
     evening_report_fns: list[dict] | None = None,
-    wfo_fns: list[dict] | None = None,
+    monthly_validation_fns: list[dict] | None = None,
 ) -> list[ScheduledJobSpec]:
     """Build the tracked job model used by APScheduler and startup catch-up."""
     specs = [
@@ -492,22 +525,6 @@ def build_scheduled_job_specs(
         default_coalesce=True,
         awaits_completion=True,
     )
-    _append_cron_specs(
-        specs,
-        base_name="wfo",
-        job_key="wfo",
-        job_class=ScheduledJobClass.STATEFUL,
-        catchup_limit=4,
-        default_fn=wfo_fn,
-        default_day_of_week=config.wfo_day_of_week,
-        default_hour=config.wfo_hour,
-        default_minute=config.wfo_minute,
-        default_misfire_grace_time=172800,
-        default_coalesce=True,
-        variant_fns=wfo_fns,
-        awaits_completion=True,
-    )
-
     _append_interval_spec(
         specs,
         name="stale_error_sweep",
@@ -673,6 +690,46 @@ def build_scheduled_job_specs(
         default_misfire_grace_time=172800,
         default_coalesce=True,
     )
+    _append_cron_specs(
+        specs,
+        base_name="lineage_audit",
+        job_key="lineage_audit",
+        job_class=ScheduledJobClass.COALESCED,
+        catchup_limit=1,
+        default_fn=lineage_audit_fn,
+        default_hour=config.lineage_audit_hour,
+        default_minute=config.lineage_audit_minute,
+        default_misfire_grace_time=43200,
+        default_coalesce=True,
+    )
+    _append_cron_specs(
+        specs,
+        base_name="market_data_sync",
+        job_key="market_data_sync",
+        job_class=ScheduledJobClass.STATEFUL,
+        catchup_limit=1,
+        default_fn=market_data_sync_fn,
+        default_day=config.market_data_sync_day_of_month,
+        default_hour=config.market_data_sync_hour,
+        default_minute=config.market_data_sync_minute,
+        default_misfire_grace_time=172800,
+        default_coalesce=True,
+    )
+    _append_cron_specs(
+        specs,
+        base_name="monthly_validation",
+        job_key="monthly_validation",
+        job_class=ScheduledJobClass.STATEFUL,
+        catchup_limit=1,
+        default_fn=monthly_validation_fn,
+        default_day=config.monthly_validation_day_of_month,
+        default_hour=config.monthly_validation_hour,
+        default_minute=config.monthly_validation_minute,
+        default_misfire_grace_time=172800,
+        default_coalesce=True,
+        variant_fns=monthly_validation_fns,
+        awaits_completion=True,
+    )
 
     return specs
 
@@ -682,6 +739,13 @@ def latest_cron_occurrence(spec: ScheduledJobSpec, now: datetime) -> datetime | 
         return None
 
     now = _ensure_utc(now)
+    if spec.day is not None:
+        candidate = _monthly_candidate(now.year, now.month, spec.day, spec.hour, spec.minute)
+        if candidate > now:
+            year, month = _previous_month(now.year, now.month)
+            candidate = _monthly_candidate(year, month, spec.day, spec.hour, spec.minute)
+        return candidate
+
     if spec.day_of_week is None:
         candidate = datetime(
             now.year,
@@ -714,6 +778,9 @@ def latest_cron_occurrence(spec: ScheduledJobSpec, now: datetime) -> datetime | 
 def previous_cron_occurrence(spec: ScheduledJobSpec, occurrence: datetime) -> datetime | None:
     if not spec.is_cron:
         return None
+    if spec.day is not None:
+        year, month = _previous_month(occurrence.year, occurrence.month)
+        return _monthly_candidate(year, month, spec.day, spec.hour or 0, spec.minute or 0)
     delta = timedelta(days=7 if spec.day_of_week else 1)
     return _ensure_utc(occurrence) - delta
 
@@ -751,6 +818,8 @@ def job_specs_to_scheduler_jobs(
             job["seconds"] = spec.seconds
         if spec.day_of_week is not None:
             job["day_of_week"] = spec.day_of_week
+        if spec.day is not None:
+            job["day"] = spec.day
         if spec.hour is not None:
             job["hour"] = spec.hour
         if spec.minute is not None:
@@ -848,6 +917,7 @@ def _append_cron_specs(
     default_hour: int | None = None,
     default_minute: int | None = None,
     default_day_of_week: str | None = None,
+    default_day: int | None = None,
     default_misfire_grace_time: int | None = None,
     default_coalesce: bool | None = None,
     variant_fns: list[dict] | None = None,
@@ -864,6 +934,7 @@ def _append_cron_specs(
                 execute=trigger_def["fn"],
                 scope_key=trigger_def.get("scope_key", suffix),
                 day_of_week=trigger_def.get("day_of_week", default_day_of_week),
+                day=trigger_def.get("day", default_day),
                 hour=trigger_def.get("hour", default_hour),
                 minute=trigger_def.get("minute", default_minute),
                 misfire_grace_time=trigger_def.get(
@@ -887,6 +958,7 @@ def _append_cron_specs(
         job_class=job_class,
         execute=default_fn,
         day_of_week=default_day_of_week,
+        day=default_day,
         hour=default_hour,
         minute=default_minute,
         misfire_grace_time=default_misfire_grace_time,
@@ -907,3 +979,16 @@ def _weekday_value(raw: str) -> int:
     if key not in _WEEKDAY_INDEX:
         raise ValueError(f"Unsupported day_of_week value: {raw!r}")
     return _WEEKDAY_INDEX[key]
+
+
+def _previous_month(year: int, month: int) -> tuple[int, int]:
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def _monthly_candidate(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
+    import calendar
+
+    clamped_day = min(max(1, day), calendar.monthrange(year, month)[1])
+    return datetime(year, month, clamped_day, hour, minute, tzinfo=timezone.utc)

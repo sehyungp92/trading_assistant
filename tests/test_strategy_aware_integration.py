@@ -769,15 +769,13 @@ class TestRegimeParameterSearchIntegration:
         assert results[0]["regime_sensitivity"] == 0.45
 
     def test_workflow_priorities_include_regime_parameter_analysis(self):
-        """regime_parameter_analysis is in default, weekly_analysis, and wfo priority lists."""
+        """regime_parameter_analysis is in default and weekly_analysis priority lists."""
         from analysis.context_builder import ContextBuilder
 
         default = ContextBuilder._CONTEXT_PRIORITY
         weekly = ContextBuilder._WORKFLOW_PRIORITIES["weekly_analysis"]
-        wfo = ContextBuilder._WORKFLOW_PRIORITIES["wfo"]
         assert "regime_parameter_analysis" in default
         assert "regime_parameter_analysis" in weekly
-        assert "regime_parameter_analysis" in wfo
 
 
 # ---------------------------------------------------------------------------

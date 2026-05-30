@@ -8,13 +8,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from schemas.autonomous_pipeline import (
-    ApprovalRequest,
-    ChangeKind,
-    FileChange,
-    ParameterDefinition,
-    RepoRiskTier,
-)
+from schemas.approval import ApprovalRequest, RepoRiskTier
+from schemas.parameter_definition import ParameterDefinition
+from schemas.repo_changes import ChangeKind, FileChange
 from schemas.experiments import ExperimentType
 from schemas.parameter_search import SearchRouting
 from skills.approval_tracker import ApprovalTracker

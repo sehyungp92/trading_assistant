@@ -76,3 +76,28 @@ class EmailRenderer:
         if payload.priority == NotificationPriority.CRITICAL:
             return f"🚨 CRITICAL: {payload.title}"
         return payload.title
+
+    def render_approval_request(self, request) -> str:
+        lines = [
+            f"Bot: {request.bot_id}",
+            f"Kind: {request.change_kind.value}",
+            f"Risk: {request.risk_tier.value}",
+        ]
+        if getattr(request, "strategy_id", ""):
+            lines.append(f"Strategy: {request.strategy_id}")
+        if getattr(request, "monthly_run_id", ""):
+            lines.append(f"Monthly run: {request.monthly_run_id}")
+        if getattr(request, "summary", ""):
+            lines.append(request.summary)
+        if getattr(request, "objective_deltas", None):
+            deltas = ", ".join(
+                f"{key}={value:+.3f}"
+                for key, value in list(request.objective_deltas.items())[:5]
+            )
+            lines.append(f"Objective deltas: {deltas}")
+        if getattr(request, "rollback_plan", ""):
+            lines.append(f"Rollback: {request.rollback_plan}")
+        if getattr(request, "evidence_paths", None):
+            lines.append(f"Evidence paths: {len(request.evidence_paths)}")
+        body_html = _body_to_html("\n\n".join(lines))
+        return _wrap_html(getattr(request, "title", "") or "Approval Request", body_html)

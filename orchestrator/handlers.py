@@ -1,16 +1,18 @@
-"""Handler implementations — wire worker action types to full pipelines.
+"""Handler implementations - wire worker action types to full pipelines.
 
 Each handler implements: data preparation -> prompt assembly -> agent invocation
 -> post-processing -> notification dispatch.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import hashlib
 import math
 import statistics
-from datetime import datetime, timedelta, timezone
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +39,66 @@ if TYPE_CHECKING:
 # Days with fewer trades get a deterministic summary instead.
 _MIN_TRADES_FOR_ANALYSIS = 3
 _INSTRUMENTATION_READINESS_THRESHOLD = 0.4  # warn when a bot's overall readiness is below this
+
+
+def _bool_detail(details: dict, key: str, default: bool) -> bool:
+    if key not in details:
+        return default
+    value = details.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list | tuple):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _optional_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    return Path(text) if text else None
+
+
+def _monthly_stage_status_for_result(result) -> dict:
+    artifact_index_path = str(getattr(result, "artifact_index_path", "") or "")
+    if not artifact_index_path:
+        return {}
+    path = Path(artifact_index_path).parent / "runner_observability.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    entries = payload if isinstance(payload, list) else [payload]
+    for entry in reversed(entries):
+        if isinstance(entry, dict) and isinstance(entry.get("monthly_stage_status"), dict):
+            return entry["monthly_stage_status"]
+    return {}
+
+
+def _optional_date(value: object) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _positive_int(value: object, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 class Handlers:
@@ -78,6 +140,18 @@ class Handlers:
         proposal_ledger: object | None = None,
         calibration_tracker: object | None = None,
         scheduled_run_store: object | None = None,
+        market_data_root: Path | str = "",
+        backtest_repo_path: Path | str = "",
+        backtest_artifact_root: Path | str = "",
+        monthly_validation_mode: str = "disabled",
+        monthly_optimizer_sequence_enabled: bool = True,
+        monthly_backtest_command: list[str] | None = None,
+        monthly_workflow_contract_path: str = "",
+        monthly_workflow_contract_version: str = "",
+        monthly_strategy_plugin_contract_path: str = "",
+        market_data_required_coverage_ratio: float = 0.95,
+        telemetry_required_lineage_ratio: float = 0.95,
+        backtest_command_timeout_seconds: int = 3600,
     ) -> None:
         self._agent_runner = agent_runner
         self._event_stream = event_stream
@@ -115,6 +189,27 @@ class Handlers:
         self._proposal_ledger = proposal_ledger
         self._calibration_tracker = calibration_tracker
         self._scheduled_run_store = scheduled_run_store
+        self._market_data_root = (
+            Path(market_data_root)
+            if str(market_data_root)
+            else self._runs_dir.parent / "market_data"
+        )
+        backtest_repo_raw = str(backtest_repo_path).strip()
+        self._backtest_repo_path = Path(backtest_repo_raw) if backtest_repo_raw else ""
+        self._backtest_artifact_root = (
+            Path(backtest_artifact_root)
+            if str(backtest_artifact_root)
+            else self._runs_dir.parent / "backtest_artifacts"
+        )
+        self._monthly_validation_mode = monthly_validation_mode
+        self._monthly_optimizer_sequence_enabled = monthly_optimizer_sequence_enabled
+        self._monthly_backtest_command = list(monthly_backtest_command or [])
+        self._monthly_workflow_contract_path = monthly_workflow_contract_path
+        self._monthly_workflow_contract_version = monthly_workflow_contract_version
+        self._monthly_strategy_plugin_contract_path = monthly_strategy_plugin_contract_path
+        self._market_data_required_coverage_ratio = market_data_required_coverage_ratio
+        self._telemetry_required_lineage_ratio = telemetry_required_lineage_ratio
+        self._backtest_command_timeout_seconds = backtest_command_timeout_seconds
 
     async def _signal_scheduled_result(
         self,
@@ -177,7 +272,7 @@ class Handlers:
             for bot in bots:
                 avail = ContextBuilder.check_data_availability(index, bot, date)
                 if avail["has_curated"] is False:
-                    logger.warning("No curated data for %s on %s — analysis may be incomplete", bot, date)
+                    logger.warning("No curated data for %s on %s - analysis may be incomplete", bot, date)
 
             # Quality gate
             from analysis.quality_gate import QualityGate
@@ -200,7 +295,7 @@ class Handlers:
                 await self._notify(
                     notification_type="daily_report_blocked",
                     priority=NotificationPriority.LOW,
-                    title=f"Daily report {date} — blocked",
+                    title=f"Daily report {date} - blocked",
                     body=f"Quality gate blocked: {', '.join(checklist.blocking_issues)}",
                 )
                 return
@@ -217,7 +312,7 @@ class Handlers:
             total_trades = self._count_daily_trades(date)
             if total_trades < _MIN_TRADES_FOR_ANALYSIS:
                 logger.info(
-                    "Only %d trades on %s (min %d) — producing deterministic summary",
+                    "Only %d trades on %s (min %d) - producing deterministic summary",
                     total_trades, date, _MIN_TRADES_FOR_ANALYSIS,
                 )
                 completeness = getattr(checklist, "data_completeness", 0.0)
@@ -240,7 +335,7 @@ class Handlers:
                 await self._notify(
                     notification_type="daily_report",
                     priority=NotificationPriority.LOW,
-                    title=f"Daily Summary — {date} (light day)",
+                    title=f"Daily Summary - {date} (light day)",
                     body=body,
                 )
                 scheduled_success = True
@@ -255,7 +350,7 @@ class Handlers:
                 "run_id": run_id, "stage": "quality_gate", "handler": "daily_analysis",
             })
 
-            # Strategy registry drift check — surface mismatches between YAML and live code.
+            # Strategy registry drift check - surface mismatches between YAML and live code.
             self._check_strategy_registry_drift(run_id)
 
             # Run deterministic triage to identify significant events
@@ -264,7 +359,7 @@ class Handlers:
 
             ctx = ContextBuilder(self._memory_dir, curated_dir=self._curated_dir)
 
-            # Instrumentation readiness check — warn (never block) for under-instrumented bots
+            # Instrumentation readiness check - warn (never block) for under-instrumented bots
             try:
                 readiness = ctx.load_instrumentation_readiness(bots)
                 low_readiness_bots = {
@@ -348,7 +443,7 @@ class Handlers:
                 if not parsed.parse_success:
                     logger.warning("No structured output block found in %s response", run_id)
                 elif parsed.fallback_used:
-                    logger.info("Fallback markdown extraction used for %s — structured block was missing", run_id)
+                    logger.info("Fallback markdown extraction used for %s - structured block was missing", run_id)
 
                 # Validate and annotate response
                 final_report, validation = self._validate_and_annotate(
@@ -380,7 +475,7 @@ class Handlers:
                         approved_suggestions=parsed.suggestions,
                         approved_predictions=parsed.predictions,
                     )
-                    logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
+                    logger.warning("Validation failed for %s - recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
                 agent_suggestion_ids = self._record_agent_suggestions(
@@ -437,14 +532,14 @@ class Handlers:
                 await self._notify(
                     notification_type="daily_report",
                     priority=NotificationPriority.NORMAL,
-                    title=f"{title_prefix}Daily Report — {date}",
+                    title=f"{title_prefix}Daily Report - {date}",
                     body=body_prefix + final_report[:2000],
                 )
             else:
                 await self._notify(
                     notification_type="daily_report_error",
                     priority=NotificationPriority.HIGH,
-                    title=f"Daily report {date} — error",
+                    title=f"Daily report {date} - error",
                     body=f"Agent failed: {result.error}",
                 )
 
@@ -468,6 +563,217 @@ class Handlers:
                 success=scheduled_success,
                 error=scheduled_error,
             )
+
+    async def handle_monthly_validation(self, action: Action) -> None:
+        """Run Phase-1 monthly validation in shadow/fail-closed mode."""
+        details = action.details or {}
+        bot_id = details.get("bot_id") or action.bot_id
+        strategy_id = details.get("strategy_id", "")
+        run_month = details.get("run_month", "")
+        run_label = run_month or "latest"
+        run_id = f"monthly-{bot_id}-{strategy_id or 'all'}-{run_label}"
+        start_time = datetime.now(timezone.utc)
+        self._record_run(run_id, "monthly_validation", "running", started_at=start_time.isoformat())
+        scheduled_success = False
+        scheduled_error = ""
+        results = []
+        try:
+            if strategy_id:
+                strategies = [strategy_id]
+            elif self._strategy_registry is not None:
+                lookup = getattr(self._strategy_registry, "strategies_for_bot", None)
+                strategies = list(lookup(bot_id).keys()) if callable(lookup) else []
+            else:
+                strategies = []
+            if not strategies:
+                strategies = [bot_id]
+
+            from skills.monthly_validation_orchestrator import (
+                MonthlyValidationOrchestrator,
+                MonthlyValidationRequest,
+            )
+
+            orchestrator = MonthlyValidationOrchestrator(
+                curated_dir=self._curated_dir,
+                findings_dir=self._memory_dir / "findings",
+                market_data_root=self._market_data_root,
+                backtest_repo_path=self._backtest_repo_path,
+                backtest_artifact_root=self._backtest_artifact_root,
+                required_market_coverage_ratio=self._market_data_required_coverage_ratio,
+                required_lineage_ratio=self._telemetry_required_lineage_ratio,
+                timeout_seconds=self._backtest_command_timeout_seconds,
+                proposal_ledger=self._proposal_ledger,
+                approval_tracker=self._approval_tracker,
+                model_review_invoker=self._monthly_model_review_invoker(),
+            )
+            for sid in strategies:
+                self._event_stream.broadcast("monthly_validation_progress", {
+                    "bot_id": bot_id,
+                    "strategy_id": sid,
+                    "run_month": run_month,
+                    "stage": "started",
+                })
+                result = await asyncio.to_thread(
+                    orchestrator.run,
+                    MonthlyValidationRequest(
+                        bot_id=bot_id,
+                        strategy_id=sid,
+                        run_month=run_month,
+                        strategy_version=str(details.get("strategy_version", "")),
+                        config_version=str(details.get("config_version", "")),
+                        deployment_id=str(details.get("deployment_id", "")),
+                        parameter_set_id=str(details.get("parameter_set_id", "")),
+                        market_data_manifest_path=_optional_path(details.get("market_data_manifest_path")),
+                        telemetry_manifest_path=_optional_path(details.get("telemetry_manifest_path")),
+                        backtest_command=(
+                            _string_list(details.get("backtest_command"))
+                            or self._monthly_backtest_command
+                            or None
+                        ),
+                        optimizer_sequence_enabled=_bool_detail(
+                            details,
+                            "optimizer_sequence_enabled",
+                            self._monthly_optimizer_sequence_enabled,
+                        ),
+                        in_sample_start=_optional_date(details.get("in_sample_start")),
+                        in_sample_end=_optional_date(details.get("in_sample_end")),
+                        strategy_plugin_id=str(details.get("strategy_plugin_id", "")),
+                        strategy_plugin_contract_path=(
+                            _optional_path(details.get("strategy_plugin_contract_path"))
+                            or _optional_path(self._monthly_strategy_plugin_contract_path)
+                        ),
+                        round_id=str(details.get("round_id", "")),
+                        prior_round_id=str(details.get("prior_round_id", "")),
+                        next_round_id=str(details.get("next_round_id", "")),
+                        round_n_strategy_config_path=str(details.get("round_n_strategy_config_path", "")),
+                        round_n_strategy_config_version=str(details.get("round_n_strategy_config_version", "")),
+                        round_n_portfolio_config_path=str(details.get("round_n_portfolio_config_path", "")),
+                        round_n_portfolio_config_version=str(details.get("round_n_portfolio_config_version", "")),
+                        trading_repo_path=str(details.get("trading_repo_path", "")),
+                        trading_repo_branch=str(details.get("trading_repo_branch", "")),
+                        trading_repo_commit_sha=str(details.get("trading_repo_commit_sha", "")),
+                        workflow_contract_path=(
+                            str(details.get("workflow_contract_path", ""))
+                            or self._monthly_workflow_contract_path
+                        ),
+                        workflow_contract_version=(
+                            str(details.get("workflow_contract_version", ""))
+                            or self._monthly_workflow_contract_version
+                        ),
+                        max_workers=_positive_int(details.get("max_workers"), default=2),
+                        shadow=_bool_detail(
+                            details,
+                            "shadow",
+                            self._monthly_validation_mode != "approval_gated",
+                        ),
+                    ),
+                )
+                results.append(result)
+                self._event_stream.broadcast("monthly_validation_progress", {
+                    "bot_id": bot_id,
+                    "strategy_id": sid,
+                    "run_month": result.run_month,
+                    "status": result.status.value,
+                    "approval_ready_candidate_count": result.approval_ready_candidate_count,
+                    "approval_request_ids": result.approval_request_ids,
+                    "monthly_stage_status": _monthly_stage_status_for_result(result),
+                    "stage": "completed",
+                })
+
+            finished_at = datetime.now(timezone.utc)
+            elapsed = int((finished_at - start_time).total_seconds() * 1000)
+            artifact_index_run_dir = self._write_monthly_artifact_index(
+                run_id=run_id,
+                started_at=start_time.isoformat(),
+                finished_at=finished_at.isoformat(),
+                results=results,
+            )
+            self._record_run(
+                run_id,
+                "monthly_validation",
+                "completed",
+                started_at=start_time.isoformat(),
+                finished_at=finished_at.isoformat(),
+                duration_ms=elapsed,
+                metadata={
+                    "results": [r.model_dump(mode="json") for r in results],
+                    "artifact_index_run_dir": str(artifact_index_run_dir),
+                },
+            )
+            scheduled_success = True
+        except Exception as exc:
+            scheduled_error = str(exc)
+            finished_at = datetime.now(timezone.utc)
+            elapsed = int((finished_at - start_time).total_seconds() * 1000)
+            metadata = None
+            if results:
+                try:
+                    artifact_index_run_dir = self._write_monthly_artifact_index(
+                        run_id=run_id,
+                        started_at=start_time.isoformat(),
+                        finished_at=finished_at.isoformat(),
+                        results=results,
+                    )
+                    metadata = {
+                        "results": [r.model_dump(mode="json") for r in results],
+                        "artifact_index_run_dir": str(artifact_index_run_dir),
+                        "partial_results": True,
+                    }
+                except Exception:
+                    logger.warning("Failed to write partial monthly artifact index for %s", run_id)
+            self._record_run(
+                run_id,
+                "monthly_validation",
+                "failed",
+                started_at=start_time.isoformat(),
+                finished_at=finished_at.isoformat(),
+                duration_ms=elapsed,
+                error=scheduled_error,
+                metadata=metadata,
+            )
+            logger.exception("Monthly validation handler failed for %s", run_id)
+            raise
+        finally:
+            await self._signal_scheduled_result(
+                action,
+                success=scheduled_success,
+                error=scheduled_error,
+            )
+
+    def _monthly_model_review_invoker(self):
+        """Return a sync bridge used by the threaded monthly orchestrator."""
+        from skills.monthly_model_review_runner import MonthlyModelReviewInvocationResult
+
+        loop = asyncio.get_running_loop()
+        timeout_seconds = max(60, min(self._backtest_command_timeout_seconds, 1800))
+
+        def _invoke(prompt_package, run_id: str):
+            future = asyncio.run_coroutine_threadsafe(
+                self._agent_runner.invoke(
+                    agent_type="monthly_model_review",
+                    prompt_package=prompt_package,
+                    run_id=run_id,
+                    allowed_tools=[],
+                ),
+                loop,
+            )
+            try:
+                result = future.result(timeout=timeout_seconds)
+            except FutureTimeoutError as exc:
+                future.cancel()
+                raise TimeoutError(
+                    f"monthly model review timed out after {timeout_seconds}s"
+                ) from exc
+            if not result.success:
+                raise RuntimeError(result.error or "monthly model review failed")
+            return MonthlyModelReviewInvocationResult(
+                response=result.response,
+                provider=result.provider,
+                model=result.effective_model,
+                runtime=result.runtime,
+            )
+
+        return _invoke
 
     async def handle_weekly_analysis(self, action: Action) -> None:
         """Run the weekly analysis pipeline: metrics -> strategy -> simulations -> assemble -> invoke -> notify."""
@@ -622,7 +928,7 @@ class Handlers:
                         "Portfolio detectors produced %d suggestions", len(portfolio_suggestions),
                     )
             except Exception:
-                logger.warning("Portfolio detectors failed — skipping", exc_info=True)
+                logger.warning("Portfolio detectors failed - skipping", exc_info=True)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "strategy_engine", "handler": "weekly_analysis",
@@ -764,7 +1070,7 @@ class Handlers:
             if suggestion_ids:
                 package.metadata["suggestion_ids"] = suggestion_ids
 
-            # Weekly retrospective — compare last week's predictions to actual outcomes
+            # Weekly retrospective - compare last week's predictions to actual outcomes
             retro_builder = None
             try:
                 from skills.retrospective_builder import RetrospectiveBuilder
@@ -778,7 +1084,7 @@ class Handlers:
                 if retrospective.predictions_reviewed > 0:
                     package.data["weekly_retrospective"] = retrospective.model_dump(mode="json")
             except Exception:
-                logger.warning("Retrospective builder failed — skipping")
+                logger.warning("Retrospective builder failed - skipping")
 
             # Build retrospective synthesis (keep/discard verdicts for dynamic prompt evolution)
             try:
@@ -809,7 +1115,7 @@ class Handlers:
                     except Exception:
                         logger.warning("Category recalibration failed")
             except Exception:
-                logger.warning("Retrospective synthesis failed — skipping")
+                logger.warning("Retrospective synthesis failed - skipping")
 
             # Record forecast data and compute meta-analysis
             try:
@@ -850,7 +1156,7 @@ class Handlers:
                 if meta.weeks_analyzed > 0:
                     package.data["forecast_meta_analysis"] = meta.model_dump(mode="json")
             except Exception:
-                logger.error("Forecast tracking failed — skipping", exc_info=True)
+                logger.error("Forecast tracking failed - skipping", exc_info=True)
 
             # Inject outcome-derived lessons into learning ledger
             try:
@@ -872,7 +1178,7 @@ class Handlers:
             except Exception:
                 logger.debug("Outcome-derived lesson injection failed")
 
-            # Correction pattern extraction — surface recurring human correction patterns
+            # Correction pattern extraction - surface recurring human correction patterns
             try:
                 from skills.correction_pattern_extractor import CorrectionPatternExtractor
 
@@ -911,9 +1217,9 @@ class Handlers:
                         except Exception:
                             logger.debug("Correction lesson synthesis failed")
             except Exception:
-                logger.error("Correction pattern extraction failed — skipping", exc_info=True)
+                logger.error("Correction pattern extraction failed - skipping", exc_info=True)
 
-            # Structural hypotheses — JSONL-backed library with adaptive lifecycle
+            # Structural hypotheses - JSONL-backed library with adaptive lifecycle
             try:
                 from skills.hypothesis_library import HypothesisLibrary
 
@@ -957,7 +1263,7 @@ class Handlers:
                 if merged:
                     package.data["structural_hypotheses"] = merged
             except Exception:
-                logger.error("Hypothesis library matching failed — skipping", exc_info=True)
+                logger.error("Hypothesis library matching failed - skipping", exc_info=True)
 
             # Cross-bot transfer proposals
             try:
@@ -997,7 +1303,7 @@ class Handlers:
                             ),
                         )
             except Exception:
-                logger.error("Transfer proposal building failed — skipping", exc_info=True)
+                logger.error("Transfer proposal building failed - skipping", exc_info=True)
 
             self._event_stream.broadcast("handler_progress", {
                 "run_id": run_id, "stage": "prompt_assembly", "handler": "weekly_analysis",
@@ -1029,7 +1335,7 @@ class Handlers:
                 if not parsed.parse_success:
                     logger.warning("No structured output block found in %s response", run_id)
                 elif parsed.fallback_used:
-                    logger.info("Fallback markdown extraction used for %s — structured block was missing", run_id)
+                    logger.info("Fallback markdown extraction used for %s - structured block was missing", run_id)
 
                 # Validate and annotate response
                 final_report, validation = self._validate_and_annotate(
@@ -1062,7 +1368,7 @@ class Handlers:
                         approved_predictions=parsed.predictions,
                         approved_portfolio_proposals=parsed.portfolio_proposals,
                     )
-                    logger.warning("Validation failed for %s — recording unvalidated suggestions", run_id)
+                    logger.warning("Validation failed for %s - recording unvalidated suggestions", run_id)
 
                 # Record approved agent suggestions to tracker
                 weekly_agent_ids = self._record_agent_suggestions(
@@ -1114,7 +1420,7 @@ class Handlers:
                 await self._notify(
                     notification_type="weekly_report",
                     priority=NotificationPriority.NORMAL,
-                    title=f"Weekly Report — {week_start} to {week_end}",
+                    title=f"Weekly Report - {week_start} to {week_end}",
                     body=final_report[:2000],
                 )
 
@@ -1131,255 +1437,6 @@ class Handlers:
                 "week_start": week_start,
                 "error": str(exc),
             })
-            scheduled_error = str(exc)
-        finally:
-            await self._signal_scheduled_result(
-                action,
-                success=scheduled_success,
-                error=scheduled_error,
-            )
-
-    async def handle_wfo(self, action: Action) -> None:
-        """Run the WFO pipeline: runner -> report -> assemble -> invoke -> notify."""
-        details = action.details or {}
-        bot_id = details.get("bot_id", action.bot_id)
-        data_end = details.get("data_end", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
-        run_id = f"wfo-{bot_id}-{data_end}"
-        start_time = datetime.now(timezone.utc)
-        self._record_run(run_id, "wfo", "running", started_at=start_time.isoformat())
-        scheduled_success = False
-        scheduled_error = ""
-
-        try:
-            self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "started", "handler": "wfo",
-            })
-
-            from schemas.wfo_config import WFOConfig
-            from skills.run_wfo import WFORunner
-            from analysis.wfo_report_builder import WFOReportBuilder
-            from analysis.wfo_prompt_assembler import WFOPromptAssembler
-
-            # Load WFO config
-            from schemas.wfo_config import ParameterSpace
-
-            config_path = self._curated_dir.parent / "wfo_configs" / f"{bot_id}.yaml"
-            if config_path.exists():
-                import yaml
-                config = WFOConfig(**yaml.safe_load(config_path.read_text()))
-            else:
-                config = WFOConfig(
-                    bot_id=bot_id,
-                    parameter_space=ParameterSpace(bot_id=bot_id),
-                )
-
-            self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "config_load", "handler": "wfo",
-            })
-
-            # Load trades from curated data (filtered by date range)
-            data_start = details.get("data_start", "")
-            if not data_start:
-                required_span_days = (
-                    config.in_sample_days
-                    + config.out_of_sample_days
-                    + config.step_days * (config.min_folds - 1)
-                )
-                data_start = (
-                    datetime.strptime(data_end, "%Y-%m-%d") - timedelta(days=required_span_days)
-                ).strftime("%Y-%m-%d")
-            trades, missed = self._load_trades_for_wfo(bot_id, date_start=data_start, date_end=data_end)
-
-            # Run WFO pipeline
-            runner = WFORunner(config)
-            report = runner.run(trades, missed, data_start, data_end)
-
-            self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "wfo_run", "handler": "wfo",
-            })
-
-            # Write output
-            output_dir = self._runs_dir / run_id
-            runner.write_output(report, output_dir)
-
-            self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "report_build", "handler": "wfo",
-            })
-
-            # Build markdown report
-            markdown = WFOReportBuilder().build_markdown(report)
-            (output_dir / "wfo_report.md").write_text(markdown, encoding="utf-8")
-
-            # Assemble prompt for provider review
-            assembler = WFOPromptAssembler(
-                bot_id=bot_id,
-                memory_dir=self._memory_dir,
-                wfo_output_dir=output_dir,
-            )
-            package = assembler.assemble(session_store=self._agent_runner.session_store)
-
-            self._event_stream.broadcast("handler_progress", {
-                "run_id": run_id, "stage": "agent_invocation", "handler": "wfo",
-            })
-
-            # Invoke the configured agent runtime
-            result = await self._agent_runner.invoke(
-                agent_type="wfo",
-                prompt_package=package,
-                run_id=run_id,
-                max_turns=3,
-                allowed_tools=["Read", "Grep", "Glob"],
-            )
-
-            self._event_stream.broadcast("wfo_complete", {
-                "bot_id": bot_id,
-                "recommendation": report.recommendation.value,
-                "success": result.success,
-            })
-
-            # Notify — CRITICAL if REJECT
-            from schemas.wfo_results import WFORecommendation
-
-            priority = (
-                NotificationPriority.CRITICAL
-                if report.recommendation == WFORecommendation.REJECT
-                else NotificationPriority.NORMAL
-            )
-            await self._notify(
-                notification_type="wfo_report",
-                priority=priority,
-                title=f"WFO {bot_id} — {report.recommendation.value.upper()}",
-                body=result.response[:2000] if result.success else markdown[:2000],
-            )
-
-            # Record WFO ADOPT/TEST_FURTHER recommendations as suggestions
-            if (
-                self._suggestion_tracker
-                and report.recommendation != WFORecommendation.REJECT
-            ):
-                try:
-                    from schemas.suggestion_tracking import SuggestionRecord, SuggestionStatus
-                    # data_end already in scope from handle_wfo (line 1043)
-                    raw_id = f"wfo:{bot_id}:{data_end}:{report.recommendation.value}"
-                    suggestion_id = hashlib.sha256(raw_id.encode()).hexdigest()[:16]
-                    robustness_score = 0.0
-                    if hasattr(report, "robustness") and report.robustness is not None:
-                        robustness_score = getattr(report.robustness, "robustness_score", 0.0)
-                    confidence = min(robustness_score / 100.0, 1.0)
-                    suggested_params = getattr(report, "suggested_params", None) or {}
-                    affected_params = list(suggested_params.keys())
-                    title = f"WFO {report.recommendation.value}: {bot_id}"
-                    proposal_id = self._ledger_write_candidate(
-                        source="wfo",
-                        kind_hint="parameter_change",
-                        bot_id=bot_id,
-                        title=title,
-                        description=getattr(report, "recommendation_reasoning", "") or "",
-                        suggestion_id=suggestion_id,
-                        run_id=run_id,
-                        evaluation_method="wfo",
-                        affected_parameters=affected_params,
-                    )
-                    record = SuggestionRecord(
-                        suggestion_id=suggestion_id,
-                        bot_id=bot_id,
-                        tier="parameter",
-                        category="wfo_optimization",
-                        title=title,
-                        description=getattr(report, "recommendation_reasoning", "") or "",
-                        confidence=confidence,
-                        status=SuggestionStatus.PROPOSED,
-                        source_report_id=run_id,
-                        proposal_id=proposal_id or None,
-                        implementation_context={
-                            "current_params": getattr(report, "current_params", None) or {},
-                            "suggested_params": suggested_params,
-                            "robustness_score": robustness_score,
-                            "safety_flags": [f.value if hasattr(f, "value") else str(f) for f in (getattr(report, "safety_flags", None) or [])],
-                        },
-                    )
-                    self._suggestion_tracker.record(record)
-
-                    # Record an evaluation event reflecting the WFO recommendation
-                    decision = (
-                        "approve"
-                        if report.recommendation == WFORecommendation.ADOPT
-                        else "experiment"
-                    )
-                    self._ledger_write_evaluation(
-                        proposal_id=proposal_id,
-                        method="wfo",
-                        decision=decision,
-                        decision_reason=getattr(report, "recommendation_reasoning", "") or "",
-                        objective_score=float(robustness_score),
-                        confidence=confidence,
-                        summary=f"WFO recommendation: {report.recommendation.value}",
-                    )
-
-                    # Feed prediction side of calibration loop (outcome side already
-                    # wired in auto_outcome_measurer). getattr keeps tests using
-                    # Handlers.__new__() resilient.
-                    calibration_tracker = getattr(self, "_calibration_tracker", None)
-                    if calibration_tracker is not None:
-                        try:
-                            from schemas.parameter_search import SearchRouting
-                            calibration_tracker.record_prediction(
-                                suggestion_id=suggestion_id,
-                                bot_id=bot_id,
-                                param_category="wfo_optimization",
-                                predicted_improvement=1.0 + (float(robustness_score) / 100.0),
-                                predicted_routing=(
-                                    SearchRouting.APPROVE
-                                    if report.recommendation == WFORecommendation.ADOPT
-                                    else SearchRouting.EXPERIMENT
-                                ),
-                            )
-                        except Exception:
-                            logger.warning(
-                                "Failed to record WFO calibration prediction for %s",
-                                suggestion_id, exc_info=True,
-                            )
-
-                    if self._event_stream:
-                        self._event_stream.broadcast("wfo_suggestion_recorded", {
-                            "suggestion_id": suggestion_id,
-                            "bot_id": bot_id,
-                            "recommendation": report.recommendation.value,
-                        })
-                    logger.info("Recorded WFO suggestion %s for %s", suggestion_id, bot_id)
-                except Exception:
-                    logger.warning("Failed to record WFO suggestion for %s", bot_id, exc_info=True)
-
-            finished_at = datetime.now(timezone.utc)
-            status = "completed" if result.success else "failed"
-            scheduled_success = result.success
-            scheduled_error = result.error if not result.success else ""
-            self._record_run(
-                run_id,
-                "wfo",
-                status,
-                started_at=start_time.isoformat(),
-                finished_at=finished_at.isoformat(),
-                duration_ms=int((finished_at - start_time).total_seconds() * 1000),
-                error=scheduled_error,
-            )
-
-        except Exception as exc:
-            logger.exception("WFO handler failed for %s", run_id)
-            self._event_stream.broadcast("wfo_error", {
-                "bot_id": bot_id,
-                "error": str(exc),
-            })
-            finished_at = datetime.now(timezone.utc)
-            self._record_run(
-                run_id,
-                "wfo",
-                "failed",
-                started_at=start_time.isoformat(),
-                finished_at=finished_at.isoformat(),
-                duration_ms=int((finished_at - start_time).total_seconds() * 1000),
-                error=str(exc),
-            )
             scheduled_error = str(exc)
         finally:
             await self._signal_scheduled_result(
@@ -1899,7 +1956,8 @@ class Handlers:
         ):
             return False
 
-        from schemas.autonomous_pipeline import ApprovalRequest, ChangeKind, RepoRiskTier
+        from schemas.approval import ApprovalRequest, RepoRiskTier
+        from schemas.repo_changes import ChangeKind
         from skills.repo_change_guard import RepoChangeGuard
 
         profile = self._config_registry.get_profile(triage_result.error_event.bot_id)
@@ -2016,7 +2074,7 @@ class Handlers:
         if repair_proposal is None or self._pr_builder is None or self._config_registry is None:
             return False
 
-        from schemas.autonomous_pipeline import GitHubIssueRequest
+        from schemas.repo_changes import GitHubIssueRequest
 
         profile = self._config_registry.get_profile(triage_result.error_event.bot_id)
         if profile is None:
@@ -2094,7 +2152,7 @@ class Handlers:
 
     @staticmethod
     def _permission_tier_to_risk(permission_tier) -> str:
-        from schemas.autonomous_pipeline import RepoRiskTier
+        from schemas.approval import RepoRiskTier
         from schemas.permissions import PermissionTier
 
         if permission_tier == PermissionTier.AUTO:
@@ -2278,6 +2336,13 @@ class Handlers:
             hypothesis_tr = ctx.load_hypothesis_track_record()
             prediction_accuracy = ctx.load_prediction_accuracy()
             recalibrations = ctx.load_recalibrations()
+            if isinstance(bot_ids, str):
+                prior_bot_id = bot_ids
+            elif isinstance(bot_ids, list) and len(bot_ids) == 1:
+                prior_bot_id = bot_ids[0]
+            else:
+                prior_bot_id = ""
+            outcome_priors = ctx.load_outcome_priors(bot_id=prior_bot_id)
 
             # Load current macro regime for confidence adjustment
             macro_regime_ctx = ctx.load_macro_regime_context()
@@ -2290,6 +2355,7 @@ class Handlers:
                 hypothesis_track_record=hypothesis_tr,
                 prediction_accuracy=prediction_accuracy,
                 recalibrations=recalibrations,
+                outcome_priors=outcome_priors,
                 current_macro_regime=current_macro_regime,
                 strategy_registry=self._strategy_registry,
             )
@@ -2361,7 +2427,7 @@ class Handlers:
 
             return final_report, validation
         except Exception:
-            logger.warning("Response validation failed — using raw report")
+            logger.warning("Response validation failed - using raw report")
             return parsed.raw_report, None
 
     def _persist_validator_notes(self, run_dir: Path, validation_result) -> None:
@@ -2653,8 +2719,7 @@ class Handlers:
 
                 family_equity: dict[str, list[float]] = {}
                 for fam, daily_list in family_snapshots.items():
-                    # Convert daily PnL to cumulative equity curve —
-                    # _drawdown_series() computes drawdown from peak and
+                    # Convert daily PnL to cumulative equity curve - # _drawdown_series() computes drawdown from peak and
                     # expects an equity curve, not individual daily values.
                     family_equity[fam] = list(accumulate(
                         s.get("total_net_pnl", 0.0) for s in daily_list
@@ -2693,7 +2758,7 @@ class Handlers:
                 )
                 return
         except Exception:
-            logger.warning("Portfolio deployment count check failed — proceeding cautiously")
+            logger.warning("Portfolio deployment count check failed - proceeding cautiously")
 
         for idx, proposal in enumerate(proposals):
             ptype = getattr(proposal, "proposal_type", "unknown")
@@ -2730,11 +2795,11 @@ class Handlers:
                         what_if_result = what_if.evaluate(proposed)
                     if what_if_result and what_if_result.get("calmar_delta", 0) < 0:
                         logger.info(
-                            "What-if shows negative Calmar delta for allocation proposal — skipping",
+                            "What-if shows negative Calmar delta for allocation proposal - skipping",
                         )
                         continue
                 except Exception:
-                    logger.warning("Portfolio what-if failed — recording without it")
+                    logger.warning("Portfolio what-if failed - recording without it")
 
             raw = f"{run_id}:portfolio:{idx}:{ptype_str}"
             suggestion_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
@@ -2794,7 +2859,7 @@ class Handlers:
                 proposal_type=proposal_type,
             )
             if not last_date:
-                return True  # No history — allow
+                return True  # No history - allow
 
             last_dt = datetime.fromisoformat(last_date.replace("Z", "+00:00"))
             if last_dt.tzinfo is None:
@@ -2808,7 +2873,7 @@ class Handlers:
                 return False
             return True
         except Exception:
-            logger.warning("Portfolio cadence check failed — allowing proposal")
+            logger.warning("Portfolio cadence check failed - allowing proposal")
             return True
 
     def _load_family_pnl_for_what_if(self, lookback_days: int = 60) -> dict[str, list[float]]:
@@ -2843,8 +2908,8 @@ class Handlers:
         """Load per-family trade-level data for enriched what-if analysis.
 
         Scans curated directories for trades.jsonl files, groups trades by
-        family using strategy_registry bot_id → family mapping.
-        Returns family_name → list[TradeEvent].
+        family using strategy_registry bot_id - family mapping.
+        Returns family_name - list[TradeEvent].
         """
         from datetime import timedelta as _td_trades
         from schemas.events import TradeEvent
@@ -2852,7 +2917,7 @@ class Handlers:
         if not self._strategy_registry:
             return {}
 
-        # Build bot_id → family mapping
+        # Build bot_id - family mapping
         bot_to_family: dict[str, str] = {}
         for _sid, profile in self._strategy_registry.strategies.items():
             if profile.bot_id and profile.family:
@@ -3134,7 +3199,7 @@ class Handlers:
         poor track records (win_rate < 0.3, sample_size >= 5) to prevent
         category leakage when scorecard was unavailable during build_report().
 
-        Returns a mapping of suggestion_id → title for metadata injection.
+        Returns a mapping of suggestion_id - title for metadata injection.
         """
         if not self._suggestion_tracker or not suggestions:
             return {}
@@ -3265,12 +3330,12 @@ class Handlers:
     ) -> dict[str, str]:
         """Record approved suggestions from validation into SuggestionTracker.
 
-        Maps AgentSuggestion → SuggestionRecord with deterministic IDs and hypothesis linking.
+        Maps AgentSuggestion - SuggestionRecord with deterministic IDs and hypothesis linking.
         Only approved (not blocked) suggestions are recorded. ``source`` controls
-        the ProposalSource label written to the unified ledger — daily handlers
+        the ProposalSource label written to the unified ledger - daily handlers
         should pass ``"llm_daily"``.
 
-        Returns a mapping of suggestion_id → title.
+        Returns a mapping of suggestion_id - title.
         """
         if validation_result is None:
             return {}
@@ -3356,7 +3421,7 @@ class Handlers:
                         suggestion_id, val_result.evidence.improvement_pct,
                     )
             except Exception:
-                logger.warning("Suggestion validation failed for %s — recording anyway", suggestion_id)
+                logger.warning("Suggestion validation failed for %s - recording anyway", suggestion_id)
 
             structural_context = structural_context_map.get(suggestion_id)
             if structural_context is None:
@@ -3517,14 +3582,14 @@ class Handlers:
                 run_id=run_id,
             )
         except Exception:
-            logger.exception("Autonomous pipeline failed — analysis unaffected")
+            logger.exception("Autonomous pipeline failed - analysis unaffected")
 
     def _check_strategy_registry_drift(self, run_id: str) -> None:
         """Compare data/strategy_profiles.yaml against live reference dirs.
 
         Records the diff to memory/findings/strategy_registry_drift.jsonl so
         ContextBuilder can surface it in subsequent prompts. Drift never blocks
-        the run — it's purely informational.
+        the run - it's purely informational.
         """
         try:
             from orchestrator.strategy_registry_loader import load_strategy_registry
@@ -3570,6 +3635,71 @@ class Handlers:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             logger.warning("Failed to write run history for %s", run_id)
+
+    def _write_monthly_artifact_index(
+        self,
+        *,
+        run_id: str,
+        started_at: str,
+        finished_at: str,
+        results: list,
+    ) -> Path:
+        """Register scheduled monthly artifacts where learning review scans runs."""
+
+        run_dir = self._runs_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        result_payloads = [result.model_dump(mode="json") for result in results]
+        artifact_roots: list[str] = []
+        seen_roots: set[str] = set()
+        for result in results:
+            for path in (
+                getattr(result, "monthly_report_path", ""),
+                getattr(result, "run_manifest_path", ""),
+                getattr(result, "artifact_index_path", ""),
+            ):
+                if not str(path):
+                    continue
+                root = str(Path(path).parent)
+                if root not in seen_roots:
+                    seen_roots.add(root)
+                    artifact_roots.append(root)
+        stage_statuses: list[dict] = []
+        for root in artifact_roots:
+            observability_path = Path(root) / "runner_observability.json"
+            if not observability_path.exists():
+                continue
+            try:
+                payload = json.loads(observability_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            entries = payload if isinstance(payload, list) else [payload]
+            for entry in entries:
+                if isinstance(entry, dict) and isinstance(entry.get("monthly_stage_status"), dict):
+                    stage_statuses.append({
+                        "artifact_root": root,
+                        "monthly_stage_status": entry["monthly_stage_status"],
+                    })
+        metadata = {
+            "agent_type": "monthly_validation",
+            "workflow": "monthly_validation",
+            "run_id": run_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "bot_id": getattr(results[0], "bot_id", "") if len(results) == 1 else "",
+            "strategy_id": getattr(results[0], "strategy_id", "") if len(results) == 1 else "",
+            "monthly_artifact_roots": artifact_roots,
+            "monthly_stage_status": stage_statuses,
+            "results": result_payloads,
+        }
+        (run_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, default=str),
+            encoding="utf-8",
+        )
+        (run_dir / "monthly_validation_results.json").write_text(
+            json.dumps(result_payloads, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return run_dir
 
     async def _notify(
         self,
@@ -3679,7 +3809,7 @@ class Handlers:
             for bot_id in self._bots:
                 trades, missed = self._load_trades_for_week(bot_id, week_start, week_end)
 
-                # FilterSensitivity — needs missed opportunities
+                # FilterSensitivity - needs missed opportunities
                 if missed:
                     try:
                         analyzer = FilterSensitivityAnalyzer(bot_id=bot_id, date=week_start)
@@ -3688,7 +3818,7 @@ class Handlers:
                     except Exception:
                         logger.warning("FilterSensitivity failed for %s", bot_id)
 
-                # Counterfactual — needs trades or missed
+                # Counterfactual - needs trades or missed
                 if trades or missed:
                     try:
                         regime = regime_hints.get(bot_id, "ranging")
@@ -3697,7 +3827,7 @@ class Handlers:
                     except Exception:
                         logger.warning("Counterfactual failed for %s", bot_id)
 
-                # ExitStrategy sweep — test all 12 default configs
+                # ExitStrategy sweep - test all 12 default configs
                 if trades:
                     try:
                         sweep_results = exit_sim.sweep(trades)
@@ -3714,7 +3844,7 @@ class Handlers:
                     except Exception:
                         logger.warning("ExitStrategy sweep failed for %s", bot_id)
 
-                # FilterInteraction — analyze filter pair co-activation patterns
+                # FilterInteraction - analyze filter pair co-activation patterns
                 if trades or missed:
                     try:
                         from skills.filter_interaction_analyzer import FilterInteractionAnalyzer
@@ -3727,7 +3857,7 @@ class Handlers:
                         logger.warning("FilterInteraction failed for %s", bot_id)
 
         except Exception:
-            logger.warning("Simulation skills import failed — skipping simulations")
+            logger.warning("Simulation skills import failed - skipping simulations")
 
         return results
 
@@ -3858,7 +3988,7 @@ class Handlers:
                 )
 
         except Exception:
-            logger.warning("Allocation analyses failed — skipping")
+            logger.warning("Allocation analyses failed - skipping")
 
         return results
 
@@ -4811,7 +4941,7 @@ class Handlers:
                     exc_info=True,
                 )
 
-        # ── Portfolio-level curated files ──────────────────────────────
+        # ?? Portfolio-level curated files ??????????????????????????????
         try:
             from schemas.daily_metrics import BotDailySummary
             from skills.build_daily_metrics import (
@@ -5057,56 +5187,6 @@ class Handlers:
                     pass
         return count
 
-    def _load_trades_for_wfo(
-        self, bot_id: str, date_start: str = "", date_end: str = "",
-    ) -> tuple:
-        """Load trade and missed opportunity events for WFO from curated data.
-
-        Scans curated_dir/YYYY-MM-DD/bot_id/ for trades.jsonl and missed.jsonl.
-        If date_start/date_end are provided, only directories within that range are loaded.
-        Returns (trades, missed) tuple of lists.
-        """
-        from schemas.events import TradeEvent, MissedOpportunityEvent
-
-        trades: list[TradeEvent] = []
-        missed: list[MissedOpportunityEvent] = []
-
-        if not self._curated_dir.exists():
-            return ([], [])
-
-        for date_dir in sorted(self._curated_dir.iterdir()):
-            if not date_dir.is_dir():
-                continue
-            dir_name = date_dir.name
-            if date_start and dir_name < date_start:
-                continue
-            if date_end and dir_name > date_end:
-                continue
-            bot_dir = date_dir / bot_id
-            if not bot_dir.is_dir():
-                continue
-
-            trades_file = bot_dir / "trades.jsonl"
-            if trades_file.exists():
-                for line in trades_file.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        try:
-                            trades.append(TradeEvent(**json.loads(line)))
-                        except Exception:
-                            logger.warning("Bad trade record in %s", trades_file)
-
-            missed_file = bot_dir / "missed.jsonl"
-            if missed_file.exists():
-                for line in missed_file.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        try:
-                            missed.append(MissedOpportunityEvent(**json.loads(line)))
-                        except Exception:
-                            logger.warning("Bad missed opp record in %s", missed_file)
-
-        logger.info("Loaded %d trades, %d missed for WFO bot %s", len(trades), len(missed), bot_id)
-        return (trades, missed)
-
     async def _check_deployments(self) -> None:
         """Periodic deployment monitoring check."""
         if not self._deployment_monitor:
@@ -5156,19 +5236,45 @@ class Handlers:
                                 deployment.suggestion_id,
                                 deployment_id=deployment.deployment_id,
                             )
+                        try:
+                            from skills.strategy_change_ledger import StrategyChangeLedger
+
+                            request = (
+                                self._approval_tracker.get_by_id(deployment.approval_request_id)
+                                if self._approval_tracker is not None
+                                else None
+                            )
+                            StrategyChangeLedger(self._memory_dir / "findings").record_deployment_writeback(
+                                record_id=(
+                                    request.strategy_change_record_id
+                                    if request is not None else ""
+                                ),
+                                approval_request_id=deployment.approval_request_id,
+                                deployment_id=deployment.deployment_id,
+                                pr_url=deployment.pr_url,
+                                commit_sha=deployment.code_sha or "",
+                                deployed_at=latest_hb,
+                                config_version=deployment.config_version or "",
+                                strategy_version=deployment.strategy_version or "",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to write deployment lineage for %s",
+                                deployment.deployment_id,
+                            )
                         logger.info(
                             "Deployment %s confirmed by heartbeat, monitoring started",
                             deployment.deployment_id,
                         )
                     elif self._deployment_monitor.check_merged_timeout(deployment.deployment_id):
                         logger.warning(
-                            "Deployment %s timed out waiting for heartbeat — STALE",
+                            "Deployment %s timed out waiting for heartbeat - STALE",
                             deployment.deployment_id,
                         )
                         await self._notify(
                             notification_type="alert",
                             priority=NotificationPriority.HIGH,
-                            title=f"Deployment Stale — {deployment.bot_id}",
+                            title=f"Deployment Stale - {deployment.bot_id}",
                             body=(
                                 f"Deployment {deployment.deployment_id} merged but no heartbeat "
                                 f"received within 6 hours. Check bot status."
@@ -5182,7 +5288,7 @@ class Handlers:
                         )
                     if self._deployment_monitor.check_monitoring_window_expired(deployment.deployment_id):
                         logger.info(
-                            "Deployment %s monitoring complete — no regression",
+                            "Deployment %s monitoring complete - no regression",
                             deployment.deployment_id,
                         )
                     elif self._deployment_monitor.check_regression(deployment.deployment_id):
@@ -5197,7 +5303,7 @@ class Handlers:
                         await self._notify(
                             notification_type="alert",
                             priority=NotificationPriority.CRITICAL,
-                            title=f"Regression Detected — {deployment.bot_id}",
+                            title=f"Regression Detected - {deployment.bot_id}",
                             body=(
                                 f"Deployment {deployment.deployment_id} shows regression.\n"
                                 f"Details: {record.regression_details if record else 'unknown'}\n"

@@ -34,7 +34,7 @@ class TestTelegramControlPanel:
             daily_report_ready=True,
             alert_count=1,
             alert_summary="Bot3 volume filter",
-            wfo_status="Bot2 running (est. 45min)",
+            monthly_validation_status="Bot2 package ready",
             pending_pr_count=0,
             risk_status="OK",
             risk_detail="concentration: 35/100",
@@ -71,8 +71,9 @@ class TestTelegramControlPanel:
         text = TelegramRenderer().render_control_panel(panel)
         assert "\u2705" in text
         assert "\u26a0\ufe0f" in text
-        assert "\U0001f9ea" in text
+        assert "Monthly validation" in text
         assert "\U0001f6e1\ufe0f" in text
+        assert "WFO" not in text
 
     def test_returns_keyboard_markup(self):
         panel = self._make_panel()
@@ -186,7 +187,7 @@ class TestTelegramAgentSettings:
         return AgentPreferencesView(
             default=AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="sonnet"),
             overrides={
-                AgentWorkflow.WFO: AgentSelection(
+                AgentWorkflow.TRIAGE: AgentSelection(
                     provider=AgentProvider.CODEX_PRO,
                     model="gpt-5.4",
                 ),
@@ -200,13 +201,17 @@ class TestTelegramAgentSettings:
                     provider=AgentProvider.CLAUDE_MAX,
                     model="sonnet",
                 ),
-                AgentWorkflow.WFO: AgentSelection(
-                    provider=AgentProvider.CODEX_PRO,
-                    model="gpt-5.4",
-                ),
-                AgentWorkflow.TRIAGE: AgentSelection(
+                AgentWorkflow.MONTHLY_VALIDATION: AgentSelection(
                     provider=AgentProvider.CLAUDE_MAX,
                     model="sonnet",
+                ),
+                AgentWorkflow.MONTHLY_MODEL_REVIEW: AgentSelection(
+                    provider=AgentProvider.CLAUDE_MAX,
+                    model="sonnet",
+                ),
+                AgentWorkflow.TRIAGE: AgentSelection(
+                    provider=AgentProvider.CODEX_PRO,
+                    model="gpt-5.4",
                 ),
             },
             providers=[
@@ -240,12 +245,16 @@ class TestTelegramAgentSettings:
 
         assert "Agent Settings" in text
         assert "Global: Claude Max (sonnet)" in text
-        assert "WFO: Codex Pro (gpt-5.4) (override)" in text
+        assert "Triage: Codex Pro (gpt-5.4) (override)" in text
+        assert "WFO" not in text
         assert "ZAI_API_KEY is not configured" in text
         button_labels = [btn["text"] for row in keyboard for btn in row]
         assert "Global" in button_labels
         assert "Daily" in button_labels
+        assert "Monthly" in button_labels
+        assert "Model Review" in button_labels
         assert "Triage" in button_labels
+        assert "WFO" not in button_labels
 
     def test_renders_global_scope_buttons(self):
         text, keyboard = TelegramRenderer().render_agent_settings(self._view(), scope="global")
@@ -260,12 +269,12 @@ class TestTelegramAgentSettings:
     def test_renders_workflow_scope_with_use_global(self):
         text, keyboard = TelegramRenderer().render_agent_settings(
             self._view(),
-            scope=AgentWorkflow.WFO,
+            scope=AgentWorkflow.TRIAGE,
         )
 
-        assert "Agent Settings - WFO" in text
+        assert "Agent Settings - Triage" in text
         assert "Effective: Codex Pro (gpt-5.4)" in text
         assert "Override: Codex Pro (gpt-5.4)" in text
         callback_values = [btn["callback_data"] for row in keyboard for btn in row]
-        assert "agent_settings_set_wfo|codex_pro" in callback_values
-        assert "agent_settings_clear_wfo" in callback_values
+        assert "agent_settings_set_triage|codex_pro" in callback_values
+        assert "agent_settings_clear_triage" in callback_values

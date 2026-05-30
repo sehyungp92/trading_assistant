@@ -5,7 +5,7 @@ import logging
 
 from orchestrator.agent_preferences import DEFAULT_PROVIDER_MODELS
 from orchestrator.agent_runner import AgentRunner, AgentResult
-from schemas.agent_preferences import AgentProvider, AgentSelection
+from schemas.agent_preferences import AgentProvider, AgentSelection, AgentWorkflow
 from schemas.prompt_package import PromptPackage
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,9 @@ class RepoTaskRunner:
         max_turns: int | None = None,
         allowed_tools: list[str] | None = None,
     ) -> AgentResult:
-        selection, requested_model = self._resolve_selection(agent_type, model)
-        return await self._agent_runner.invoke_with_selection(
+        workflow = self._agent_runner._resolve_workflow(agent_type)
+        selection, requested_model = self._resolve_selection(agent_type, model, workflow=workflow)
+        result = await self._agent_runner.invoke_with_selection(
             agent_type=agent_type,
             prompt_package=prompt_package,
             run_id=run_id,
@@ -42,13 +43,24 @@ class RepoTaskRunner:
             max_turns=max_turns,
             allowed_tools=allowed_tools,
         )
+        self._agent_runner._preferences.record_committed_route_change(
+            workflow=workflow,
+            selected=selection,
+            model_override=model,
+            agent_type=agent_type,
+            run_id=run_id,
+            success=result.success,
+        )
+        return result
 
     def _resolve_selection(
         self,
         agent_type: str,
         model: str | None,
+        *,
+        workflow: AgentWorkflow | None = None,
     ) -> tuple[AgentSelection, str | None]:
-        workflow = self._agent_runner._resolve_workflow(agent_type)
+        workflow = workflow if workflow is not None else self._agent_runner._resolve_workflow(agent_type)
         requested, requested_model = self._agent_runner._preferences.resolve_selection(workflow, model)
         candidates = [(requested, requested_model)]
 

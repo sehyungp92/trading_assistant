@@ -1,6 +1,7 @@
 """Tests for automatic provider fallback chains."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -245,6 +246,7 @@ class TestAgentRunnerFallback:
 
     @pytest.mark.asyncio
     async def test_primary_success_no_fallback(self, runner: AgentRunner, sample_package):
+        runner._auth_checker._provider_status_cache[AgentProvider.CLAUDE_MAX] = _ready(AgentProvider.CLAUDE_MAX)
         success = AgentResult(
             response="done", run_dir=Path("/tmp/run"),
             success=True, provider="claude_max", runtime="claude_cli",
@@ -411,6 +413,87 @@ class TestAgentRunnerFallback:
                 run_id="run-simple",
             )
         assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_no_candidates_respects_cooldown_without_bypass(self, tmp_path: Path, sample_package):
+        runner = AgentRunner(
+            runs_dir=tmp_path / "runs",
+            session_store=SessionStore(base_dir=str(tmp_path / "sessions")),
+            preferences=AgentPreferences(
+                default=AgentSelection(provider=AgentProvider.CLAUDE_MAX),
+            ),
+        )
+        runner._auth_checker._provider_status_cache[AgentProvider.CLAUDE_MAX] = _ready(AgentProvider.CLAUDE_MAX)
+        runner._cooldown_tracker.record_failure(AgentProvider.CLAUDE_MAX)
+
+        with patch.object(runner, "invoke_with_selection", new_callable=AsyncMock) as mock_invoke:
+            result = await runner.invoke(
+                agent_type="daily_analysis",
+                prompt_package=sample_package,
+                run_id="run-cooled-down",
+            )
+
+        assert result.success is False
+        assert "cooldown filtering" in result.error
+        assert mock_invoke.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_learned_route_audit_written_after_attempt(self, tmp_path: Path, sample_package):
+        findings = tmp_path / "memory" / "findings"
+        findings.mkdir(parents=True)
+        with (findings / "provider_route_scores.jsonl").open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            }) + "\n")
+            handle.write(json.dumps({
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "benchmark_quality": 0.85,
+                "sample_count": 7,
+            }) + "\n")
+        runner = AgentRunner(
+            runs_dir=tmp_path / "runs",
+            session_store=SessionStore(base_dir=str(tmp_path / "sessions")),
+            preferences=AgentPreferences(
+                default=AgentSelection(provider=AgentProvider.CLAUDE_MAX),
+            ),
+        )
+        runner._auth_checker._provider_status_cache.update({
+            AgentProvider.CLAUDE_MAX: _ready(AgentProvider.CLAUDE_MAX),
+            AgentProvider.CODEX_PRO: _ready(AgentProvider.CODEX_PRO),
+        })
+        success = AgentResult(
+            response="ok",
+            run_dir=tmp_path / "runs" / "daily-learned",
+            success=True,
+            provider="codex_pro",
+            runtime="codex_cli",
+        )
+
+        with patch.object(runner, "invoke_with_selection", new_callable=AsyncMock, return_value=success) as mock_invoke:
+            result = await runner.invoke(
+                agent_type="daily_analysis",
+                prompt_package=sample_package,
+                run_id="daily-learned",
+            )
+
+        assert result.success is True
+        assert mock_invoke.await_args.kwargs["selection"].provider == AgentProvider.CODEX_PRO
+        changes = [
+            json.loads(line)
+            for line in (findings / "provider_route_changes.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(changes) == 1
+        assert changes[0]["previous_provider"] == "claude_max"
+        assert changes[0]["recommended_provider"] == "codex_pro"
+        assert changes[0]["first_used_run_id"] == "daily-learned"
+        assert changes[0]["first_attempt_success"] is True
 
     @pytest.mark.asyncio
     async def test_fallback_run_id_suffixed(self, runner: AgentRunner, sample_package):

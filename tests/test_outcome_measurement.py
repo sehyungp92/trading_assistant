@@ -486,47 +486,6 @@ class TestEstimateNoise:
         assert result > 0.0
 
 
-class TestDetectParameterChanges:
-    def test_backward_compat_returns_empty_when_no_wfo_dir(self, tmp_path):
-        measurer = AutoOutcomeMeasurer(curated_dir=tmp_path, wfo_dir=None)
-        assert measurer.detect_parameter_changes("bot_a") == []
-
-    def test_detects_changes_across_reports(self, tmp_path):
-        wfo_dir = tmp_path / "wfo"
-        wfo_dir.mkdir()
-        (wfo_dir / "report_01.json").write_text(json.dumps({
-            "bot_id": "bot_a", "date": "2026-03-01",
-            "suggested_params": {"stop_loss": 0.02},
-        }))
-        (wfo_dir / "report_02.json").write_text(json.dumps({
-            "bot_id": "bot_a", "date": "2026-03-08",
-            "suggested_params": {"stop_loss": 0.03},
-        }))
-
-        measurer = AutoOutcomeMeasurer(curated_dir=tmp_path, wfo_dir=wfo_dir)
-        changes = measurer.detect_parameter_changes("bot_a")
-        assert len(changes) == 1
-        assert changes[0]["date"] == "2026-03-08"
-        assert changes[0]["previous_params"]["stop_loss"] == 0.02
-        assert changes[0]["new_params"]["stop_loss"] == 0.03
-
-    def test_ignores_other_bots(self, tmp_path):
-        wfo_dir = tmp_path / "wfo"
-        wfo_dir.mkdir()
-        (wfo_dir / "report_01.json").write_text(json.dumps({
-            "bot_id": "bot_b", "date": "2026-03-01",
-            "suggested_params": {"stop_loss": 0.02},
-        }))
-        (wfo_dir / "report_02.json").write_text(json.dumps({
-            "bot_id": "bot_b", "date": "2026-03-08",
-            "suggested_params": {"stop_loss": 0.05},
-        }))
-
-        measurer = AutoOutcomeMeasurer(curated_dir=tmp_path, wfo_dir=wfo_dir)
-        changes = measurer.detect_parameter_changes("bot_a")
-        assert changes == []
-
-
 # ===================================================================
 # 3. skills/suggestion_scorer.py — quality/verdict filtering
 # ===================================================================

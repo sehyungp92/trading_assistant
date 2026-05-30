@@ -14,7 +14,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from schemas.autonomous_pipeline import FileChange, PRRequest, PRResult
+from schemas.repo_changes import FileChange, PRRequest, PRResult
 from schemas.deployment_monitoring import (
     DeploymentMetricsSnapshot,
     DeploymentRecord,

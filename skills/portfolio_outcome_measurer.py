@@ -96,6 +96,7 @@ class PortfolioOutcomeMeasurer:
                 "composite_delta": round(delta, 4),
                 "verdict": verdict,
                 "measurement_quality": "high" if days_since >= _MIN_OBSERVATION_DAYS * 1.5 else "medium",
+                "outcome_source": "early_warning",
             }
 
             # Compare what-if predictions against actual outcome

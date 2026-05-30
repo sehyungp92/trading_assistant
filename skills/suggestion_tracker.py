@@ -76,8 +76,37 @@ class SuggestionTracker:
             deployment_id=deployment_id,
         )
 
-    def mark_measured(self, suggestion_id: str) -> None:
-        self._update_status(suggestion_id, SuggestionStatus.MEASURED)
+    def mark_measured(
+        self,
+        suggestion_id: str,
+        *,
+        source: str = "early_warning",
+        outcome_id: str = "",
+        strategy_change_record_id: str = "",
+        final: bool = True,
+    ) -> None:
+        """Record measurement provenance and optionally close the lifecycle.
+
+        ``source="early_warning"`` is retained as the legacy default. Monthly
+        validation callers should pass ``source="monthly"`` or ``"follow_up"``.
+        Set ``final=False`` for lightweight early warnings that should not mark
+        material strategy/config changes as finally measured.
+        """
+        if final:
+            self._update_status(
+                suggestion_id,
+                SuggestionStatus.MEASURED,
+                outcome_source=source,
+                outcome_id=outcome_id,
+                strategy_change_record_id=strategy_change_record_id,
+            )
+        else:
+            self._update_measurement_source(
+                suggestion_id,
+                source=source,
+                outcome_id=outcome_id,
+                strategy_change_record_id=strategy_change_record_id,
+            )
 
     def implement(self, suggestion_id: str) -> None:
         """Legacy helper retained for historical tooling.
@@ -197,6 +226,9 @@ class SuggestionTracker:
         approval_request_id: str | None = None,
         deployment_id: str | None = None,
         pr_url: str | None = None,
+        outcome_source: str = "",
+        outcome_id: str = "",
+        strategy_change_record_id: str = "",
     ) -> None:
         from skills._atomic_write import atomic_rewrite_jsonl
 
@@ -222,12 +254,78 @@ class SuggestionTracker:
                         rec["deployment_id"] = deployment_id
                     if pr_url:
                         rec["pr_url"] = pr_url
+                    if outcome_source:
+                        self._stamp_outcome_source(
+                            rec,
+                            source=outcome_source,
+                            outcome_id=outcome_id,
+                            strategy_change_record_id=strategy_change_record_id,
+                            measured_at=now,
+                        )
                     if status in {
                         SuggestionStatus.REJECTED,
                         SuggestionStatus.MEASURED,
                     }:
                         rec["resolved_at"] = now
             atomic_rewrite_jsonl(self._suggestions_path, records)
+
+    def _update_measurement_source(
+        self,
+        suggestion_id: str,
+        *,
+        source: str,
+        outcome_id: str = "",
+        strategy_change_record_id: str = "",
+    ) -> None:
+        from skills._atomic_write import atomic_rewrite_jsonl
+
+        with self._lock:
+            records = self.load_all()
+            now = datetime.now(timezone.utc).isoformat()
+            for rec in records:
+                if rec["suggestion_id"] == suggestion_id:
+                    self._stamp_outcome_source(
+                        rec,
+                        source=source,
+                        outcome_id=outcome_id,
+                        strategy_change_record_id=strategy_change_record_id,
+                        measured_at=now,
+                    )
+                    break
+            atomic_rewrite_jsonl(self._suggestions_path, records)
+
+    @staticmethod
+    def _stamp_outcome_source(
+        rec: dict,
+        *,
+        source: str,
+        outcome_id: str = "",
+        strategy_change_record_id: str = "",
+        measured_at: str = "",
+    ) -> None:
+        rec["outcome_source"] = source
+        if outcome_id:
+            rec["monthly_outcome_id"] = outcome_id
+        if strategy_change_record_id:
+            rec["strategy_change_record_id"] = strategy_change_record_id
+        history = rec.get("outcome_source_history")
+        if not isinstance(history, list):
+            history = []
+        duplicate = bool(outcome_id) and any(
+            item.get("source") == source
+            and item.get("outcome_id") == outcome_id
+            and item.get("strategy_change_record_id") == strategy_change_record_id
+            for item in history
+            if isinstance(item, dict)
+        )
+        if not duplicate:
+            history.append({
+                "source": source,
+                "outcome_id": outcome_id,
+                "strategy_change_record_id": strategy_change_record_id,
+                "measured_at": measured_at,
+            })
+        rec["outcome_source_history"] = history
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict]:

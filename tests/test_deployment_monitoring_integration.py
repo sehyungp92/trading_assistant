@@ -13,7 +13,7 @@ from schemas.deployment_monitoring import (
     DeploymentRecord,
     DeploymentStatus,
 )
-from schemas.autonomous_pipeline import PRResult
+from schemas.repo_changes import PRResult
 from skills.deployment_monitor import DeploymentMonitor
 
 

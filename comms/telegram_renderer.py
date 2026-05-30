@@ -57,7 +57,8 @@ _DAILY_REPORT_KEYBOARD = [
 _WORKFLOW_LABELS: dict[AgentWorkflow, str] = {
     AgentWorkflow.DAILY_ANALYSIS: "Daily",
     AgentWorkflow.WEEKLY_ANALYSIS: "Weekly",
-    AgentWorkflow.WFO: "WFO",
+    AgentWorkflow.MONTHLY_VALIDATION: "Monthly Validation",
+    AgentWorkflow.MONTHLY_MODEL_REVIEW: "Monthly Model Review",
     AgentWorkflow.TRIAGE: "Triage",
 }
 
@@ -104,8 +105,8 @@ class TelegramRenderer:
             lines.append("\u2705 Daily report ready")
         if panel.alert_count > 0:
             lines.append(f"\u26a0\ufe0f {panel.alert_count} alert(s) ({panel.alert_summary})")
-        if panel.wfo_status:
-            lines.append(f"\U0001f9ea WFO: {panel.wfo_status}")
+        if panel.monthly_validation_status:
+            lines.append(f"\U0001f9ea Monthly validation: {panel.monthly_validation_status}")
         lines.append(f"\U0001f9f0 {panel.pending_pr_count} PRs pending")
         lines.append(f"\U0001f6e1\ufe0f Risk: {panel.risk_status} ({panel.risk_detail})")
         lines.append("")
@@ -198,6 +199,24 @@ class TelegramRenderer:
 
         if getattr(request, "summary", ""):
             lines.append(_escape_md2(request.summary))
+            lines.append("")
+
+        if getattr(request, "monthly_run_id", ""):
+            lines.append(f"Monthly run: {_escape_md2(request.monthly_run_id)}")
+            if getattr(request, "strategy_id", ""):
+                lines.append(f"Strategy: {_escape_md2(request.strategy_id)}")
+            if getattr(request, "risk_classification", ""):
+                lines.append(f"Replay risk: {_escape_md2(request.risk_classification)}")
+            if getattr(request, "objective_deltas", None):
+                deltas = ", ".join(
+                    f"{key}={value:+.3f}"
+                    for key, value in list(request.objective_deltas.items())[:4]
+                )
+                lines.append(f"Objective deltas: {_escape_md2(deltas)}")
+            if getattr(request, "rollback_plan", ""):
+                lines.append(f"Rollback: {_escape_md2(request.rollback_plan)}")
+            if getattr(request, "evidence_paths", None):
+                lines.append(f"Evidence paths: {len(request.evidence_paths)}")
             lines.append("")
 
         # Backtest results
@@ -371,10 +390,17 @@ class TelegramRenderer:
             [
                 {"text": "Daily", "callback_data": "agent_settings_scope_daily_analysis"},
                 {"text": "Weekly", "callback_data": "agent_settings_scope_weekly_analysis"},
+                {"text": "Triage", "callback_data": "agent_settings_scope_triage"},
             ],
             [
-                {"text": "WFO", "callback_data": "agent_settings_scope_wfo"},
-                {"text": "Triage", "callback_data": "agent_settings_scope_triage"},
+                {
+                    "text": "Monthly",
+                    "callback_data": "agent_settings_scope_monthly_validation",
+                },
+                {
+                    "text": "Model Review",
+                    "callback_data": "agent_settings_scope_monthly_model_review",
+                },
             ],
         ]
         return "\n".join(lines), keyboard

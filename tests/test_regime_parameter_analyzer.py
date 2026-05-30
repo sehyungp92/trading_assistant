@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+from schemas.parameter_definition import ParameterDefinition, ParameterType
 from schemas.regime_conditional import RegimeParameterAnalysis, RegimeParameterStats
 from skills.regime_parameter_analyzer import RegimeParameterAnalyzer
 

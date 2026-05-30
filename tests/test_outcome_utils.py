@@ -15,6 +15,12 @@ class TestIsPositiveOutcome:
     def test_inconclusive_verdict_not_positive(self):
         assert is_positive_outcome({"verdict": "inconclusive"}) is False
 
+    def test_monthly_keep_verdict_is_positive(self):
+        assert is_positive_outcome({"verdict": "keep", "outcome_source": "monthly"}) is True
+
+    def test_monthly_rollback_verdict_not_positive(self):
+        assert is_positive_outcome({"verdict": "rollback", "outcome_source": "monthly"}) is False
+
     def test_pnl_delta_fallback_positive(self):
         assert is_positive_outcome({"pnl_delta": 100}) is True
 
@@ -23,6 +29,9 @@ class TestIsPositiveOutcome:
 
     def test_pnl_delta_7d_fallback(self):
         assert is_positive_outcome({"pnl_delta_7d": 10}) is True
+
+    def test_pnl_delta_30d_fallback(self):
+        assert is_positive_outcome({"pnl_delta_30d": 10}) is True
 
     def test_empty_outcome_not_positive(self):
         assert is_positive_outcome({}) is False
@@ -40,6 +49,9 @@ class TestIsConclusiveOutcome:
 
     def test_insufficient_data_excluded(self):
         assert is_conclusive_outcome({"verdict": "insufficient_data"}) is False
+
+    def test_monthly_watch_excluded(self):
+        assert is_conclusive_outcome({"verdict": "watch", "outcome_source": "monthly"}) is False
 
     def test_empty_verdict_is_conclusive(self):
         """Empty verdict (legacy data) should be treated as conclusive."""

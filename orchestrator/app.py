@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from comms.telegram_handlers import TelegramCallbackResponse, TelegramCallbackRo
 from comms.telegram_renderer import TelegramRenderer
 from orchestrator.adapters.vps_receiver import VPSReceiver
 from orchestrator.agent_runner import AgentRunner
+from orchestrator.agent_preferences import WORKFLOW_ORDER
 from orchestrator.cost_tracker import CostTracker
 from orchestrator.catchup import StartupCatchup, bootstrap_run_store_from_history
 from orchestrator.latency_tracker import LatencyTracker
@@ -63,6 +65,42 @@ from schemas.notifications import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_coroutine_in_thread(coro):
+    box: dict[str, object] = {}
+
+    def runner() -> None:
+        try:
+            box["result"] = asyncio.run(coro)
+        except Exception as exc:  # pragma: no cover - defensive bridge for optional LLM review
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in box:
+        raise box["error"]  # type: ignore[misc]
+    return box.get("result", {"actions": []})
+
+
+def _extract_json_object(text: str) -> dict:
+    raw = str(text or "").strip()
+    if not raw:
+        return {"actions": []}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {"actions": []}
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(raw[start:end + 1])
+                return parsed if isinstance(parsed, dict) else {"actions": []}
+            except json.JSONDecodeError:
+                return {"actions": []}
+    return {"actions": []}
 
 
 def _utc_now() -> datetime:
@@ -240,7 +278,16 @@ def _seed_agent_preferences(config: AppConfig) -> AgentPreferences:
     workflow_env_map = (
         (AgentWorkflow.DAILY_ANALYSIS, config.daily_agent_provider, config.daily_agent_model),
         (AgentWorkflow.WEEKLY_ANALYSIS, config.weekly_agent_provider, config.weekly_agent_model),
-        (AgentWorkflow.WFO, config.wfo_agent_provider, config.wfo_agent_model),
+        (
+            AgentWorkflow.MONTHLY_VALIDATION,
+            config.monthly_validation_agent_provider,
+            config.monthly_validation_agent_model,
+        ),
+        (
+            AgentWorkflow.MONTHLY_MODEL_REVIEW,
+            config.monthly_model_review_agent_provider,
+            config.monthly_model_review_agent_model,
+        ),
         (AgentWorkflow.TRIAGE, config.triage_agent_provider, config.triage_agent_model),
     )
     for workflow, provider_raw, model_raw in workflow_env_map:
@@ -258,7 +305,9 @@ def _load_agent_preferences(
     """Load agent preferences from disk or build initial values from env."""
     if prefs_path.exists():
         try:
-            return AgentPreferences(**json.loads(prefs_path.read_text(encoding="utf-8")))
+            return _active_agent_preferences(
+                AgentPreferences(**json.loads(prefs_path.read_text(encoding="utf-8")))
+            )
         except Exception:
             logger.warning("Could not load agent prefs from %s, using defaults", prefs_path)
     return _seed_agent_preferences(config)
@@ -267,7 +316,85 @@ def _load_agent_preferences(
 def _save_agent_preferences(prefs: AgentPreferences, prefs_path: Path) -> None:
     """Persist agent preferences to disk."""
     prefs_path.parent.mkdir(parents=True, exist_ok=True)
-    prefs_path.write_text(prefs.model_dump_json(indent=2), encoding="utf-8")
+    prefs_path.write_text(_active_agent_preferences(prefs).model_dump_json(indent=2), encoding="utf-8")
+
+
+def _active_agent_preferences(prefs: AgentPreferences) -> AgentPreferences:
+    """Drop persisted overrides for workflows that are no longer active."""
+    active = set(WORKFLOW_ORDER)
+    clean = prefs.model_copy(deep=True)
+    clean.overrides = {
+        workflow: selection
+        for workflow, selection in clean.overrides.items()
+        if workflow in active
+    }
+    clean.workflow_tuning = {
+        workflow: tuning
+        for workflow, tuning in clean.workflow_tuning.items()
+        if workflow in active
+    }
+    return clean
+
+
+def _unsupported_agent_workflows(prefs: AgentPreferences) -> list[str]:
+    active = set(WORKFLOW_ORDER)
+    return sorted({
+        workflow.value
+        for workflow in [*prefs.overrides.keys(), *prefs.workflow_tuning.keys()]
+        if workflow not in active
+    })
+
+
+def _legacy_agent_workflows(payload: dict) -> list[str]:
+    legacy: set[str] = set()
+    for key in ("overrides", "workflow_tuning"):
+        value = payload.get(key)
+        if isinstance(value, dict) and "wfo" in value:
+            legacy.add("wfo")
+    return sorted(legacy)
+
+
+def _requires_monthly_outcome(suggestion: dict) -> bool:
+    """Return True for material strategy/config changes.
+
+    Daily and weekly outcome measurement can still provide early-warning
+    context, but material changes wait for monthly validation before the
+    suggestion lifecycle is finalized.
+    """
+    tier = str(suggestion.get("tier") or "").lower()
+    category = str(suggestion.get("category") or "").lower()
+    change_kind = str(suggestion.get("change_kind") or suggestion.get("kind") or "").lower()
+    risk = str(
+        (suggestion.get("implementation_context") or {}).get("risk_classification")
+        or suggestion.get("risk_classification")
+        or ""
+    ).lower()
+    has_config_change = bool(
+        suggestion.get("param_name")
+        or suggestion.get("param_changes")
+        or suggestion.get("planned_files")
+        or suggestion.get("strategy_id")
+    )
+    material_tokens = {
+        "parameter",
+        "parameter_change",
+        "filter",
+        "filter_threshold",
+        "strategy_variant",
+        "structural",
+        "position_sizing",
+        "regime_gate",
+        "stop_loss",
+        "exit_timing",
+        "signal",
+    }
+    return (
+        has_config_change
+        or tier in material_tokens
+        or category in material_tokens
+        or change_kind in material_tokens
+        or risk in {"medium", "high", "critical"}
+    )
 
 
 def _register_channel_adapters(
@@ -499,7 +626,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
 
     proposal_ledger = ProposalLedger(store_dir=db_path / "memory" / "findings")
 
-    # Autonomous pipeline (feature-flagged)
+    # Shared approval / PR infrastructure. The legacy autonomous suggestion
+    # processor is still feature-flagged, but monthly approval-gated validation
+    # and deployment monitoring also need this plumbing.
     autonomous_pipeline = None
     approval_tracker = None
     approval_handler = None
@@ -509,19 +638,22 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     repo_workspace_manager = None
     repo_task_runner = None
     calibration_tracker = None
-    if config.autonomous_enabled:
+    telegram_bot = telegram_adapter
+    shared_approval_enabled = (
+        config.autonomous_enabled
+        or config.monthly_validation_mode == "approval_gated"
+        or config.deployment_monitoring_enabled
+    )
+    if shared_approval_enabled:
         from orchestrator.repo_task_runner import RepoTaskRunner
         from skills.approval_handler import ApprovalHandler
         from skills.approval_tracker import ApprovalTracker
-        from skills.autonomous_pipeline import AutonomousPipeline
         from skills.config_registry import ConfigRegistry as _ConfigRegistry
         from skills.file_change_generator import FileChangeGenerator
         from skills.github_pr import PRBuilder
         from skills.repo_workspace import RepoWorkspaceManager
-        from skills.suggestion_backtester import SuggestionBacktester
 
         config_registry = _ConfigRegistry(Path(config.bot_config_dir))
-        backtester = SuggestionBacktester(config_registry, db_path)
         approval_tracker = ApprovalTracker(db_path / "memory" / "findings" / "approvals.jsonl")
         file_change_gen = FileChangeGenerator()
         pr_builder = PRBuilder(dry_run=False, github_token=config.github_token)
@@ -530,9 +662,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             task_root=db_path / "runs" / "repo_tasks",
         )
         repo_task_runner = RepoTaskRunner(agent_runner)
-
-        # Telegram bot/renderer (may be None if not configured)
-        telegram_bot = telegram_adapter  # Extracted from channel_adapters above
 
         approval_handler = ApprovalHandler(
             approval_tracker=approval_tracker,
@@ -547,59 +676,73 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             # structural_experiment_tracker wired after creation below
             # hypothesis_library wired after creation below
         )
-        # Parameter searcher for iterative neighborhood exploration
-        from skills.parameter_searcher import ParameterSearcher
-        from skills.backtest_calibration_tracker import BacktestCalibrationTracker
-        from skills.cost_model import CostModel
-        from skills.backtest_simulator import BacktestSimulator as _BacktestSim
 
-        _cost_cfg = getattr(config, "cost_model_config", None)
-        if _cost_cfg:
-            _cost_model = CostModel(_cost_cfg)
-            _simulator = _BacktestSim(_cost_model)
-            parameter_searcher = ParameterSearcher(
-                config_registry=config_registry,
-                simulator=_simulator,
-                cost_model=_cost_model,
+    if config.autonomous_enabled:
+        from skills.autonomous_pipeline import AutonomousPipeline
+        from skills.suggestion_backtester import SuggestionBacktester
+
+        if not shared_approval_enabled or approval_tracker is None or config_registry is None:
+            logger.warning(
+                "Autonomous pipeline requested but shared approval infrastructure "
+                "was unavailable; autonomous pipeline disabled"
             )
         else:
-            parameter_searcher = None
+            backtester = SuggestionBacktester(config_registry, db_path)
 
-        calibration_tracker = BacktestCalibrationTracker(
-            store_dir=db_path / "memory" / "findings",
-        )
+            # Parameter searcher for iterative neighborhood exploration
+            from skills.parameter_searcher import ParameterSearcher
+            from skills.backtest_calibration_tracker import BacktestCalibrationTracker
+            from skills.cost_model import CostModel
+            from skills.backtest_simulator import BacktestSimulator as _BacktestSim
 
-        autonomous_pipeline = AutonomousPipeline(
-            config_registry=config_registry,
-            backtester=backtester,
-            approval_tracker=approval_tracker,
-            suggestion_tracker=suggestion_tracker,
-            telegram_bot=telegram_bot,
-            telegram_renderer=telegram_renderer,
-            event_stream=event_stream,
-            parameter_searcher=parameter_searcher,
-            experiment_config_generator=None,
-            proposal_ledger=proposal_ledger,
-            calibration_tracker=calibration_tracker,
-            search_log_dir=db_path / "memory" / "findings",
-            curated_dir=curated_dir,
-        )
-        logger.info("Autonomous pipeline enabled")
+            _cost_cfg = getattr(config, "cost_model_config", None)
+            if _cost_cfg:
+                _cost_model = CostModel(_cost_cfg)
+                _simulator = _BacktestSim(_cost_model)
+                parameter_searcher = ParameterSearcher(
+                    config_registry=config_registry,
+                    simulator=_simulator,
+                    cost_model=_cost_model,
+                )
+            else:
+                parameter_searcher = None
 
-    # PR review check function (needs approval_tracker + pr_builder from autonomous block)
+            calibration_tracker = BacktestCalibrationTracker(
+                store_dir=db_path / "memory" / "findings",
+            )
+
+            autonomous_pipeline = AutonomousPipeline(
+                config_registry=config_registry,
+                backtester=backtester,
+                approval_tracker=approval_tracker,
+                suggestion_tracker=suggestion_tracker,
+                telegram_bot=telegram_bot,
+                telegram_renderer=telegram_renderer,
+                event_stream=event_stream,
+                parameter_searcher=parameter_searcher,
+                experiment_config_generator=None,
+                proposal_ledger=proposal_ledger,
+                calibration_tracker=calibration_tracker,
+                search_log_dir=db_path / "memory" / "findings",
+                curated_dir=curated_dir,
+            )
+            logger.info("Autonomous pipeline enabled")
+
+    # PR review check function (needs shared approval_tracker + pr_builder)
     async def _check_pr_reviews() -> None:
         """Check PR reviews for approved requests and notify on attention needed."""
         if approval_tracker is None:
             return
         try:
-            from skills.github_pr import PRBuilder as _PRB
-            _pr_builder = pr_builder if config.autonomous_enabled else _PRB(dry_run=True)
+            if pr_builder is None:
+                return
+            _pr_builder = pr_builder
             approved_with_prs = approval_tracker.get_approved_with_prs()
             for req in approved_with_prs:
                 if not req.pr_url:
                     continue
                 profile = None
-                if config.autonomous_enabled:
+                if config_registry is not None:
                     profile = config_registry.get_profile(req.bot_id)
                 repo_dir = Path(profile.repo_dir) if profile else db_path
                 status = await _pr_builder.check_pr_reviews(req.pr_url, repo_dir)
@@ -639,21 +782,18 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     if config.deployment_monitoring_enabled:
         from skills.deployment_monitor import DeploymentMonitor
 
-        if not config.autonomous_enabled:
+        if pr_builder is None or config_registry is None or file_change_gen is None:
             logger.warning(
-                "deployment_monitoring_enabled=True but autonomous_enabled=False: "
-                "rollback PRs will not work (pr_builder is None)"
+                "deployment_monitoring_enabled=True but shared approval "
+                "infrastructure is unavailable: rollback PRs will not work"
             )
-        _dm_pr_builder = pr_builder if config.autonomous_enabled else None
-        _dm_config_registry = config_registry if config.autonomous_enabled else None
-        _dm_file_change_gen = file_change_gen if config.autonomous_enabled else None
         deployment_monitor = DeploymentMonitor(
             findings_dir=db_path / "memory" / "findings",
             curated_dir=curated_dir,
-            pr_builder=_dm_pr_builder,
-            config_registry=_dm_config_registry,
+            pr_builder=pr_builder,
+            config_registry=config_registry,
             event_stream=event_stream,
-            file_change_generator=_dm_file_change_gen,
+            file_change_generator=file_change_gen,
         )
         logger.info("Deployment monitoring enabled")
 
@@ -667,9 +807,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         experiment_manager = ExperimentManager(
             findings_dir=db_path / "memory" / "findings",
         )
-        _ecg_registry = config_registry if config.autonomous_enabled else None
         experiment_config_gen = ExperimentConfigGenerator(
-            config_registry=_ecg_registry,
+            config_registry=config_registry,
         )
         logger.info("A/B testing enabled")
 
@@ -723,6 +862,18 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         proposal_ledger=proposal_ledger,
         calibration_tracker=calibration_tracker,
         scheduled_run_store=scheduled_run_store,
+        market_data_root=config.market_data_root,
+        backtest_repo_path=config.backtest_repo_path,
+        backtest_artifact_root=config.backtest_artifact_root,
+        monthly_validation_mode=config.monthly_validation_mode,
+        monthly_optimizer_sequence_enabled=config.monthly_optimizer_sequence_enabled,
+        monthly_backtest_command=config.monthly_backtest_command,
+        monthly_workflow_contract_path=config.monthly_workflow_contract_path,
+        monthly_workflow_contract_version=config.monthly_workflow_contract_version,
+        monthly_strategy_plugin_contract_path=config.monthly_strategy_plugin_contract_path,
+        market_data_required_coverage_ratio=config.market_data_required_coverage_ratio,
+        telemetry_required_lineage_ratio=config.telemetry_required_lineage_ratio,
+        backtest_command_timeout_seconds=config.backtest_command_timeout_seconds,
     )
 
     # Late-wire experiment components into autonomous pipeline (defined after pipeline creation)
@@ -757,8 +908,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         "daily_analysis", lambda a=action: handlers.handle_daily_analysis(a))
     worker.on_weekly_analysis = lambda action: _spawn_or_raise(
         "weekly_analysis", lambda a=action: handlers.handle_weekly_analysis(a))
-    worker.on_wfo = lambda action: _spawn_or_raise(
-        "wfo", lambda a=action: handlers.handle_wfo(a))
+    worker.on_monthly_validation = lambda action: _spawn_or_raise(
+        "monthly_validation", lambda a=action: handlers.handle_monthly_validation(a))
     worker.on_feedback = handlers.handle_feedback
 
     def _store_agent_preferences(preferences: AgentPreferences) -> None:
@@ -813,6 +964,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             workflow = AgentWorkflow(scope_name)
         except ValueError as exc:
             return TelegramCallbackResponse(text=f"Unknown settings scope: {exc}", answer="Invalid scope")
+        if workflow not in WORKFLOW_ORDER:
+            return TelegramCallbackResponse(text="Unknown settings scope.", answer="Invalid scope")
         return _render_agent_settings_response(
             workflow,
             edit_message=True,
@@ -835,6 +988,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 workflow = AgentWorkflow(scope_name)
             except ValueError:
                 return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
+            if workflow not in WORKFLOW_ORDER:
+                return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
             prefs.overrides[workflow] = AgentSelection(provider=provider)
             render_scope = workflow
 
@@ -853,6 +1008,8 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         try:
             workflow = AgentWorkflow(scope_name)
         except ValueError:
+            return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
+        if workflow not in WORKFLOW_ORDER:
             return TelegramCallbackResponse(text="Unknown workflow.", answer="Invalid workflow")
 
         prefs = agent_runner.get_preferences()
@@ -1069,7 +1226,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     outcome_measurer = AutoOutcomeMeasurer(
         curated_dir=curated_dir,
         findings_dir=db_path / "memory" / "findings",
-        calibration_tracker=calibration_tracker,
         hypothesis_library=hypothesis_library,
         proposal_ledger=proposal_ledger,
     )
@@ -1134,6 +1290,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         objective_delta: float,
         verdict: str,
         measurement_path: Path,
+        outcome_source: str = "early_warning",
     ) -> None:
         if not proposal_id:
             return
@@ -1147,6 +1304,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                     objective_delta=float(objective_delta or 0.0),
                     verdict=verdict,
                     measurement_path=str(measurement_path),
+                    outcome_source=outcome_source,
                 ),
             )
         except Exception:
@@ -1198,7 +1356,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         f.write(result.model_dump_json() + "\n")
 
                     outcome_measurer.record_measurement_feedback(result)
-                    suggestion_tracker.mark_measured(sid)
+                    suggestion_tracker.mark_measured(
+                        sid,
+                        source="early_warning",
+                        final=not _requires_monthly_outcome(s),
+                    )
 
                     verdict_str = result.verdict.value if hasattr(result.verdict, "value") else str(result.verdict)
 
@@ -1229,7 +1391,11 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             for po in portfolio_outcomes:
                 po_sid = po.get("suggestion_id", "")
                 if po_sid:
-                    suggestion_tracker.mark_measured(po_sid)
+                    suggestion_tracker.mark_measured(
+                        po_sid,
+                        source="early_warning",
+                        final=False,
+                    )
                     # Link hypothesis outcome if suggestion has hypothesis_id
                     po_verdict = po.get("verdict", "")
                     po_hyp_id = None
@@ -1256,6 +1422,7 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                         measurement_path=(
                             db_path / "memory" / "findings" / "portfolio_outcomes.jsonl"
                         ),
+                        outcome_source="early_warning",
                     )
             if portfolio_outcomes:
                 logger.info("Measured %d portfolio outcomes", len(portfolio_outcomes))
@@ -1476,6 +1643,42 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
             logger.exception("Discovery analysis failed")
 
     # Learning cycle — runs Sunday 11:00 UTC after outcome measurement
+    def _learning_review_structured_reviewer():
+        if config.learning_review_mode != "llm_review":
+            return None
+
+        def reviewer(payload: dict) -> dict:
+            async def invoke() -> dict:
+                from schemas.prompt_package import PromptPackage
+
+                package = PromptPackage(
+                    system_prompt=(
+                        "You are a bounded post-run learning reviewer. Return JSON only. "
+                        "You may propose advisory learning actions, never policy edits, "
+                        "approval, deployment, or trading-logic changes."
+                    ),
+                    task_prompt=json.dumps(payload, indent=2, default=str),
+                    instructions=(
+                        "Return an object shaped as {\"actions\": [...]}. Every action must use "
+                        "one of allowed_action_types and cite safe evidence_paths from the payload."
+                    ),
+                    metadata={"workflow": "learning_review", "mode": "llm_review"},
+                )
+                result = await agent_runner.invoke(
+                    "weekly_analysis",
+                    package,
+                    run_id=f"learning-review-{payload.get('week_end') or 'latest'}",
+                    max_turns=3,
+                    allowed_tools=[],
+                )
+                if not result.success:
+                    return {"actions": []}
+                return _extract_json_object(result.response)
+
+            return _run_coroutine_in_thread(invoke())
+
+        return reviewer
+
     async def _run_learning_cycle(scheduled_for: datetime | None = None) -> None:
         """Run the autonomous weekly learning cycle."""
         try:
@@ -1496,6 +1699,9 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
                 experiment_tracker=structural_experiment_tracker,
                 prediction_tracker=None,  # not needed for cycle
                 calibration_tracker=calibration_tracker,
+                learning_review_mode=config.learning_review_mode,
+                learning_review_disabled_workflows=config.learning_review_disabled_workflows,
+                learning_review_structured_reviewer=_learning_review_structured_reviewer(),
             )
             entry = await cycle.run(week_start, week_end)
 
@@ -1825,13 +2031,20 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
     async def _experiment_check_job(scheduled_for: datetime | None = None) -> None:
         await _check_experiments()
 
-    scheduler_config = SchedulerConfig()
+    scheduler_config = SchedulerConfig(
+        market_data_sync_day_of_month=config.market_data_sync_day_of_month,
+        market_data_sync_hour=config.market_data_sync_hour,
+        market_data_sync_minute=config.market_data_sync_minute,
+        monthly_validation_day_of_month=config.monthly_validation_day_of_month,
+        monthly_validation_hour=config.monthly_validation_hour,
+        monthly_validation_minute=config.monthly_validation_minute,
+    )
     scheduled_job_runner = ScheduledJobRunner(scheduled_run_store)
     scheduled_job_specs: list[ScheduledJobSpec]
     tracked_daily_fns: list[dict] | None = None
     tracked_morning_fns: list[dict] | None = None
     tracked_evening_fns: list[dict] | None = None
-    tracked_wfo_fns: list[dict] | None = None
+    tracked_monthly_validation_fns: list[dict] | None = None
     tracked_daily_fn = None
     tracked_morning_fn = None
     tracked_evening_fn = None
@@ -1937,33 +2150,73 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         tracked_morning_fn = _global_morning_trigger
         tracked_evening_fn = _global_evening_trigger
 
-    if config.bot_ids:
-        tracked_wfo_fns = []
+    if config.monthly_validation_enabled and config.bot_ids:
+        tracked_monthly_validation_fns = []
         for bot_id in config.bot_ids:
             scope_key = f"bot:{bot_id}"
 
-            def _make_wfo_trigger(bot_id: str, scope_key: str):
+            def _make_monthly_validation_trigger(bot_id: str, scope_key: str):
                 async def _trigger(scheduled_for: datetime | None = None) -> None:
                     run_at = (scheduled_for or _utc_now()).astimezone(timezone.utc).replace(microsecond=0)
                     await queue.enqueue(_build_scheduled_event(
-                        job_key="wfo",
+                        job_key="monthly_validation",
                         scope_key=scope_key,
                         scheduled_for=run_at,
-                        event_type="wfo_trigger",
+                        event_type="monthly_validation_trigger",
                         bot_id=bot_id,
                         payload={
                             "bot_id": bot_id,
-                            "data_end": run_at.date().isoformat(),
+                            "run_month": "",
+                            "shadow": config.monthly_validation_mode != "approval_gated",
+                            "optimizer_sequence_enabled": config.monthly_optimizer_sequence_enabled,
+                            "backtest_command": config.monthly_backtest_command,
+                            "workflow_contract_path": config.monthly_workflow_contract_path,
+                            "workflow_contract_version": config.monthly_workflow_contract_version,
                         },
                     ))
 
                 return _trigger
 
-            tracked_wfo_fns.append({
-                "fn": _make_wfo_trigger(bot_id, scope_key),
+            tracked_monthly_validation_fns.append({
+                "fn": _make_monthly_validation_trigger(bot_id, scope_key),
                 "name_suffix": bot_id,
                 "scope_key": scope_key,
             })
+
+    async def _market_data_sync_job(scheduled_for: datetime | None = None) -> None:
+        if not config.monthly_validation_enabled:
+            return
+        from orchestrator.market_data_jobs import MarketDataSyncJob
+        from skills.monthly_validation_orchestrator import latest_completed_month
+
+        run_month = latest_completed_month(scheduled_for)
+        job = MarketDataSyncJob(
+            market_data_root=Path(config.market_data_root) if config.market_data_root else db_path / "market_data",
+            strategy_registry=config.strategy_registry,
+            event_stream=event_stream,
+            required_coverage_ratio=config.market_data_required_coverage_ratio,
+        )
+        await asyncio.to_thread(job.run, run_month=run_month, bot_ids=config.bot_ids)
+
+    async def _lineage_audit_job(scheduled_for: datetime | None = None) -> None:
+        from orchestrator.lineage_audit import LineageAuditor
+        from skills.monthly_validation_orchestrator import latest_completed_month, month_window
+
+        run_month = latest_completed_month(scheduled_for)
+        window_start, window_end = month_window(run_month)
+        auditor = LineageAuditor(
+            curated_dir=curated_dir,
+            findings_dir=db_path / "memory" / "findings",
+            required_lineage_ratio=config.telemetry_required_lineage_ratio,
+            proposal_ledger=proposal_ledger,
+        )
+        for bot_id in config.bot_ids:
+            await asyncio.to_thread(
+                auditor.audit,
+                bot_id=bot_id,
+                window_start=window_start,
+                window_end=window_end,
+            )
 
     scheduled_job_specs = build_scheduled_job_specs(
         config=scheduler_config,
@@ -1973,7 +2226,6 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         daily_analysis_fn=tracked_daily_fn,
         daily_analysis_fns=tracked_daily_fns,
         weekly_analysis_fn=_weekly_summary_trigger,
-        wfo_fns=tracked_wfo_fns,
         stale_event_recovery_fn=_stale_recovery_job,
         morning_scan_fn=tracked_morning_fn,
         evening_report_fn=tracked_evening_fn,
@@ -1990,6 +2242,10 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         reliability_verification_fn=_verify_reliability,
         discovery_fn=_discovery_analysis,
         learning_cycle_fn=_run_learning_cycle,
+        lineage_audit_fn=_lineage_audit_job if config.monthly_validation_enabled else None,
+        market_data_sync_fn=_market_data_sync_job if config.monthly_validation_enabled else None,
+        monthly_validation_fn=None,
+        monthly_validation_fns=tracked_monthly_validation_fns,
     )
     scheduler_jobs = job_specs_to_scheduler_jobs(scheduled_job_specs, scheduled_job_runner)
 
@@ -2345,9 +2601,25 @@ def create_app(db_dir: str | None = None, config: AppConfig | None = None) -> Fa
         return agent_runner.get_preferences_view().model_dump(mode="json")
 
     @app.put("/agent/preferences")
-    async def update_agent_preferences(prefs: AgentPreferences):
+    async def update_agent_preferences(payload: dict):
+        legacy = _legacy_agent_workflows(payload)
+        if legacy:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported workflow override(s): {', '.join(legacy)}",
+            )
         try:
-            agent_runner.update_preferences(prefs)
+            prefs = AgentPreferences.model_validate(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        unsupported = _unsupported_agent_workflows(prefs)
+        if unsupported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported workflow override(s): {', '.join(unsupported)}",
+            )
+        try:
+            agent_runner.update_preferences(_active_agent_preferences(prefs))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -49,10 +49,10 @@ class TestWorkflowTuningSchema:
     def test_preferences_with_workflow_tuning(self):
         prefs = AgentPreferences(
             workflow_tuning={
-                AgentWorkflow.WFO: WorkflowTuning(timeout_seconds=1200, max_turns=15),
+                AgentWorkflow.MONTHLY_MODEL_REVIEW: WorkflowTuning(timeout_seconds=1200, max_turns=15),
             },
         )
-        assert prefs.workflow_tuning[AgentWorkflow.WFO].timeout_seconds == 1200
+        assert prefs.workflow_tuning[AgentWorkflow.MONTHLY_MODEL_REVIEW].timeout_seconds == 1200
 
     def test_serialization_round_trip(self):
         prefs = AgentPreferences(
@@ -81,10 +81,11 @@ class TestDefaultTunings:
         assert d.timeout_seconds == 900
         assert d.max_turns == 8
 
-    def test_wfo_defaults(self):
-        d = DEFAULT_WORKFLOW_TUNING[AgentWorkflow.WFO]
-        assert d.timeout_seconds == 1200
-        assert d.max_turns == 15
+    def test_monthly_defaults(self):
+        validation = DEFAULT_WORKFLOW_TUNING[AgentWorkflow.MONTHLY_VALIDATION]
+        review = DEFAULT_WORKFLOW_TUNING[AgentWorkflow.MONTHLY_MODEL_REVIEW]
+        assert validation.timeout_seconds == 1200
+        assert review.timeout_seconds == 900
 
     def test_triage_defaults(self):
         d = DEFAULT_WORKFLOW_TUNING[AgentWorkflow.TRIAGE]
@@ -146,14 +147,26 @@ class TestResolveTuning:
     def test_partial_user_prefs_fall_through_to_defaults(self):
         prefs = AgentPreferences(
             workflow_tuning={
-                AgentWorkflow.WFO: WorkflowTuning(timeout_seconds=1500),
+                AgentWorkflow.TRIAGE: WorkflowTuning(timeout_seconds=450),
             },
         )
         mgr = AgentPreferencesManager(prefs)
-        tuning = mgr.resolve_tuning(AgentWorkflow.WFO)
-        assert tuning.timeout_seconds == 1500
+        tuning = mgr.resolve_tuning(AgentWorkflow.TRIAGE)
+        assert tuning.timeout_seconds == 450
         # max_turns should fall through to default
-        assert tuning.max_turns == 15
+        assert tuning.max_turns == 4
+
+    def test_legacy_wfo_user_prefs_do_not_get_builtin_defaults(self):
+        prefs = AgentPreferences.model_validate({
+            "workflow_tuning": {
+                "wfo": {"timeout_seconds": 1500},
+            },
+        })
+        mgr = AgentPreferencesManager(prefs)
+        tuning = mgr.resolve_tuning(None)
+        assert prefs.workflow_tuning == {}
+        assert tuning.timeout_seconds is None
+        assert tuning.max_turns is None
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +226,13 @@ class TestAgentRunnerTuningIntegration:
 
         with patch.object(runner, "invoke_with_selection", side_effect=_capture):
             await runner.invoke(
-                agent_type="wfo",
+                agent_type="weekly_analysis",
                 prompt_package=sample_package,
-                run_id="run-wfo",
+                run_id="run-weekly",
             )
 
-        # WFO default timeout is 1200
-        assert captured_kwargs["timeout_seconds"] == 1200
+        # Weekly default timeout is 900
+        assert captured_kwargs["timeout_seconds"] == 900
 
     @pytest.mark.asyncio
     async def test_caller_max_turns_overrides_tuning(self, runner: AgentRunner, sample_package):

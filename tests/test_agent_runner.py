@@ -182,14 +182,16 @@ class TestPreferenceResolution:
             preferences=AgentPreferences(
                 default=AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="opus"),
                 overrides={
-                    AgentWorkflow.WFO: AgentSelection(
+                    AgentWorkflow.MONTHLY_MODEL_REVIEW: AgentSelection(
                         provider=AgentProvider.OPENROUTER,
                     ),
                 },
             ),
         )
 
-        selection, requested_model = runner._preferences.resolve_selection(AgentWorkflow.WFO)
+        selection, requested_model = runner._preferences.resolve_selection(
+            AgentWorkflow.MONTHLY_MODEL_REVIEW
+        )
 
         assert selection.provider == AgentProvider.OPENROUTER
         assert selection.model == "minimax/minimax-m2.5"

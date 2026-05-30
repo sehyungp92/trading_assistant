@@ -64,6 +64,12 @@ When evaluating a suggestion:
 
 I approve changes faster when they: have strong evidence (>50 trades, >60 days), improve Calmar ratio, have bounded downside, and are easily reversible. I'm willing to accept moderate drawdown increases if the return improvement is proportionally larger.
 
+For material strategy/config changes, the binding measurement is the monthly
+full-fidelity validation loop. Early before/after measurements are
+screening/context only. Trade frequency is a viability and under-trading gate,
+not an objective that can override expected return, Calmar, drawdown, or
+expectancy.
+
 ## What I Don't Want
 
 - Excessive caution that leaves money on the table — "do nothing" is also a decision with a cost

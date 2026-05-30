@@ -9,14 +9,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
 from schemas.events import TradeEvent
 from schemas.parameter_search import (
     CandidateResult,
     ParameterSearchReport,
     SearchRouting,
 )
-from schemas.wfo_results import SimulationMetrics
+from schemas.parameter_definition import ParameterDefinition, ParameterType
+from schemas.simulation_metrics import SimulationMetrics
 from skills.backtest_simulator import BacktestSimulator
 from skills.config_registry import ConfigRegistry
 from skills.cost_model import CostModel

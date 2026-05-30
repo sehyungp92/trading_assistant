@@ -97,7 +97,7 @@ class ControlPanelState(BaseModel):
     daily_report_ready: bool = False
     alert_count: int = 0
     alert_summary: str = ""
-    wfo_status: str = ""
+    monthly_validation_status: str = ""
     pending_pr_count: int = 0
     risk_status: str = "OK"
     risk_detail: str = ""

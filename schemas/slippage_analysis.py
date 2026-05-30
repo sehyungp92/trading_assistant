@@ -1,7 +1,7 @@
 # schemas/slippage_analysis.py
 """Slippage analysis schemas — per-symbol, per-hour slippage distributions.
 
-Used by SlippageAnalyzer to feed empirical data into WFO cost models.
+Used by SlippageAnalyzer to feed empirical data into cost models.
 """
 from __future__ import annotations
 

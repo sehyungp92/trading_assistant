@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from schemas.autonomous_pipeline import BotConfigProfile
+from schemas.bot_profile import BotConfigProfile
 from skills.repo_workspace import RepoWorkspaceManager
 
 

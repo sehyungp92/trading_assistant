@@ -1,5 +1,5 @@
 # comms/discord_renderer.py
-"""Discord embed renderer — rich formatting for Discord messages."""
+"""Discord embed renderer for trading notifications."""
 from __future__ import annotations
 
 from schemas.notifications import (
@@ -17,7 +17,7 @@ _COLORS = {
 
 
 class DiscordRenderer:
-    """Renders notifications as Discord embeds."""
+    """Renders notifications as Discord-style embeds or plain text."""
 
     def render(self, payload: NotificationPayload) -> str:
         dispatch = {
@@ -38,7 +38,10 @@ class DiscordRenderer:
             f"| DD: {panel.drawdown_pct:.1f}% | Exposure: {panel.exposure_pct:.0f}%"
         )
         for bot in panel.bot_statuses:
-            lines.append(f"{bot.status_emoji} {bot.bot_id}: +${bot.pnl:.0f} ({bot.wins}W/{bot.losses}L) — {bot.summary}")
+            lines.append(
+                f"{bot.status_emoji} {bot.bot_id}: +${bot.pnl:.0f} "
+                f"({bot.wins}W/{bot.losses}L) — {bot.summary}"
+            )
         return "\n".join(lines)
 
     def render_alert(self, payload: NotificationPayload) -> str:
@@ -71,16 +74,17 @@ class DiscordRenderer:
             "fields": [],
         }
         bot_statuses = payload.data.get("bot_statuses", [])
+        status_label = {"green": "OK", "yellow": "WARN", "red": "ALERT"}
         for bot in bot_statuses:
             bot_id = bot.get("bot_id", "?")
             status = bot.get("status", "")
-            emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(status, "⚪")
+            label = status_label.get(status, "INFO")
             pnl = bot.get("pnl", 0)
             wins = bot.get("wins", 0)
             losses = bot.get("losses", 0)
             summary = bot.get("summary", "")
             embed["fields"].append({
-                "name": f"{emoji} {bot_id}",
+                "name": f"{label} {bot_id}",
                 "value": f"+${pnl:.0f} ({wins}W/{losses}L) — {summary}",
                 "inline": True,
             })
@@ -96,3 +100,30 @@ class DiscordRenderer:
             "description": payload.body,
             "color": 0x2ECC71,
         }
+
+    def render_approval_request(self, request) -> str:
+        lines = [
+            "Suggestion Approval Request",
+            f"Bot: {request.bot_id}",
+            f"Kind: {request.change_kind.value}",
+            f"Risk: {request.risk_tier.value}",
+        ]
+        if getattr(request, "strategy_id", ""):
+            lines.append(f"Strategy: {request.strategy_id}")
+        if getattr(request, "monthly_run_id", ""):
+            lines.append(f"Monthly run: {request.monthly_run_id}")
+        if getattr(request, "title", ""):
+            lines.append(f"Title: {request.title}")
+        if getattr(request, "summary", ""):
+            lines.extend(["", request.summary])
+        if getattr(request, "objective_deltas", None):
+            deltas = ", ".join(
+                f"{key}={value:+.3f}"
+                for key, value in list(request.objective_deltas.items())[:5]
+            )
+            lines.append(f"Objective deltas: {deltas}")
+        if getattr(request, "rollback_plan", ""):
+            lines.append(f"Rollback: {request.rollback_plan}")
+        if getattr(request, "evidence_paths", None):
+            lines.append(f"Evidence paths: {len(request.evidence_paths)}")
+        return "\n".join(lines)

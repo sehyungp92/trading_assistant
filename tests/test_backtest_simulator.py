@@ -3,8 +3,8 @@
 from datetime import datetime
 
 from schemas.events import TradeEvent, MissedOpportunityEvent
-from schemas.wfo_config import CostModelConfig, SlippageModel
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
+from schemas.cost_model import CostModelConfig, SlippageModel
 from skills.backtest_simulator import BacktestSimulator
 from skills.cost_model import CostModel
 

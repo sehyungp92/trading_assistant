@@ -14,11 +14,8 @@ from typing import Any
 
 import yaml
 
-from schemas.autonomous_pipeline import (
-    BotConfigProfile,
-    ParameterDefinition,
-    ParameterType,
-)
+from schemas.bot_profile import BotConfigProfile
+from schemas.parameter_definition import ParameterDefinition, ParameterType
 from skills.file_change_generator import FileChangeGenerator
 
 logger = logging.getLogger(__name__)
@@ -66,6 +63,9 @@ class ConfigRegistry:
                     repo_url=data.get("repo_url", ""),
                     repo_dir=data.get("repo_dir", ""),
                     default_branch=data.get("default_branch", "main"),
+                    strategy_version=data.get("strategy_version"),
+                    config_version=data.get("config_version"),
+                    code_sha=data.get("code_sha"),
                     allowed_edit_paths=data.get("allowed_edit_paths", []) or [],
                     structural_context_paths=data.get("structural_context_paths", []) or [],
                     verification_commands=data.get("verification_commands", []) or [],

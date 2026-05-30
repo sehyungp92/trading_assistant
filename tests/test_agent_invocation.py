@@ -322,8 +322,8 @@ class TestInvokeEventBroadcasting:
 
 
 class TestAgentTypeEnum:
-    def test_has_7_members(self):
-        assert len(AgentType) == 7
+    def test_has_8_members(self):
+        assert len(AgentType) == 8
 
     def test_values_are_lowercase(self):
         for member in AgentType:

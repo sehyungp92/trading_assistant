@@ -19,7 +19,7 @@ class ActionType(str, Enum):
     SPAWN_TRIAGE = "spawn_triage"
     SPAWN_DAILY_ANALYSIS = "spawn_daily_analysis"
     SPAWN_WEEKLY_SUMMARY = "spawn_weekly_summary"
-    SPAWN_WFO = "spawn_wfo"
+    SPAWN_MONTHLY_VALIDATION = "spawn_monthly_validation"
     QUEUE_FOR_WEEKLY = "queue_for_weekly"
     SEND_NOTIFICATION = "send_notification"
     UPDATE_HEARTBEAT = "update_heartbeat"
@@ -127,8 +127,35 @@ class OrchestratorBrain:
 
     @staticmethod
     def _extract_persistable_payload(event: dict) -> object:
+        lineage_keys = {
+            "strategy_id",
+            "strategy_version",
+            "config_version",
+            "deployment_id",
+            "parameter_set_id",
+            "experiment_id",
+            "variant_id",
+            "signal_generation_version",
+            "code_sha",
+        }
         payload = event.get("payload")
         if payload not in (None, ""):
+            if isinstance(payload, dict):
+                normalized = dict(payload)
+                for key in lineage_keys:
+                    if key in event and key not in normalized:
+                        normalized[key] = event[key]
+                return normalized
+            if isinstance(payload, str) and any(key in event for key in lineage_keys):
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    return payload
+                if isinstance(parsed, dict):
+                    for key in lineage_keys:
+                        if key in event and key not in parsed:
+                            parsed[key] = event[key]
+                    return parsed
             return payload
 
         return {
@@ -216,11 +243,11 @@ class OrchestratorBrain:
             details=self._payload_details(event),
         )]
 
-    def _handle_wfo_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
+    def _handle_monthly_validation_trigger(self, event_id: str, bot_id: str, event: dict) -> list[Action]:
         details = self._payload_details(event)
         details.setdefault("bot_id", bot_id)
         return [Action(
-            type=ActionType.SPAWN_WFO,
+            type=ActionType.SPAWN_MONTHLY_VALIDATION,
             event_id=event_id,
             bot_id=bot_id,
             details=details,
@@ -340,7 +367,7 @@ class OrchestratorBrain:
         "heartbeat": _handle_heartbeat,
         "daily_analysis_trigger": _handle_daily_analysis_trigger,
         "weekly_summary_trigger": _handle_weekly_summary_trigger,
-        "wfo_trigger": _handle_wfo_trigger,
+        "monthly_validation_trigger": _handle_monthly_validation_trigger,
         "notification_trigger": _handle_notification_trigger,
         "coordinator_action": _handle_coordinator_action,
         "daily_snapshot": _handle_daily_snapshot,

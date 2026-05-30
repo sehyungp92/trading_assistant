@@ -2,7 +2,7 @@
 import json
 from datetime import datetime, timezone
 
-from schemas.wfo_config import CostModelConfig, SlippageModel
+from schemas.cost_model import CostModelConfig, SlippageModel
 from skills.cost_model import CostModel
 
 

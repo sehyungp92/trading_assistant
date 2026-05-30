@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from schemas.autonomous_pipeline import FileChangeMode, ParameterDefinition, ParameterType
+from schemas.parameter_definition import ParameterDefinition, ParameterType
+from schemas.repo_changes import FileChangeMode
 from skills.file_change_generator import FileChangeGenerator
 
 

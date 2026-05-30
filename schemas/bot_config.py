@@ -11,6 +11,9 @@ class BotConfig(BaseModel):
     timezone: str = "UTC"  # IANA tz, e.g. "Asia/Seoul"
     market_close_local: str = "16:00"  # HH:MM in bot's local tz
     daily_analysis_delay_minutes: int = 60  # minutes after market close to trigger analysis
+    strategy_version: str | None = None
+    config_version: str | None = None
+    code_sha: str | None = None
 
     @field_validator("timezone")
     @classmethod

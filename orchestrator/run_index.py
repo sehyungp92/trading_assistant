@@ -315,7 +315,7 @@ class RunIndex:
         prefixes = {
             "daily": "daily_analysis",
             "weekly": "weekly_analysis",
-            "wfo": "wfo",
+            "monthly": "monthly_validation",
             "triage": "triage",
             "discovery": "discovery_analysis",
             "reasoning": "outcome_reasoning",

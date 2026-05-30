@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from schemas.wfo_results import LeakageAuditEntry
+from schemas.validation_results import LeakageAuditEntry
 
 
 @dataclass

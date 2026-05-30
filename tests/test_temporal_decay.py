@@ -54,6 +54,17 @@ def test_max_50_entries_returned():
     assert result[0]["id"] == "0"
 
 
+def test_custom_max_entries_returned():
+    now = datetime.now(timezone.utc)
+    entries = [
+        {"timestamp": (now - timedelta(days=i)).isoformat(), "id": str(i)}
+        for i in range(20)
+    ]
+    result = _apply_temporal_window(entries, max_entries=5)
+    assert len(result) == 5
+    assert result[0]["id"] == "0"
+
+
 def test_entries_without_timestamp_included_last():
     now = datetime.now(timezone.utc)
     entries = [

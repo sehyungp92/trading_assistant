@@ -113,8 +113,8 @@ def test_list_open_excludes_terminal_outcomes(tmp_path: Path) -> None:
 
 
 def test_make_proposal_id_is_deterministic() -> None:
-    a = make_proposal_id(ProposalSource.WFO, "bot_x", ProposalKind.PARAMETER_CHANGE, "Tighten stop")
-    b = make_proposal_id(ProposalSource.WFO, "bot_x", ProposalKind.PARAMETER_CHANGE, "tighten stop  ")
+    a = make_proposal_id(ProposalSource.PARAMETER_SEARCH, "bot_x", ProposalKind.PARAMETER_CHANGE, "Tighten stop")
+    b = make_proposal_id(ProposalSource.PARAMETER_SEARCH, "bot_x", ProposalKind.PARAMETER_CHANGE, "tighten stop  ")
     assert a == b  # case + whitespace insensitive
     assert len(a) == 16
 

@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from schemas.generated_playbook import GeneratedPlaybook, PlaybookStatus, PlaybookTracking
+from skills.generated_playbook_guard import GeneratedPlaybookGuard
+
+_MAX_ACTIVE_PER_WORKFLOW = 10
+_MAX_ACTIVE_PER_PRIMARY_TAG = 3
 
 
 class PlaybookGenerator:
@@ -85,6 +89,10 @@ class PlaybookGenerator:
                     "Prefer reversible investigation or experiment steps over direct live-trading changes.",
                     "Only escalate a proposal when provenance is clear and approval gates still apply.",
                 ],
+                expected_outputs=[
+                    "Evidence-linked investigation note or no-action rationale.",
+                    "Any follow-up proposal remains advisory until deterministic gates and human approval pass.",
+                ],
                 failure_modes=[
                     "Do not bypass approval gates.",
                     "Do not change live trading logic directly from this playbook.",
@@ -109,6 +117,7 @@ class PlaybookGenerator:
         if quarantined_ids:
             playbooks = [p for p in playbooks if p.playbook_id not in quarantined_ids]
 
+        playbooks = self._cap_active_playbooks(playbooks)
         self._write_playbooks(playbooks)
         return playbooks
 
@@ -128,16 +137,36 @@ class PlaybookGenerator:
 
     @staticmethod
     def _is_safe(playbook: GeneratedPlaybook) -> bool:
-        if not playbook.provenance or len(playbook.evidence_refs) < 3:
-            return False
-        combined = " ".join(playbook.steps + playbook.required_evidence).lower()
-        banned = [
-            "bypass approval",
-            "disable approval",
-            "change live trading logic directly",
-            "auto-deploy",
-        ]
-        return not any(term in combined for term in banned)
+        return GeneratedPlaybookGuard().is_safe(playbook)
+
+    @staticmethod
+    def _cap_active_playbooks(playbooks: list[GeneratedPlaybook]) -> list[GeneratedPlaybook]:
+        """Bound generated prompt surface by workflow and primary trigger tag."""
+        per_workflow: dict[str, int] = defaultdict(int)
+        per_primary: dict[tuple[str, str], int] = defaultdict(int)
+        selected: list[GeneratedPlaybook] = []
+
+        def _rank(playbook: GeneratedPlaybook) -> tuple[int, str]:
+            return (-len(playbook.evidence_refs), playbook.title)
+
+        for playbook in sorted(playbooks, key=_rank):
+            workflow = playbook.workflow or "default"
+            primary = next(
+                (
+                    tag for tag in playbook.trigger_tags
+                    if tag.startswith(("category:", "reason:"))
+                ),
+                "",
+            )
+            if per_workflow[workflow] >= _MAX_ACTIVE_PER_WORKFLOW:
+                continue
+            if primary and per_primary[(workflow, primary)] >= _MAX_ACTIVE_PER_PRIMARY_TAG:
+                continue
+            selected.append(playbook)
+            per_workflow[workflow] += 1
+            if primary:
+                per_primary[(workflow, primary)] += 1
+        return selected
 
     @staticmethod
     def _humanize_tag(tag: str) -> str:
@@ -165,7 +194,7 @@ class PlaybookGenerator:
         mapping = {
             "daily": "daily_analysis",
             "weekly": "weekly_analysis",
-            "wfo": "wfo",
+            "monthly": "monthly_validation",
             "triage": "triage",
             "discovery": "discovery_analysis",
             "reasoning": "outcome_reasoning",

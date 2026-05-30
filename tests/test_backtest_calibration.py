@@ -222,8 +222,8 @@ class TestPipelineOverride:
 
 
 class TestAutoOutcomeMeasurerIntegration:
-    def test_measurer_calls_calibration_tracker(self, tmp_path: Path):
-        """AutoOutcomeMeasurer feeds outcome to calibration tracker."""
+    def test_measurer_does_not_write_calibration_tracker(self, tmp_path: Path):
+        """AutoOutcomeMeasurer is early-warning only and does not update calibration."""
         from skills.auto_outcome_measurer import AutoOutcomeMeasurer
 
         cal_tracker = BacktestCalibrationTracker(tmp_path / "cal")
@@ -246,7 +246,7 @@ class TestAutoOutcomeMeasurerIntegration:
 
         result = measurer.measure("sug1", "bot1", "2026-03-01")
         if result:
-            # Calibration tracker should have been called
+            # Calibration tracker keeps the prediction only; no outcome fan-out.
             records = cal_tracker._load_all()
             assert len(records) == 1
-            assert records[0].actual_composite_delta is not None
+            assert records[0].actual_composite_delta is None

@@ -31,10 +31,10 @@ def project_dir(tmp_path: Path) -> Path:
     (base / ".assistant" / "sessions" / "daily_analysis" / "2026-03-01" / "sessions.jsonl").write_text('{"session_id":"s1"}\n')
     (base / ".assistant" / "sessions" / "daily_analysis" / "2026-03-02").mkdir(parents=True)
     (base / ".assistant" / "sessions" / "daily_analysis" / "2026-03-02" / "sessions.jsonl").write_text('{"session_id":"s2"}\n')
-    (base / ".assistant" / "sessions" / "wfo" / "2026-03-01").mkdir(parents=True)
-    (base / ".assistant" / "sessions" / "wfo" / "2026-03-01" / "sessions.jsonl").write_text('{"session_id":"s3"}\n')
+    (base / ".assistant" / "sessions" / "monthly_validation" / "2026-03-01").mkdir(parents=True)
+    (base / ".assistant" / "sessions" / "monthly_validation" / "2026-03-01" / "sessions.jsonl").write_text('{"session_id":"s3"}\n')
     (base / "runs" / "daily-2026-03-01").mkdir(parents=True)
-    (base / "runs" / "wfo-bot1-2026-03-01").mkdir(parents=True)
+    (base / "runs" / "monthly-validation-bot1-2026-03-01").mkdir(parents=True)
     findings = base / "findings"
     findings.mkdir()
     _write_entries(findings / "corrections.jsonl", [{"bot_id": f"b{i}"} for i in range(5)])
@@ -161,14 +161,14 @@ class TestRebuildIndex:
         index = consolidator.rebuild_index()
         assert "daily_analysis" in index.sessions_by_agent_type
         assert len(index.sessions_by_agent_type["daily_analysis"]) == 2
-        assert "wfo" in index.sessions_by_agent_type
+        assert "monthly_validation" in index.sessions_by_agent_type
         assert index.total_sessions == 3
 
     def test_scans_runs(self, project_dir: Path):
         consolidator = MemoryConsolidator(project_dir / "findings", base_dir=project_dir)
         index = consolidator.rebuild_index()
         assert "daily-2026-03-01" in index.run_ids
-        assert "wfo-bot1-2026-03-01" in index.run_ids
+        assert "monthly-validation-bot1-2026-03-01" in index.run_ids
 
     def test_counts_findings(self, project_dir: Path):
         consolidator = MemoryConsolidator(project_dir / "findings", base_dir=project_dir)

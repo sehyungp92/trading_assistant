@@ -1211,6 +1211,7 @@ class TestScorerPortfolioIntegration:
         outcomes = measurer.measure_deployed()
         assert len(outcomes) == 1
         assert outcomes[0]["verdict"] == "positive"  # lowercase, not "POSITIVE"
+        assert outcomes[0]["outcome_source"] == "early_warning"
 
         # Negative case
         (findings / "portfolio_outcomes.jsonl").write_text("")  # reset

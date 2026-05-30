@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus
+from schemas.approval import ApprovalRequest, ApprovalStatus
 from skills.approval_tracker import ApprovalTracker
 
 

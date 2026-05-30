@@ -312,6 +312,8 @@ class DailySnapshot(BaseModel):
     per_strategy_summary: dict = {}
     overlay_state_summary: dict | None = None
     experiment_breakdown: dict | None = None  # 1.4: swing_multi_01 per-experiment A/B stats
+    lineage_summary: dict | None = None
+    lineage_gap: bool = False
 
     # Macro regime context (from portfolio-level HMM classifier)
     regime_context: dict | None = None  # RegimeContext snapshot (macro_regime, confidence, stress, etc.)

@@ -9,4 +9,4 @@
 - CRITICAL errors: immediate
 - Daily report: evening (configurable)
 - Weekly summary: Sunday evening
-- WFO results: when complete
+- Monthly validation results: when complete

@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from schemas.wfo_config import CostModelConfig, SlippageModel
+from schemas.cost_model import CostModelConfig, SlippageModel
 
 logger = logging.getLogger(__name__)
 

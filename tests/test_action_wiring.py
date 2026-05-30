@@ -6,8 +6,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from orchestrator.scheduler import (
     SchedulerConfig,
     build_scheduled_job_specs,
@@ -155,51 +153,6 @@ class TestStrategyIdeation:
         loaded = json.loads(lines[0])
         assert loaded["idea_id"] == "test123"
 
-
-# ── Prediction recalibration ──
-
-class TestPredictionRecalibration:
-    def test_daily_prompt_contains_recalibration_instructions(self):
-        from analysis.prompt_assembler import _FOCUSED_INSTRUCTIONS
-
-        assert "PREDICTION TRACK RECORD" in _FOCUSED_INSTRUCTIONS
-        assert "accuracy < 50%" in _FOCUSED_INSTRUCTIONS
-        assert "accuracy > 70%" in _FOCUSED_INSTRUCTIONS
-
-    def test_weekly_prompt_contains_recalibration_instructions(self):
-        from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
-
-        assert "PREDICTION TRACK RECORD" in _FOCUSED_WEEKLY_INSTRUCTIONS
-        assert "systematic biases" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_daily_prompt_contains_ground_truth(self):
-        from analysis.prompt_assembler import _FOCUSED_INSTRUCTIONS
-
-        assert "GROUND TRUTH PERFORMANCE" in _FOCUSED_INSTRUCTIONS
-
-    def test_weekly_prompt_contains_ground_truth(self):
-        from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
-
-        assert "GROUND TRUTH PERFORMANCE" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_weekly_prompt_contains_synthesis(self):
-        from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
-
-        assert "LEARNING SYNTHESIS" in _FOCUSED_WEEKLY_INSTRUCTIONS
-        assert "what_worked" in _FOCUSED_WEEKLY_INSTRUCTIONS
-        assert "discard" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_weekly_prompt_contains_strategy_ideas(self):
-        from analysis.weekly_prompt_assembler import _FOCUSED_WEEKLY_INSTRUCTIONS
-
-        assert "STRATEGY IDEAS" in _FOCUSED_WEEKLY_INSTRUCTIONS
-
-    def test_daily_prompt_contains_blocked_approaches(self):
-        from analysis.prompt_assembler import _FOCUSED_INSTRUCTIONS
-
-        assert "BLOCKED APPROACHES" in _FOCUSED_INSTRUCTIONS
-
-
 # ── Discovery prompt ──
 
 class TestDiscoveryPromptStrategyIdeation:
@@ -279,28 +232,3 @@ class TestTransferFromReasoning:
             source_bot="only_bot",
         )
         assert len(targets) == 0
-
-
-# ── Context builder spurious outcomes ──
-# (strategy_ideas base-package loading is covered by
-# tests/test_ground_truth.py::TestContextInjection::test_strategy_ideas_in_base_package)
-
-
-class TestContextBuilderStrategyIdeas:
-    def test_spurious_outcomes_loaded(self, tmp_path: Path):
-        from analysis.context_builder import ContextBuilder
-
-        memory_dir = tmp_path / "memory"
-        (memory_dir / "findings").mkdir(parents=True)
-        (memory_dir / "policies" / "v1").mkdir(parents=True)
-
-        spurious_path = memory_dir / "findings" / "spurious_outcomes.jsonl"
-        spurious_path.write_text(json.dumps({
-            "suggestion_id": "s1",
-            "mechanism": "Coincidental regime shift",
-        }) + "\n")
-
-        ctx = ContextBuilder(memory_dir)
-        pkg = ctx.base_package()
-        assert "spurious_outcomes" in pkg.data
-        assert len(pkg.data["spurious_outcomes"]) == 1

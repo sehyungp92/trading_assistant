@@ -21,6 +21,7 @@ from orchestrator.subagent import CapacityExceeded
 from orchestrator.task_registry import TaskRegistry
 from orchestrator.tz_utils import bot_trading_date
 from schemas.bot_config import BotConfig
+from skills.lineage_utils import missing_required_lineage_fields
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class Worker:
         self.on_triage: Callable[[Action], Awaitable[None]] | None = None
         self.on_daily_analysis: Callable[[Action], Awaitable[None]] | None = None
         self.on_weekly_analysis: Callable[[Action], Awaitable[None]] | None = None
-        self.on_wfo: Callable[[Action], Awaitable[None]] | None = None
+        self.on_monthly_validation: Callable[[Action], Awaitable[None]] | None = None
         self.on_notification: Callable[[Action], Awaitable[None]] | None = None
         self.on_feedback: Callable[[Action], Awaitable[None]] | None = None
 
@@ -59,8 +60,9 @@ class Worker:
 
     def _emit(self, event_type: str, data: dict | None = None) -> None:
         """Broadcast an event to the SSE stream (if attached)."""
-        if self._event_stream:
-            self._event_stream.broadcast(event_type, data)
+        event_stream = getattr(self, "_event_stream", None)
+        if event_stream:
+            event_stream.broadcast(event_type, data)
 
     async def drain(self, batch_size: int = 200, time_budget_seconds: float = 30.0) -> int:
         """Process pending events until the queue is empty or the time budget expires.
@@ -154,6 +156,7 @@ class Worker:
         # Ensure bot_id survives envelope stripping
         if isinstance(payload, dict) and "bot_id" not in payload:
             payload["bot_id"] = action.bot_id
+        self._emit_lineage_missing_if_needed(action.bot_id, event_type, payload)
         date = self._resolve_raw_event_date(action.bot_id, details, payload)
         bot_dir = self._raw_data_dir / date / action.bot_id
         bot_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +167,23 @@ class Worker:
                 f.write(line + "\n")
         except Exception:
             logger.warning("Failed to persist raw event %s for %s", event_type, action.bot_id)
+
+    def _emit_lineage_missing_if_needed(self, bot_id: str, event_type: str, payload: object) -> None:
+        if event_type not in {"trade", "missed_opportunity"}:
+            return
+        missing = missing_required_lineage_fields(payload)
+        if not missing:
+            return
+        severity = "blocking" if {"strategy_version", "config_version", "deployment_id"} & set(missing) else "warning"
+        self._emit(
+            "lineage_missing",
+            {
+                "bot_id": bot_id,
+                "event_type": event_type,
+                "missing_fields": missing,
+                "severity": severity,
+            },
+        )
 
     def _resolve_raw_event_date(self, bot_id: str, details: dict, payload: object) -> str:
         if isinstance(payload, dict):
@@ -263,11 +283,11 @@ class Worker:
             else:
                 logger.info("Weekly analysis triggered but no handler set: %s", action.event_id)
 
-        elif action.type == ActionType.SPAWN_WFO:
-            if self.on_wfo:
-                await self.on_wfo(action)
+        elif action.type == ActionType.SPAWN_MONTHLY_VALIDATION:
+            if self.on_monthly_validation:
+                await self.on_monthly_validation(action)
             else:
-                logger.info("WFO triggered but no handler set: %s", action.event_id)
+                logger.info("Monthly validation triggered but no handler set: %s", action.event_id)
 
         elif action.type == ActionType.SEND_NOTIFICATION:
             if self.on_notification:

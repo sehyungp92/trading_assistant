@@ -84,8 +84,8 @@ class TestControlSurfaceUpdate:
         mock_adapter._bot.edit_message_text.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_update_wfo_status(self, surface, mock_adapter):
+    async def test_update_monthly_validation_status(self, surface, mock_adapter):
         panel = ControlPanelState(date="2026-03-01")
         await surface.publish(panel)
-        await surface.update_field(wfo_status="Bot2 complete — ADOPT")
+        await surface.update_field(monthly_validation_status="Bot2 complete")
         assert mock_adapter._bot.edit_message_text.call_count == 1

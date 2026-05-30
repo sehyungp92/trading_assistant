@@ -48,6 +48,10 @@ class SuggestionRecord(BaseModel):
     approval_request_id: Optional[str] = None
     deployment_id: Optional[str] = None
     pr_url: Optional[str] = None
+    outcome_source: str = ""  # early_warning | monthly | follow_up
+    outcome_source_history: list[dict] = Field(default_factory=list)
+    monthly_outcome_id: Optional[str] = None
+    strategy_change_record_id: Optional[str] = None
     target_param: Optional[str] = None
     proposed_value: Optional[float] = None
     expected_impact: str = ""
@@ -71,6 +75,10 @@ class SuggestionOutcome(BaseModel):
     measured_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    outcome_source: str = "early_warning"
+    monthly_outcome_id: Optional[str] = None
+    strategy_change_record_id: Optional[str] = None
+    verdict: str = ""
 
     @property
     def net_positive_7d(self) -> bool:

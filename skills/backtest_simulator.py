@@ -14,7 +14,7 @@ import statistics
 from collections import defaultdict
 
 from schemas.events import TradeEvent, MissedOpportunityEvent
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 from skills.cost_model import CostModel
 
 

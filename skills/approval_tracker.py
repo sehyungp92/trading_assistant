@@ -12,7 +12,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus, RepoRiskTier
+from schemas.approval import ApprovalRequest, ApprovalStatus, RepoRiskTier
 
 logger = logging.getLogger(__name__)
 

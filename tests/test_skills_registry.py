@@ -91,7 +91,7 @@ class TestFilePathChecks:
 class TestShellChecks:
     def test_shell_denied_by_default(self):
         registry = SkillsRegistry()
-        result = registry.check_shell(AgentType.WFO)
+        result = registry.check_shell(AgentType.MONTHLY_VALIDATION)
         assert result.allowed is False
 
     def test_custom_override_can_enable_shell(self):

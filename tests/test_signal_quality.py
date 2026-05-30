@@ -3,81 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-from analysis.context_builder import _apply_temporal_window
-
-
-# ── Temporal Decay ──
-
-class TestTemporalDecay:
-    def test_recent_entries_scored_higher(self):
-        """Recent entries appear before older ones."""
-        now = datetime.now(timezone.utc)
-        entries = [
-            {"timestamp": (now - timedelta(days=30)).isoformat(), "id": "old"},
-            {"timestamp": (now - timedelta(days=1)).isoformat(), "id": "recent"},
-            {"timestamp": (now - timedelta(days=15)).isoformat(), "id": "mid"},
-        ]
-        result = _apply_temporal_window(entries)
-        ids = [e["id"] for e in result]
-        assert ids[0] == "recent"
-        assert ids[1] == "mid"
-        assert ids[2] == "old"
-
-    def test_entries_without_timestamps_last(self):
-        """Entries without timestamps go after timestamped ones."""
-        now = datetime.now(timezone.utc)
-        entries = [
-            {"id": "no_ts"},
-            {"timestamp": (now - timedelta(days=1)).isoformat(), "id": "has_ts"},
-        ]
-        result = _apply_temporal_window(entries)
-        assert result[0]["id"] == "has_ts"
-        assert result[1]["id"] == "no_ts"
-
-    def test_old_entries_excluded(self):
-        """Entries older than max_age_days are excluded."""
-        now = datetime.now(timezone.utc)
-        entries = [
-            {"timestamp": (now - timedelta(days=100)).isoformat(), "id": "ancient"},
-            {"timestamp": (now - timedelta(days=5)).isoformat(), "id": "recent"},
-        ]
-        result = _apply_temporal_window(entries, max_age_days=90)
-        ids = [e["id"] for e in result]
-        assert "ancient" not in ids
-        assert "recent" in ids
-
-    def test_max_entries_cap(self):
-        """Result is capped at max_entries."""
-        now = datetime.now(timezone.utc)
-        entries = [
-            {"timestamp": (now - timedelta(days=i)).isoformat(), "id": f"e{i}"}
-            for i in range(20)
-        ]
-        result = _apply_temporal_window(entries, max_entries=5)
-        assert len(result) == 5
-
-    def test_decay_ordering_correct(self):
-        """Exponential decay gives correct relative ordering."""
-        now = datetime.now(timezone.utc)
-        # Day 0 should have score 1.0, day 14 should have score 0.5
-        entries = [
-            {"timestamp": (now - timedelta(days=14)).isoformat(), "id": "two_weeks"},
-            {"timestamp": now.isoformat(), "id": "today"},
-            {"timestamp": (now - timedelta(days=7)).isoformat(), "id": "one_week"},
-        ]
-        result = _apply_temporal_window(entries)
-        ids = [e["id"] for e in result]
-        assert ids == ["today", "one_week", "two_weeks"]
-
-    def test_empty_input(self):
-        result = _apply_temporal_window([])
-        assert result == []
-
 
 # ── Simplicity Criterion ──
 

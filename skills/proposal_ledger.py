@@ -1,7 +1,7 @@
 # skills/proposal_ledger.py
 """ProposalLedger — append-only JSONL store for unified proposal records.
 
-Every parameter/structural/discovery/WFO/portfolio proposal flows through this
+Every parameter/structural/discovery/portfolio proposal flows through this
 ledger so the weekly LearningCycle can ask:
   - what proposals were produced?
   - which were evaluated, accepted, deployed?

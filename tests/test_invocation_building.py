@@ -266,8 +266,10 @@ class TestWorkflowMapping:
 
         assert runner._resolve_workflow("daily_analysis") == AgentWorkflow.DAILY_ANALYSIS
         assert runner._resolve_workflow("weekly_analysis") == AgentWorkflow.WEEKLY_ANALYSIS
-        assert runner._resolve_workflow("wfo") == AgentWorkflow.WFO
+        assert runner._resolve_workflow("monthly_validation") == AgentWorkflow.MONTHLY_VALIDATION
+        assert runner._resolve_workflow("monthly_model_review") == AgentWorkflow.MONTHLY_MODEL_REVIEW
         assert runner._resolve_workflow("triage") == AgentWorkflow.TRIAGE
+        assert runner._resolve_workflow("wfo") is None
 
     def test_unknown_agent_type_returns_none(self, runner: AgentRunner):
         assert runner._resolve_workflow("bug_report") is None

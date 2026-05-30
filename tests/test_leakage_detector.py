@@ -1,6 +1,6 @@
 # tests/test_leakage_detector.py
-"""Tests for WFO leakage detector."""
-from schemas.wfo_results import LeakageAuditEntry
+"""Tests for temporal leakage detection."""
+from schemas.validation_results import LeakageAuditEntry
 from skills.leakage_detector import LeakageDetector, FeatureRecord, LabelRecord
 
 

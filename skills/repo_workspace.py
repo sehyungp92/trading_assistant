@@ -6,8 +6,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from schemas.autonomous_pipeline import RepoTaskContext
-from schemas.autonomous_pipeline import BotConfigProfile
+from schemas.bot_profile import BotConfigProfile
+from schemas.repo_task import RepoTaskContext
 
 
 class RepoWorkspaceManager:

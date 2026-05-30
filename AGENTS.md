@@ -19,7 +19,7 @@ uvicorn orchestrator.app:app --reload   # start orchestrator on :8000
 orchestrator/   — brain, worker, scheduler, event queue, handlers, config
   db/           — SQLite schema + queue (idempotent dedup by event_id)
 analysis/       — prompt assemblers, strategy engine, context builders, response parser/validator
-skills/         — data pipelines (daily metrics, WFO, backtesting, ground truth, parameter search, etc.)
+skills/         — data pipelines (daily metrics, monthly validation, replay artifacts, ground truth, outcomes, etc.)
 comms/          — Telegram, Discord, Email adapters + dispatcher + renderers + message bus
 schemas/        — all Pydantic v2 models
 memory/         — policies/ (human-edited, versioned) + findings/ (system-written, time-scoped)
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install-startup.ps1
 ```
 
 Missed scheduled jobs (laptop off) are caught up on startup via `orchestrator/catchup.py`.
-APScheduler `misfire_grace_time` also allows late-firing (12h for daily, 48h for weekly/WFO).
+APScheduler `misfire_grace_time` also allows late-firing (12h for daily, 48h for weekly/monthly jobs).
 
 ## Event Flow
 
@@ -123,7 +123,7 @@ OUTPUT DIR: runs/<task_id>/
 | Daily Analysis | cron per timezone | curated daily data, portfolio risk card | daily_report.md, report_checklist |
 | Weekly Summary | Sunday cron | 7 daily reports, 30d rolling metrics | weekly_report.md |
 | Strategy Refinement | weekly report flags issue | 90d bot data filtered by regime | refinement_proposal.md |
-| WFO | weekly/monthly cron | historical data + wfo_config.yaml | wfo_report.md, draft PR |
+| Monthly Validation | monthly cron | market-data coverage, replay artifacts, parity report, monthly candidate review | monthly validation report, approval request or shadow record |
 | Bug Triage | HIGH error event | stack trace + source files | diagnosis + optional fix PR |
 | Comms | after any report | report markdown | formatted Telegram/Discord/email |
 

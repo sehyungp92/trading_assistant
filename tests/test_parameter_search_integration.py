@@ -10,15 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-from schemas.autonomous_pipeline import (
-    ApprovalRequest,
+from schemas.approval import ApprovalRequest
+from schemas.parameter_definition import ParameterDefinition, ParameterType
+from schemas.repo_changes import (
     ChangeKind,
-    ParameterDefinition,
-    ParameterType,
 )
 from schemas.events import TradeEvent, MissedOpportunityEvent
 from schemas.parameter_search import ParameterSearchReport, SearchRouting
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 from skills.approval_tracker import ApprovalTracker
 from skills.autonomous_pipeline import AutonomousPipeline
 from skills.config_registry import ConfigRegistry

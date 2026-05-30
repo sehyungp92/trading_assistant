@@ -6,7 +6,7 @@ import logging
 import math
 from typing import Any
 
-from schemas.autonomous_pipeline import ParameterDefinition
+from schemas.parameter_definition import ParameterDefinition
 from schemas.events import TradeEvent, MissedOpportunityEvent
 from schemas.objective_weights import (
     W_CALMAR_NO_PROCESS,
@@ -21,8 +21,8 @@ from schemas.parameter_search import (
     SearchRouting,
 )
 from skills.regime_parameter_analyzer import RegimeParameterAnalyzer
-from schemas.wfo_config import ParameterDef, ParameterSpace, RobustnessConfig
-from schemas.wfo_results import SimulationMetrics
+from schemas.parameter_space import ParameterDef, ParameterSpace, RobustnessConfig
+from schemas.simulation_metrics import SimulationMetrics
 from skills.backtest_simulator import BacktestSimulator
 from skills.config_registry import ConfigRegistry
 from skills.cost_model import CostModel

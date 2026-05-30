@@ -1,7 +1,7 @@
 """SlippageAnalyzer — computes per-symbol, per-hour slippage distributions.
 
 Uses spread_at_entry from TradeEvent as the primary slippage signal.
-Exports regime->bps mapping for WFO cost model empirical mode.
+Exports regime->bps mapping for empirical cost models.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class SlippageAnalyzer:
         )
 
     def export_regime_bps(self, trades: list[TradeEvent]) -> dict[str, float]:
-        """Export regime->mean_bps mapping for WFO cost model."""
+        """Export regime->mean_bps mapping for empirical cost models."""
         by_regime: dict[str, list[float]] = defaultdict(list)
         for t in trades:
             if t.spread_at_entry > 0 and t.market_regime:

@@ -49,8 +49,8 @@ class PlainTextRenderer:
             lines.append("Daily report ready")
         if panel.alert_count > 0:
             lines.append(f"{panel.alert_count} alert(s): {panel.alert_summary}")
-        if panel.wfo_status:
-            lines.append(f"WFO: {panel.wfo_status}")
+        if panel.monthly_validation_status:
+            lines.append(f"Monthly validation: {panel.monthly_validation_status}")
         lines.append(f"{panel.pending_pr_count} PRs pending")
         lines.append(f"Risk: {panel.risk_status} ({panel.risk_detail})")
         lines.append("")

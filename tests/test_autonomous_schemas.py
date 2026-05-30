@@ -5,22 +5,23 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from schemas.autonomous_pipeline import (
+from schemas.approval import (
     ApprovalRequest,
     ApprovalStatus,
     BacktestComparison,
     BacktestContext,
-    BotConfigProfile,
+)
+from schemas.bot_profile import BotConfigProfile
+from schemas.parameter_definition import ParameterDefinition, ParameterType
+from schemas.repo_changes import (
     FileChange,
-    ParameterDefinition,
-    ParameterType,
     PreflightResult,
     PRRequest,
     PRResult,
     PRReviewStatus,
     ReviewState,
 )
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 
 
 class TestParameterDefinition:

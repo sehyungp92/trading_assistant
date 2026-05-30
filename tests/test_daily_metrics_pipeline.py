@@ -1137,7 +1137,7 @@ class TestParameterChangeLog:
     def test_builds_parameter_change_log(self):
         builder = DailyMetricsBuilder("2026-03-01", "bot1")
         events = [
-            {"payload": {"strategy_id": "ATRSS", "param_name": "stop_atr_mult", "old_value": 1.5, "new_value": 2.0, "reason": "WFO optimization"}},
+            {"payload": {"strategy_id": "ATRSS", "param_name": "stop_atr_mult", "old_value": 1.5, "new_value": 2.0, "reason": "monthly validation"}},
             {"payload": {"strategy_id": "ATRSS", "param_name": "tp_ratio", "old_value": 2.0, "new_value": 2.5, "reason": "Manual"}},
             {"payload": {"strategy_id": "AKC_HELIX", "param_name": "entry_threshold", "old_value": 0.7, "new_value": 0.8, "reason": "Backtest"}},
         ]

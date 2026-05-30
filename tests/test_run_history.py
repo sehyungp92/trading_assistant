@@ -72,7 +72,7 @@ def test_record_run_on_failure(handlers_with_tmp):
 
 def test_task_records_include_duration(handlers_with_tmp):
     handlers, path = handlers_with_tmp
-    handlers._record_run("wfo-bot1-2026-03-04", "wfo", "completed",
+    handlers._record_run("monthly-validation-bot1-2026-03-04", "monthly_validation", "completed",
                          duration_ms=45000)
 
     entry = json.loads(path.read_text().strip())

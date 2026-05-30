@@ -50,8 +50,9 @@ def handlers_with_stream(tmp_path, event_stream):
     (tmp_path / "memory" / "policies" / "v1").mkdir(parents=True)
     (tmp_path / "memory" / "findings").mkdir(parents=True)
     # Create trade data so minimum-data threshold passes for daily analysis tests
-    import datetime as _dt
-    today = _dt.date.today().isoformat()
+    from datetime import datetime as _datetime, timezone as _timezone
+
+    today = _datetime.now(_timezone.utc).strftime("%Y-%m-%d")
     bot_dir = tmp_path / "data" / "curated" / today / "bot1"
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / "trades.jsonl").write_text(

@@ -1,5 +1,5 @@
 # analysis/weekly_prompt_assembler.py
-"""Weekly prompt assembler — builds context package for weekly analysis runtime invocation.
+"""Weekly prompt assembler - builds context package for weekly analysis runtime invocation.
 
 Uses deterministic weekly triage for computed summaries and focused analytical
 questions. Claude reasons about retrospective accuracy and discovers novel patterns
@@ -21,7 +21,7 @@ _FOCUSED_WEEKLY_INSTRUCTIONS = """\
 You are analyzing a week of trading data. A deterministic triage system has
 pre-computed summaries and identified what deserves your analytical attention.
 
-## COMPUTED WEEK SUMMARY (pre-computed — do NOT regenerate)
+## COMPUTED WEEK SUMMARY (pre-computed - do NOT regenerate)
 {computed_summary}
 
 ## ANOMALIES DETECTED
@@ -45,7 +45,7 @@ State a testable hypothesis, identify evidence for and against, and rate confide
 When proposing changes:
 1. Each suggestion MUST quantify expected Calmar ratio impact (return change + drawdown change)
 2. Evidence base required: trade count, time period, statistical significance
-3. Check category_scorecard: categories with win_rate < 30% (n≥5) need exceptional evidence
+3. Check category_scorecard: categories with win_rate < 30% (n>=5) need exceptional evidence
 4. Check rejected_suggestions: do NOT re-suggest without new evidence
 5. Check hypothesis_track_record: prioritize hypotheses with positive effectiveness
 6. Structural proposals MUST include acceptance_criteria with measurable metrics
@@ -61,7 +61,7 @@ Review portfolio-level data (if present) and propose at most 2 portfolio-level c
 - **Strategy engine detector findings**: If refinement_report data is present, it contains
   pre-computed statistical findings from 16 automated detectors. For the top 5
   highest-confidence findings, you MUST state AGREE or DISAGREE with 1-sentence
-  reasoning. Do NOT duplicate detector analysis — focus your effort on patterns
+  reasoning. Do NOT duplicate detector analysis - focus your effort on patterns
   the detectors cannot cover (structural issues, cross-bot interactions, novel market conditions)
 - **Allocation analysis**: validate quantitative rationale against your qualitative analysis
 
@@ -76,7 +76,7 @@ Portfolio proposal requirements:
 ## CROSS-BOT TRANSFER
 Review transfer_proposals (if present):
 - Compatibility > 0.7: recommend with implementation notes
-- Compatibility 0.4–0.7: flag as "worth investigating"
+- Compatibility 0.4-0.7: flag as "worth investigating"
 - Check transfer_track_record to favor proven patterns
 
 ## GROUND TRUTH PERFORMANCE (do not modify this evaluation)
@@ -93,15 +93,15 @@ If prediction_accuracy_by_metric data is present, recalibrate accordingly:
 
 ## DIRECTIONAL BIAS AWARENESS
 If forecast_meta_analysis contains directional_bias data:
-- "optimistic" bias: you predict improvement more than reality — reduce improve predictions
-- "pessimistic" bias: you predict decline more than reality — consider improve scenarios
+- "optimistic" bias: you predict improvement more than reality - reduce improve predictions
+- "pessimistic" bias: you predict decline more than reality - consider improve scenarios
 - Acknowledge your bias before making predictions in affected metrics
 
 ## LAST WEEK'S LEARNING SYNTHESIS (what the data shows)
 If last_week_synthesis data is present:
 - what_worked: Double down on these approaches. Propose similar changes.
 - what_failed: Do NOT retry unless conditions demonstrably changed.
-- discard: These categories have failed repeatedly — do NOT suggest them.
+- discard: These categories have failed repeatedly - do NOT suggest them.
 - lessons: Incorporate these insights into your current analysis.
 - ground_truth_deltas: Reference these for performance trajectory.
 
@@ -113,7 +113,7 @@ If strategy_ideas data is present, for each active idea:
 
 ## ACTIVE EXPERIMENTS
 If active_experiments data is present, do NOT propose changes that overlap with
-experiments currently in progress — let them complete their observation window.
+experiments currently in progress - let them complete their observation window.
 Reference experiment status when discussing related metrics.
 
 ## EXPERIMENT TRACK RECORD
@@ -123,8 +123,7 @@ proposals. Categories with low pass rates need stronger evidence before proposin
 
 ## BACKTEST RELIABILITY
 If backtest_reliability data is present, categories with reliability < 0.50
-should be addressed with structural changes rather than parameter tuning —
-the inner loop's backtests are unreliable for those categories.
+should be addressed with structural changes rather than parameter tuning - historical local backtests are unreliable for those categories.
 
 ## OPTIMIZATION ALLOCATION
 If optimization_allocation data is present, reference when proposing suggestions:
@@ -135,28 +134,28 @@ If optimization_allocation data is present, reference when proposing suggestions
 
 ## SEARCH SIGNAL QUALITY
 If search_signal_summary data is present:
-- approve_rate < 0.3: detector firing on noise — investigate threshold
-- approve_rate > 0.7: search productive — more suggestions in this category worthwhile
+- approve_rate < 0.3: detector firing on noise - investigate threshold
+- approve_rate > 0.7: search productive - more suggestions in this category worthwhile
 - Reference specific bot:category approve_rates when proposing parameter changes
 
 ## CYCLE EFFECTIVENESS TREND
 If `cycle_effectiveness_trend` data is present, it shows the normalized
 effectiveness score (0.0-1.0) for recent cycles. Use this to calibrate ambition:
-- Effectiveness trending up: current approach is working — propose incremental refinements
-- Effectiveness trending down: something is off — diagnose before proposing more changes
+- Effectiveness trending up: current approach is working - propose incremental refinements
+- Effectiveness trending down: something is off - diagnose before proposing more changes
 - Effectiveness plateau: consider targeted experiments to break through
 
 ## SUGGESTION QUALITY TREND
 If `suggestion_quality_trend` data is present, it shows whether suggestion
 generation quality is improving over time (hit rate, high-value category ratio).
-- Rising hit_rate: your suggestions are getting better — maintain approach
-- Falling hit_rate: recalibrate — check which categories are dragging quality down
-- Low high_value_ratio: too many suggestions in low-value categories — shift focus
+- Rising hit_rate: your suggestions are getting better - maintain approach
+- Falling hit_rate: recalibrate - check which categories are dragging quality down
+- Low high_value_ratio: too many suggestions in low-value categories - shift focus
 
 ## CONVERGENCE STATUS (learning loop health)
 If `convergence_report` is present, it shows whether the learning system is
 improving, degrading, oscillating, or stable across multiple dimensions.
-- If OSCILLATING: avoid reversing last week's suggestions — let changes settle
+- If OSCILLATING: avoid reversing last week's suggestions - let changes settle
 - If DEGRADING: question current approach fundamentals before proposing more changes
 - If IMPROVING: maintain current approach, propose incremental refinements only
 - Reference specific dimension statuses when justifying confidence levels
@@ -174,10 +173,11 @@ If outcome_reasonings data is present, reference the causal mechanisms that
 drove past successes and failures. Propose changes that leverage proven
 mechanisms and avoid mechanisms that have consistently failed.
 
-## PARAMETER SEARCH RESULTS
-If search_reports data is present, the autonomous inner loop has tested parameter
-neighborhoods this week. Reference these results when evaluating parameter-level
-suggestions — avoid re-proposing what the inner loop already explored.
+## HISTORICAL SEARCH RESULTS
+If search_reports data is present, treat it as historical read-only context from
+the retired local parameter-search path. Reference it only to avoid repeating
+discarded parameter ideas. Material parameter or strategy changes must be
+validated through the monthly evidence loop.
 
 ## MACRO REGIME ANALYSIS
 If macro_regime_context data is present in the base package:
@@ -187,8 +187,8 @@ If macro_regime_context data is present in the base package:
 - Cross-reference macro_regime_sensitivity from strategy profiles:
   e.g., DownturnDominator_v1 should be "disabled" in G/R but "full" in S/D
 - Evaluate regime config effectiveness: is regime_unit_risk_mult appropriate?
-  If losses persist despite reduced sizing → recommend more aggressive reduction
-  If winning strongly with heavy reduction → may be too conservative
+  If losses persist despite reduced sizing - recommend more aggressive reduction
+  If winning strongly with heavy reduction - may be too conservative
 - If a regime transition occurred this week, measure transition cost (P&L in ±5d window)
 - Note: stress_level is observational only (41% FPR). If reporting stress-stratified
   outcomes, caveat that the signal cannot reliably discriminate stress from normal volatility
@@ -197,20 +197,20 @@ If macro_regime_context data is present in the base package:
 
 ## INTER-STRATEGY COORDINATION
 If coordination_rules data is present:
-- Evaluate whether coordination signals fired correctly (e.g., ATRSS entry → AKC_HELIX
+- Evaluate whether coordination signals fired correctly (e.g., ATRSS entry - AKC_HELIX
   stop tightening). Did the coordination improve or hurt outcomes?
-- Check cooldown pair behavior — did cooldowns prevent good setups or correctly block whipsaws?
+- Check cooldown pair behavior - did cooldowns prevent good setups or correctly block whipsaws?
 - Assess direction filter agreement rates and quality of filtered trades
 - Review stock_coordination for symbol collision events and sizing adjustments
 
 ## ARCHETYPE-RELATIVE EVALUATION
 If strategy_profiles and archetype_expectations data are present:
 - Evaluate each strategy against its archetype's expected ranges, not universal benchmarks
-- Trend-followers with 40% win rate and 2.5R payoff are HEALTHY — do not suggest
+- Trend-followers with 40% win rate and 2.5R payoff are HEALTHY - do not suggest
   tightening stops to improve win rate
-- Breakout strategies with 35% win rate are NORMAL — focus on cost-per-attempt
+- Breakout strategies with 35% win rate are NORMAL - focus on cost-per-attempt
 - Flag strategies performing below archetype floor in their PREFERRED regime as problematic
-- Strategies underperforming in ADVERSE regimes is EXPECTED — do not propose changes
+- Strategies underperforming in ADVERSE regimes is EXPECTED - do not propose changes
 - Use portfolio_risk_config to validate that suggestions stay within risk bounds
 - For strategies with `sub_engines` in their profile, compare performance across engines
   to identify which engines perform best in each regime/vol state combination.
@@ -227,16 +227,14 @@ When engine_decomposition data spans multiple days, aggregate across the week:
 When ablation_analysis data is present across multiple days:
 - Look for flags where the on/off performance gap is consistent across the week
 - Flag ablation results with strong statistical significance (p < 0.05)
-- Safety-critical flags (stop-loss, circuit breakers, risk caps) require manual review —
-  do NOT propose toggling them autonomously
+- Safety-critical flags (stop-loss, circuit breakers, risk caps) require manual review - do NOT propose toggling them autonomously
 
 ## EXIT TIER OPTIMIZATION
 When exit_tier_analysis data is present:
 - Compare actual MFE distributions against configured TP tier targets
 - Identify tiers with very low hit rates (< 20%) that may need lowering
 - Identify tiers where lowering the target would capture significantly more trades
-- For mean_reversion_pullback archetype: high win rate + low payoff is expected —
-  flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
+- For mean_reversion_pullback archetype: high win rate + low payoff is expected - flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
 
 ## SELF-ASSESSMENT
 If self_assessment data is present, READ IT CAREFULLY. This summarizes your known
@@ -245,16 +243,16 @@ biases, weak categories, and recurring mistakes. You MUST:
 - Avoid or explicitly justify suggestions in weak categories
 - Not repeat patterns listed in recurring corrections
 
-## CONSTRAINTS (enforced by validator — violations are automatically stripped)
-- Do NOT restate the computed summary — it's above.
+## CONSTRAINTS (enforced by validator - violations are automatically stripped)
+- Do NOT restate the computed summary - it's above.
 - Focus analytical effort on the questions, not on re-summarizing data.
-- BLOCKED: NEGATIVE outcome_measurements categories — do NOT re-suggest similar approaches.
+- BLOCKED: NEGATIVE outcome_measurements categories - do NOT re-suggest similar approaches.
 - BLOCKED: structural proposals without acceptance_criteria with measurable metrics.
-- BLOCKED: hypotheses with effectiveness <= 0 or status="retired" — do NOT re-propose.
+- BLOCKED: hypotheses with effectiveness <= 0 or status="retired" - do NOT re-propose.
 - Overconfident predictions are capped by forecast_meta_analysis calibration data.
 - outcome_measurements contains only HIGH/MEDIUM quality data. spurious_outcomes
   (if present) had confounding factors (concurrent changes, regime shifts,
-  low/insufficient measurement quality) — treat as hypotheses, not evidence.
+  low/insufficient measurement quality) - treat as hypotheses, not evidence.
 
 ## STRUCTURED OUTPUT (REQUIRED)
 At the END of your analysis, emit a structured data block.
@@ -302,7 +300,7 @@ If B-grade trades lost money on aggregate this week, recommend disabling B entri
 
 **Cross-strategy correlation**: If all 3 strategies lost on the same days, the issue is macro/
 regime, not per-strategy tuning. Do NOT suggest parameter changes when the root cause is regime
-or market conditions — suggest regime gate changes instead.
+or market conditions - suggest regime gate changes instead.
 
 **Crypto evidence requirements**: Parameter changes on leveraged instruments require more
 evidence (leverage amplifies both signal and noise). Minimum 30 trades per grade/confluence
@@ -311,8 +309,8 @@ bucket before drawing conclusions. For leverage and risk_pct changes, require 60
 
 # Legacy instructions for when no triage is provided
 _WEEKLY_INSTRUCTIONS = _FOCUSED_WEEKLY_INSTRUCTIONS.format(
-    computed_summary="(No triage data — compute weekly summary manually from daily reports)",
-    anomalies="(No triage — review all weekly data for structural patterns)",
+    computed_summary="(No triage data - compute weekly summary manually from daily reports)",
+    anomalies="(No triage - review all weekly data for structural patterns)",
     retrospective_questions="Review past predictions and suggestions. Which were accurate and which were not? Why?",
     discovery_questions="What patterns in this week's data might the automated detectors miss?",
 )
@@ -380,9 +378,9 @@ class WeeklyPromptAssembler:
             bot_tag = f"[{a.bot_id}] " if a.bot_id else ""
             anomaly_lines.append(
                 f"{i}. **[{a.anomaly_type.upper()}]** {bot_tag}"
-                f"(severity: {a.severity}) — {a.description}"
+                f"(severity: {a.severity}) - {a.description}"
             )
-        anomalies_text = "\n".join(anomaly_lines) if anomaly_lines else "(No anomalies detected — stable week)"
+        anomalies_text = "\n".join(anomaly_lines) if anomaly_lines else "(No anomalies detected - stable week)"
 
         # Format retrospective questions
         retro_lines = []

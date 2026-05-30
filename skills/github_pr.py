@@ -6,8 +6,8 @@ import json
 import logging
 from pathlib import Path
 
-from schemas.autonomous_pipeline import (
-    BacktestComparison,
+from schemas.approval import BacktestComparison
+from schemas.repo_changes import (
     GitHubIssueRequest,
     GitHubIssueResult,
     PRRequest,

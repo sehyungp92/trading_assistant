@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, computed_field
 class PlaybookStatus(str, Enum):
     ACTIVE = "active"
     QUARANTINED = "quarantined"
+    ARCHIVED = "archived"
     INACTIVE = "inactive"
 
 
@@ -42,9 +43,17 @@ class GeneratedPlaybook(BaseModel):
     trigger_conditions: list[str] = Field(default_factory=list)
     required_evidence: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
     failure_modes: list[str] = Field(default_factory=list)
     provenance: str = ""
     status: PlaybookStatus = PlaybookStatus.ACTIVE
+    pinned_by: str = ""
+    archived_at: Optional[datetime] = None
+    archive_reason: str = ""
+    supersedes: list[str] = Field(default_factory=list)
+    superseded_by: str = ""
+    curator_action_ids: list[str] = Field(default_factory=list)
+    last_outcome_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def model_post_init(self, __context: object) -> None:
@@ -76,6 +85,8 @@ class GeneratedPlaybook(BaseModel):
             lines.append("Required evidence: " + "; ".join(self.required_evidence))
         if self.steps:
             lines.append("Steps: " + " | ".join(self.steps))
+        if self.expected_outputs:
+            lines.append("Expected outputs: " + "; ".join(self.expected_outputs))
         if self.failure_modes:
             lines.append("Failure modes: " + "; ".join(self.failure_modes))
         if self.provenance:

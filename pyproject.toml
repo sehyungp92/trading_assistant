@@ -1,7 +1,7 @@
 [project]
 name = "trading-assistant"
 version = "0.1.0"
-description = "Trading Assistant Agent System — Core Infrastructure"
+description = "Trading Assistant Agent System - Core Infrastructure"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
@@ -31,7 +31,7 @@ notifications = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["orchestrator*", "schemas*", "skills*", "analysis*", "comms*"]
+include = ["orchestrator*", "schemas*", "skills*", "analysis*", "comms*", "contracts*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

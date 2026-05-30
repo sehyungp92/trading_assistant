@@ -39,6 +39,7 @@ class BenchmarkCompiler:
         cases.extend(self._compile_negative_outcomes(cutoff))
         cases.extend(self._compile_calibration_misses(cutoff))
         cases.extend(self._compile_transfer_failures(cutoff))
+        cases.extend(self._compile_discarded_harness_experiments(cutoff))
 
         seen: set[str] = set()
         unique: list[BenchmarkCase] = []
@@ -53,6 +54,9 @@ class BenchmarkCompiler:
             "negative_outcomes": sum(1 for c in unique if c.source == BenchmarkSource.NEGATIVE_OUTCOME),
             "calibration_misses": sum(1 for c in unique if c.source == BenchmarkSource.CALIBRATION_MISS),
             "transfer_failures": sum(1 for c in unique if c.source == BenchmarkSource.TRANSFER_FAILURE),
+            "discarded_harness_experiments": sum(
+                1 for c in unique if c.source == BenchmarkSource.DISCARDED_HARNESS_EXPERIMENT
+            ),
         }
         return BenchmarkSuite(cases=unique, source_summary=summary)
 
@@ -101,6 +105,7 @@ class BenchmarkCompiler:
             reasons = [detail.get("reason", "") for detail in blocked_details if detail.get("reason")]
             run_id = entry.get("run_id", "")
             source_id = f"vlog:{entry.get('date', '')}:{entry.get('timestamp', '')}:{run_id}"
+            artifact_snapshot = self._run_artifact_snapshot(run_id)
 
             cases.append(BenchmarkCase(
                 case_id=BenchmarkCase.make_case_id(BenchmarkSource.VALIDATION_BLOCK, source_id),
@@ -134,7 +139,7 @@ class BenchmarkCompiler:
                     "bot_ids": entry.get("bot_ids", ""),
                     "run_id": run_id,
                 },
-                output_snapshot={"blocked_details": blocked_details},
+                output_snapshot={"blocked_details": blocked_details, **artifact_snapshot},
             ))
         return cases
 
@@ -162,6 +167,7 @@ class BenchmarkCompiler:
             model = entry.get("source_model", "") or detection_context.get("source_model", "")
             workflow = self._infer_workflow(source_run_id)
             pnl_delta = float(entry.get("pnl_after", 0.0) - entry.get("pnl_before", 0.0))
+            artifact_snapshot = self._run_artifact_snapshot(source_run_id)
 
             cases.append(BenchmarkCase(
                 case_id=BenchmarkCase.make_case_id(BenchmarkSource.NEGATIVE_OUTCOME, f"outcome:{suggestion_id}"),
@@ -203,6 +209,7 @@ class BenchmarkCompiler:
                     "win_rate_after": entry.get("win_rate_after", 0),
                     "verdict": entry.get("verdict", ""),
                     "measurement_quality": entry.get("measurement_quality", ""),
+                    **artifact_snapshot,
                 },
             ))
         return cases
@@ -229,6 +236,7 @@ class BenchmarkCompiler:
             workflow = self._infer_workflow(source_run_id)
             bot_id = entry.get("bot_id", "") or suggestion.get("bot_id", "")
             category = entry.get("category", "") or suggestion.get("category", "")
+            artifact_snapshot = self._run_artifact_snapshot(source_run_id)
 
             cases.append(BenchmarkCase(
                 case_id=BenchmarkCase.make_case_id(BenchmarkSource.CALIBRATION_MISS, f"recalib:{suggestion_id}"),
@@ -262,6 +270,7 @@ class BenchmarkCompiler:
                 output_snapshot={
                     "revised_confidence": revised,
                     "delta": delta,
+                    **artifact_snapshot,
                 },
             ))
         return cases
@@ -278,6 +287,7 @@ class BenchmarkCompiler:
             source_run_id = entry.get("source_run_id", "") or entry.get("proposal_run_id", "")
             target_bot = entry.get("target_bot", "")
             pattern_id = entry.get("pattern_id", "")
+            artifact_snapshot = self._run_artifact_snapshot(source_run_id)
 
             cases.append(BenchmarkCase(
                 case_id=BenchmarkCase.make_case_id(
@@ -321,6 +331,83 @@ class BenchmarkCompiler:
                     "win_rate_delta_7d": entry.get("win_rate_delta_7d", 0),
                     "regime_matched": entry.get("regime_matched", False),
                     "verdict": entry.get("verdict", ""),
+                    **artifact_snapshot,
+                },
+            ))
+        return cases
+
+    def _compile_discarded_harness_experiments(self, cutoff: datetime) -> list[BenchmarkCase]:
+        cases: list[BenchmarkCase] = []
+        for entry in self._load_jsonl("discarded_harness_experiments.jsonl"):
+            ts = self._parse_ts(entry)
+            if ts and ts < cutoff:
+                continue
+            experiment_id = str(entry.get("experiment_id", "") or "").strip()
+            variant_name = str(entry.get("variant_name", "") or "").strip()
+            if not experiment_id or not variant_name:
+                continue
+
+            governance = [
+                str(item).strip()
+                for item in entry.get("governance_regressions", [])
+                if str(item).strip()
+            ]
+            score_delta = float(entry.get("score_delta", 0.0) or 0.0)
+            severity = (
+                BenchmarkSeverity.CRITICAL
+                if governance
+                else BenchmarkSeverity.HIGH if score_delta <= -0.05 else BenchmarkSeverity.MEDIUM
+            )
+            changed_components = [
+                str(item).strip()
+                for item in entry.get("changed_components", [])
+                if str(item).strip()
+            ]
+            warnings = [
+                str(item).strip()
+                for item in entry.get("future_warning_tags", [])
+                if str(item).strip()
+            ]
+            program_ref = str(entry.get("program_ref", "") or "").strip()
+
+            cases.append(BenchmarkCase(
+                case_id=BenchmarkCase.make_case_id(
+                    BenchmarkSource.DISCARDED_HARNESS_EXPERIMENT,
+                    f"harness:{experiment_id}",
+                ),
+                source=BenchmarkSource.DISCARDED_HARNESS_EXPERIMENT,
+                source_id=f"harness:{experiment_id}",
+                severity=severity,
+                agent_type="harness_evaluation",
+                date=str(entry.get("recorded_at", ""))[:10],
+                title=f"Discarded harness experiment: {variant_name}",
+                description=str(entry.get("discard_reason", "") or entry.get("hypothesis", "")),
+                expected_behavior="Future harness experiments should avoid this rejected pattern.",
+                actual_behavior=f"Discarded with score delta {score_delta:+.4f}",
+                artifact_refs=[program_ref] if program_ref else [],
+                case_tags=self._case_tags(
+                    "source:discarded_harness_experiment",
+                    self._variant_tag(variant_name),
+                    *[self._component_tag(component) for component in changed_components],
+                    *[self._governance_tag(item) for item in governance],
+                    *warnings,
+                ),
+                score_profile={
+                    "score_delta": score_delta,
+                    "aggregate_score": float(entry.get("aggregate_score", 0.0) or 0.0),
+                    "baseline_score": float(entry.get("baseline_score", 0.0) or 0.0),
+                },
+                input_snapshot={
+                    "hypothesis": entry.get("hypothesis", ""),
+                    "changed_components": changed_components,
+                    "anti_overfitting_assessment": entry.get("anti_overfitting_assessment", ""),
+                    "program_ref": program_ref,
+                },
+                output_snapshot={
+                    "kept": bool(entry.get("kept", False)),
+                    "discard_reason": entry.get("discard_reason", ""),
+                    "governance_regressions": governance,
+                    "future_warning_tags": warnings,
                 },
             ))
         return cases
@@ -353,6 +440,46 @@ class BenchmarkCompiler:
             if artifact.exists():
                 refs.append(str((Path("runs") / run_id / name).as_posix()))
         return refs
+
+    def _run_artifact_snapshot(self, run_id: str) -> dict:
+        if not run_id:
+            return {}
+        run_dir = self._runs_dir / run_id
+        if not run_dir.exists():
+            return {}
+
+        snapshot: dict = {}
+        parsed = self._read_json(run_dir / "parsed_analysis.json")
+        if isinstance(parsed, dict):
+            snapshot["parsed_analysis"] = parsed
+
+        response = self._read_text(run_dir / "response.md", max_chars=80_000)
+        if response:
+            snapshot["raw_response"] = response
+
+        validator_notes = self._read_text(run_dir / "validator_notes.md", max_chars=20_000)
+        if validator_notes:
+            snapshot["validator_notes"] = validator_notes
+        return snapshot
+
+    @staticmethod
+    def _read_json(path: Path) -> dict | None:
+        if not path.exists():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _read_text(path: Path, *, max_chars: int) -> str:
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")[:max_chars]
+        except OSError:
+            return ""
 
     def _load_jsonl(self, filename: str) -> list[dict]:
         path = self._findings_dir / filename
@@ -402,7 +529,7 @@ class BenchmarkCompiler:
         prefixes = {
             "daily": "daily_analysis",
             "weekly": "weekly_analysis",
-            "wfo": "wfo",
+            "monthly": "monthly_validation",
             "triage": "triage",
             "discovery": "discovery_analysis",
             "reasoning": "outcome_reasoning",
@@ -457,6 +584,21 @@ class BenchmarkCompiler:
     def _reason_tag(cls, reason: str) -> str:
         slug = cls._slug(reason)
         return f"reason:{slug}" if slug else ""
+
+    @classmethod
+    def _component_tag(cls, component: str) -> str:
+        slug = cls._slug(component)
+        return f"component:{slug}" if slug else ""
+
+    @classmethod
+    def _governance_tag(cls, issue: str) -> str:
+        slug = cls._slug(issue)
+        return f"governance:{slug}" if slug else ""
+
+    @classmethod
+    def _variant_tag(cls, variant: str) -> str:
+        slug = cls._slug(variant)
+        return f"variant:{slug}" if slug else ""
 
     @staticmethod
     def _bot_values(bot_ids: str | list[str]) -> list[str]:

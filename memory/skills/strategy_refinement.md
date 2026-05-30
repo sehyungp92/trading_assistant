@@ -22,8 +22,8 @@ Weekly report flags degrading metrics, alpha decay, or structural issues (Tier 3
 ## Hypothesis Tiers
 | Tier | Example | Validation Required |
 |------|---------|-------------------|
-| PARAMETER | "Widen ATRSS stop from 1.0 to 1.3 ATR" | WFO validation |
-| FILTER | "Relax ADX filter from 25 to 20" | FilterSensitivity + WFO |
+| PARAMETER | "Widen ATRSS stop from 1.0 to 1.3 ATR" | Monthly full-fidelity validation |
+| FILTER | "Relax ADX filter from 25 to 20" | FilterSensitivity + monthly validation |
 | STRATEGY_VARIANT | "Add time-of-day gate for Helix" | 30-day backtest |
 | HYPOTHESIS | "Alpha decay detected — test new signal" | Full test plan required |
 

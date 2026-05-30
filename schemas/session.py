@@ -11,7 +11,7 @@ class SessionRecord(BaseModel):
     """Record of a single LLM invocation within an analysis session."""
 
     session_id: str
-    agent_type: str  # e.g. "daily_analysis", "weekly_analysis", "wfo", "triage"
+    agent_type: str  # e.g. "daily_analysis", "weekly_analysis", "monthly_validation", "triage"
     prompt_hash: str = ""  # SHA256 of the prompt package for dedup/tracking
     response_summary: str = ""  # First 500 chars of the response
     token_usage: dict = Field(default_factory=dict)  # {"input_tokens": N, "output_tokens": N}

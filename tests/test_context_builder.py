@@ -948,28 +948,6 @@ class TestBotAwareCardRetrieval:
                 tags=["workflow:weekly_analysis"],
             )
 
-    def test_wfo_assembler_passes_bot_id(self, tmp_path: Path):
-        """WFO assembler should pass self.bot_id to base_package."""
-        from analysis.wfo_prompt_assembler import WFOPromptAssembler
-        from unittest.mock import patch
-
-        memory_dir = tmp_path / "memory"
-        policy_dir = memory_dir / "policies" / "v1"
-        policy_dir.mkdir(parents=True)
-        (policy_dir / "agent.md").write_text("agent")
-        (policy_dir / "soul.md").write_text("soul")
-        (policy_dir / "trading_rules.md").write_text("rules")
-        (memory_dir / "findings").mkdir()
-
-        wfo_dir = tmp_path / "wfo_output"
-        wfo_dir.mkdir()
-        assembler = WFOPromptAssembler(bot_id="my_bot", memory_dir=memory_dir, wfo_output_dir=wfo_dir)
-
-        with patch.object(ContextBuilder, "base_package", wraps=assembler._ctx.base_package) as mock_bp:
-            assembler.assemble()
-            mock_bp.assert_called_once()
-            assert mock_bp.call_args.kwargs.get("bot_id") == "my_bot"
-
     def test_daily_assembler_single_bot_passes_bot_id(self, tmp_path: Path):
         """Daily assembler with single bot should pass bots[0] as bot_id."""
         from unittest.mock import patch

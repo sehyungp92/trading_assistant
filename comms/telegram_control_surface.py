@@ -38,7 +38,11 @@ class ControlSurface:
     async def update_field(self, **kwargs) -> None:
         if self._current_panel is None:
             return
-        updated = self._current_panel.model_copy(update=kwargs)
+        allowed_fields = set(ControlPanelState.model_fields)
+        updates = {key: value for key, value in kwargs.items() if key in allowed_fields}
+        if not updates:
+            return
+        updated = self._current_panel.model_copy(update=updates)
         self._current_panel = updated
         text, keyboard = self._renderer.render_control_panel_with_keyboard(updated)
         await self._adapter.edit_message(self._current_message_id, text, keyboard=keyboard)

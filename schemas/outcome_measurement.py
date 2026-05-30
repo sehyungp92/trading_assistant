@@ -83,6 +83,7 @@ class OutcomeMeasurement(BaseModel):
     # Cross-links into proposal/hypothesis graph (optional)
     proposal_id: Optional[str] = None
     hypothesis_id: Optional[str] = None
+    outcome_source: str = "early_warning"
     objective_version: str = OBJECTIVE_WEIGHTS_VERSION
 
     @computed_field  # type: ignore[prop-decorator]

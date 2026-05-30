@@ -11,7 +11,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from schemas.autonomous_pipeline import FileChange
+from schemas.repo_changes import FileChange
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +93,18 @@ class StructuralProposal(BaseModel):
     hypothesis_id: Optional[str] = None
     linked_suggestion_id: Optional[str] = None
     bot_id: str
+    affected_strategy_id: str = ""
+    affected_config_version: str = ""
     title: str
     description: str = ""
     reversibility: Literal["easy", "moderate", "hard"] = "moderate"
     evidence: str = ""
+    evidence_paths: list[str] = Field(default_factory=list)
+    risk_classification: str = ""
+    objective_impact: dict[str, float] = Field(default_factory=dict)
+    replay_or_experiment_plan: str = ""
+    rollback_plan: str = ""
+    routing: str = ""
     estimated_complexity: Literal["low", "medium", "high"] = "medium"
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     file_changes: list[FileChange] = Field(default_factory=list)

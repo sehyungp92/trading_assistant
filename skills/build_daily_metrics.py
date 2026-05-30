@@ -24,6 +24,7 @@ from schemas.events import (
     TradeEvent,
     normalize_strategy_id,
 )
+from skills.lineage_utils import build_lineage_summary
 from schemas.exit_efficiency import ExitEfficiencyStats
 from schemas.factor_attribution import FactorAttribution, FactorStats
 from schemas.daily_metrics import (
@@ -169,6 +170,10 @@ class DailyMetricsBuilder:
         trades: list[TradeEvent],
         missed: list[MissedOpportunityEvent],
     ) -> None:
+        lineage_events = [*trades, *missed]
+        if lineage_events:
+            summary.lineage_summary = build_lineage_summary(lineage_events)
+            summary.lineage_gap = bool(summary.lineage_summary.get("lineage_gap"))
         if not daily_snapshot:
             if missed:
                 summary.missed_count = len(missed)
@@ -203,6 +208,12 @@ class DailyMetricsBuilder:
         summary.exposure_pct = float(daily_snapshot.get("exposure_pct", summary.exposure_pct) or 0.0)
         summary.error_count = int(daily_snapshot.get("error_count", summary.error_count) or 0)
         summary.uptime_pct = float(daily_snapshot.get("uptime_pct", summary.uptime_pct) or 0.0)
+        if not summary.lineage_summary and daily_snapshot.get("lineage_summary"):
+            summary.lineage_summary = daily_snapshot.get("lineage_summary")
+            summary.lineage_gap = bool(
+                daily_snapshot.get("lineage_gap")
+                or summary.lineage_summary.get("lineage_gap", False)
+            )
 
         if missed:
             summary.missed_count = len(missed)
@@ -1645,7 +1656,7 @@ class DailyMetricsBuilder:
         if excursion["coverage"] > 0:
             self._write_json(output_dir / "excursion_stats.json", excursion)
 
-        # Write regime→bps mapping for WFO cost model
+        # Write regime bps mapping for empirical cost modeling.
         from skills.slippage_analyzer import SlippageAnalyzer as _SlipAnalyzer
         _sa = _SlipAnalyzer(bot_id=self.bot_id, date=self.date)
         self._write_json(output_dir / "regime_bps.json", _sa.export_regime_bps(trades))

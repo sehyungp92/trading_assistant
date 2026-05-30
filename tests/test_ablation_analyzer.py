@@ -570,7 +570,7 @@ class TestAblationRouting:
 
     def test_bool_value_type_uses_ablation(self):
         """param.value_type == 'bool' → ExperimentType.ABLATION."""
-        from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+        from schemas.parameter_definition import ParameterDefinition, ParameterType
 
         param = ParameterDefinition(
             param_name="use_gate",
@@ -591,7 +591,7 @@ class TestAblationRouting:
 
     def test_ablation_category_uses_ablation(self):
         """param.category == 'ablation' → ExperimentType.ABLATION."""
-        from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+        from schemas.parameter_definition import ParameterDefinition, ParameterType
 
         param = ParameterDefinition(
             param_name="oscillation_gate_threshold",
@@ -612,7 +612,7 @@ class TestAblationRouting:
 
     def test_float_value_type_uses_parameter_ab(self):
         """param.value_type == 'float' → ExperimentType.PARAMETER_AB (default)."""
-        from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+        from schemas.parameter_definition import ParameterDefinition, ParameterType
 
         param = ParameterDefinition(
             param_name="signal_strength_min",
@@ -634,7 +634,7 @@ class TestAblationRouting:
 
     def test_int_value_type_uses_parameter_ab(self):
         """param.value_type == 'int' → ExperimentType.PARAMETER_AB."""
-        from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+        from schemas.parameter_definition import ParameterDefinition, ParameterType
 
         param = ParameterDefinition(
             param_name="lookback_bars",
@@ -662,7 +662,7 @@ class TestAblationRouting:
 
     def test_bool_with_non_ablation_category_still_ablation(self):
         """bool value_type takes precedence over category."""
-        from schemas.autonomous_pipeline import ParameterDefinition, ParameterType
+        from schemas.parameter_definition import ParameterDefinition, ParameterType
 
         param = ParameterDefinition(
             param_name="use_filter",

@@ -52,6 +52,8 @@ class BotDailySummary(BaseModel):
     avg_process_quality: float = 100.0
     calmar_rolling_30d: float = 0.0
     per_strategy_summary: dict[str, PerStrategySummary] = {}
+    lineage_summary: dict | None = None
+    lineage_gap: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
     @property

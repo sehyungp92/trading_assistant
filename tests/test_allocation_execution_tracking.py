@@ -19,7 +19,6 @@ from schemas.portfolio_allocation import (
     PortfolioAllocationReport,
 )
 from skills.allocation_tracker import AllocationTracker
-from skills.drift_analyzer import DriftAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -109,122 +108,7 @@ class TestAllocationTrackerSnapshots:
 
 
 # ---------------------------------------------------------------------------
-# 3. DriftAnalyzer tests
-# ---------------------------------------------------------------------------
-
-class TestDriftAnalyzer:
-    def _make_report(self, recs: list[tuple[str, float]]) -> PortfolioAllocationReport:
-        return PortfolioAllocationReport(
-            week_start="2026-03-01",
-            week_end="2026-03-07",
-            recommendations=[
-                BotAllocationRecommendation(bot_id=bid, suggested_allocation_pct=pct)
-                for bid, pct in recs
-            ],
-        )
-
-    def test_compute_snapshot_basic(self):
-        report = self._make_report([("b1", 60.0), ("b2", 40.0)])
-        actual = {"b1": 50.0, "b2": 50.0}
-        snap = DriftAnalyzer.compute_snapshot(report, actual)
-        assert snap.date == "2026-03-01"
-        assert len(snap.bot_allocations) == 2
-        b1 = snap.bot_allocations[0]
-        assert b1.recommended_pct == 60.0
-        assert b1.actual_pct == 50.0
-        assert b1.drift_pct == 10.0
-        assert b1.abs_drift_pct == 10.0
-
-    def test_compute_snapshot_zero_drift(self):
-        report = self._make_report([("b1", 50.0), ("b2", 50.0)])
-        actual = {"b1": 50.0, "b2": 50.0}
-        snap = DriftAnalyzer.compute_snapshot(report, actual)
-        assert snap.total_drift_pct == 0.0
-        assert snap.max_single_drift_pct == 0.0
-
-    def test_compute_snapshot_missing_bot(self):
-        report = self._make_report([("b1", 60.0), ("b2", 40.0)])
-        actual = {"b1": 50.0}  # b2 missing
-        snap = DriftAnalyzer.compute_snapshot(report, actual)
-        b2 = snap.bot_allocations[1]
-        assert b2.actual_pct == 0.0
-        assert b2.drift_pct == 40.0
-
-    def test_compute_drift_trend_empty(self):
-        result = DriftAnalyzer.compute_drift_trend([])
-        assert result["weekly_drift"] == []
-        assert result["trend_direction"] == "stable"
-        assert result["avg_drift_pct"] == 0.0
-        assert result["persistent_drifters"] == []
-
-    def test_compute_drift_trend_stable(self):
-        snaps = [
-            {"date": f"2026-0{i+1}-01", "total_drift_pct": 3.0, "max_single_drift_pct": 2.0,
-             "bot_allocations": []}
-            for i in range(4)
-        ]
-        result = DriftAnalyzer.compute_drift_trend(snaps)
-        assert result["trend_direction"] == "stable"
-        assert result["avg_drift_pct"] == 3.0
-
-    def test_compute_drift_trend_increasing(self):
-        snaps = [
-            {"date": f"2026-01-0{i+1}", "total_drift_pct": float(i * 3), "max_single_drift_pct": 1.0,
-             "bot_allocations": []}
-            for i in range(6)
-        ]
-        # First half avg: (0+3+6)/3 = 3.0, second half avg: (9+12+15)/3 = 12.0
-        # diff = 9.0 > 2.0 → increasing
-        result = DriftAnalyzer.compute_drift_trend(snaps)
-        assert result["trend_direction"] == "increasing"
-
-    def test_compute_drift_trend_decreasing(self):
-        snaps = [
-            {"date": f"2026-01-0{i+1}", "total_drift_pct": float(15 - i * 3),
-             "max_single_drift_pct": 1.0, "bot_allocations": []}
-            for i in range(6)
-        ]
-        # First half avg: (15+12+9)/3 = 12.0, second half avg: (6+3+0)/3 = 3.0
-        # diff = -9.0 < -2.0 → decreasing
-        result = DriftAnalyzer.compute_drift_trend(snaps)
-        assert result["trend_direction"] == "decreasing"
-
-    def test_compute_drift_trend_persistent_drifters(self):
-        snaps = [
-            {
-                "date": f"2026-01-0{i+1}",
-                "total_drift_pct": 5.0,
-                "max_single_drift_pct": 8.0,
-                "bot_allocations": [
-                    {"bot_id": "b1", "abs_drift_pct": 8.0},  # always high
-                    {"bot_id": "b2", "abs_drift_pct": 2.0},  # always low
-                ],
-            }
-            for i in range(4)
-        ]
-        result = DriftAnalyzer.compute_drift_trend(snaps)
-        assert "b1" in result["persistent_drifters"]
-        assert "b2" not in result["persistent_drifters"]
-
-    def test_compute_drift_trend_short_history(self):
-        snaps = [{"date": "2026-01-01", "total_drift_pct": 5.0,
-                  "max_single_drift_pct": 3.0, "bot_allocations": []}]
-        result = DriftAnalyzer.compute_drift_trend(snaps)
-        assert len(result["weekly_drift"]) == 1
-        assert result["avg_drift_pct"] == 5.0
-
-    def test_compute_drift_trend_respects_weeks_limit(self):
-        snaps = [
-            {"date": f"2026-01-{i+1:02d}", "total_drift_pct": 1.0,
-             "max_single_drift_pct": 0.5, "bot_allocations": []}
-            for i in range(20)
-        ]
-        result = DriftAnalyzer.compute_drift_trend(snaps, weeks=4)
-        assert len(result["weekly_drift"]) == 4
-
-
-# ---------------------------------------------------------------------------
-# 4. Handler drift wiring
+# 3. Handler drift wiring
 # ---------------------------------------------------------------------------
 
 class TestHandlerDriftWiring:
@@ -414,7 +298,7 @@ class TestHandlerDriftWiring:
 
 
 # ---------------------------------------------------------------------------
-# 5. Weekly assembler drift integration
+# 4. Weekly assembler drift integration
 # ---------------------------------------------------------------------------
 
 class TestWeeklyAssemblerDrift:

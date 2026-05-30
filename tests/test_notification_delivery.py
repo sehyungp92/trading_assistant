@@ -264,7 +264,7 @@ class TestControlPanelState:
             daily_report_ready=True,
             alert_count=1,
             alert_summary="Bot3 volume filter",
-            wfo_status="Bot2 running (est. 45min)",
+            monthly_validation_status="Bot2 package ready",
             pending_pr_count=0,
             risk_status="OK",
             risk_detail="concentration: 35/100",

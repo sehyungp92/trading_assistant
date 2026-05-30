@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from orchestrator.scheduler import SchedulerConfig, create_scheduler_jobs
-from schemas.autonomous_pipeline import ApprovalRequest
+from schemas.approval import ApprovalRequest
 from skills.approval_tracker import ApprovalTracker
 
 
@@ -48,7 +48,7 @@ class TestAutonomousScheduler:
         tracker.create_request(old)
         expired = tracker.expire_old(max_age_days=7)
         assert "r_old" in expired
-        from schemas.autonomous_pipeline import ApprovalStatus
+        from schemas.approval import ApprovalStatus
         assert tracker.get_by_id("r_old").status == ApprovalStatus.EXPIRED
 
     def test_expiry_empty_tracker(self, tmp_path: Path):
@@ -162,5 +162,5 @@ class TestAutonomousScheduler:
         await _expire_approvals_with_notification(
             tracker, None, None, None,
         )
-        from schemas.autonomous_pipeline import ApprovalStatus
+        from schemas.approval import ApprovalStatus
         assert tracker.get_by_id("r_old").status == ApprovalStatus.EXPIRED

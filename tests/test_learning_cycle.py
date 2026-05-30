@@ -694,3 +694,49 @@ class TestSuggestionQualityTrendTimestampFix:
         # Should have at least one week with data (not empty due to missing timestamps)
         assert result.get("weekly_metrics") is not None
         assert len(result["weekly_metrics"]) > 0
+
+
+def test_learning_cycle_filters_non_strict_harness_cases_from_replay_suite(tmp_path: Path):
+    from schemas.benchmark_case import (
+        BenchmarkCase,
+        BenchmarkSeverity,
+        BenchmarkSource,
+        BenchmarkSuite,
+    )
+    from skills.harness_execution_runner import load_execution_inputs
+    from skills.learning_cycle import (
+        _executable_benchmark_suite,
+        _materialize_strict_harness_cases,
+    )
+
+    findings = tmp_path / "memory" / "findings"
+    evidence = findings / "source.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("{}", encoding="utf-8")
+    valid = BenchmarkCase(
+        case_id="valid-case",
+        source=BenchmarkSource.NEGATIVE_OUTCOME,
+        source_id="outcome:valid",
+        severity=BenchmarkSeverity.HIGH,
+        artifact_refs=["memory/findings/source.json"],
+        input_snapshot={"strategy_id": "strat1"},
+    )
+    invalid = BenchmarkCase(
+        case_id="invalid-case",
+        source=BenchmarkSource.VALIDATION_BLOCK,
+        source_id="validation:invalid",
+        severity=BenchmarkSeverity.HIGH,
+    )
+    suite = BenchmarkSuite(cases=[valid, invalid])
+
+    case_dirs = _materialize_strict_harness_cases(
+        findings_dir=findings,
+        benchmark_suite=suite,
+    )
+    execution_inputs = load_execution_inputs(case_dirs)
+    executable_suite = _executable_benchmark_suite(
+        benchmark_suite=suite,
+        execution_inputs=execution_inputs,
+    )
+
+    assert [case.case_id for case in executable_suite.cases] == ["valid-case"]

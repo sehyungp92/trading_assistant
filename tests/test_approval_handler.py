@@ -9,17 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-from schemas.autonomous_pipeline import (
+from schemas.approval import (
     ApprovalRequest,
     ApprovalStatus,
     BacktestComparison,
     BacktestContext,
+    RepoRiskTier,
+)
+from schemas.repo_changes import (
     ChangeKind,
     PreflightResult,
     PRResult,
-    RepoRiskTier,
 )
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 from skills.approval_handler import ApprovalHandler
 from skills.approval_tracker import ApprovalTracker
 from skills.config_registry import ConfigRegistry

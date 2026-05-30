@@ -16,7 +16,8 @@ class AgentProvider(str, Enum):
 class AgentWorkflow(str, Enum):
     DAILY_ANALYSIS = "daily_analysis"
     WEEKLY_ANALYSIS = "weekly_analysis"
-    WFO = "wfo"
+    MONTHLY_VALIDATION = "monthly_validation"
+    MONTHLY_MODEL_REVIEW = "monthly_model_review"
     TRIAGE = "triage"
 
 
@@ -50,6 +51,20 @@ class AgentPreferences(BaseModel):
     overrides: dict[AgentWorkflow, AgentSelection | None] = Field(default_factory=dict)
     fallback_chain: list[FallbackEntry] = Field(default_factory=list)
     workflow_tuning: dict[AgentWorkflow, WorkflowTuning] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_wfo(cls, data):
+        if not isinstance(data, dict):
+            return data
+        cleaned = dict(data)
+        for key in ("overrides", "workflow_tuning"):
+            value = cleaned.get(key)
+            if isinstance(value, dict) and "wfo" in value:
+                value = dict(value)
+                value.pop("wfo", None)
+                cleaned[key] = value
+        return cleaned
 
 
 class ProviderReadiness(BaseModel):

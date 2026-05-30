@@ -15,11 +15,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from schemas.autonomous_pipeline import (
-    BacktestComparison,
-    BacktestContext,
-)
-from schemas.wfo_results import SimulationMetrics
+from schemas.approval import BacktestComparison, BacktestContext
+from schemas.simulation_metrics import SimulationMetrics
 from skills.config_registry import ConfigRegistry
 
 logger = logging.getLogger(__name__)

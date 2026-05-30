@@ -1,5 +1,5 @@
 # analysis/context_builder.py
-"""Generic context builder — DRY policy and corrections loading for all prompt assemblers."""
+"""Generic context builder for shared policy and corrections loading."""
 from __future__ import annotations
 
 import json
@@ -44,13 +44,40 @@ def _safe_jsonl(path: Path) -> list[dict]:
     return out
 
 
+def _merge_retrieval_profile(base: dict, override: dict) -> dict:
+    """Merge a caller-supplied retrieval profile without dropping base context."""
+    if not override:
+        return base
+    merged = dict(base)
+    for key in ("tags", "query_terms"):
+        values: list[str] = []
+        seen: set[str] = set()
+        for source in (base.get(key, []), override.get(key, [])):
+            for raw in source or []:
+                value = str(raw or "").strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    values.append(value)
+        if values:
+            merged[key] = values
+    for key, value in override.items():
+        if key in {"tags", "query_terms"}:
+            continue
+        if value not in (None, "", [], {}):
+            merged[key] = value
+    return merged
+
+
 def _parse_timestamp(entry: dict) -> datetime | None:
     """Try to parse a timestamp from common fields."""
-    for key in ("timestamp", "created_at", "recorded_at", "date"):
+    for key in ("timestamp", "created_at", "updated_at", "recorded_at", "measured_at", "date"):
         val = entry.get(key)
         if val and isinstance(val, str):
             try:
-                return datetime.fromisoformat(val)
+                parsed = datetime.fromisoformat(val)
+                if "T" not in val and len(val) == 10:
+                    parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+                return parsed
             except (ValueError, TypeError):
                 pass
     return None
@@ -76,7 +103,7 @@ def _filter_inactive_strategies(
 
     Records with no `strategy_id` (legacy or genuinely bot-wide) and records
     whose `strategy_id` is still in the registry are kept. Records pinned to
-    a strategy_id that is no longer registered are silently dropped — this
+    a strategy_id that is no longer registered are silently dropped; this
     prevents retired strategies from polluting prompt context.
     """
     if registry is None:
@@ -96,9 +123,12 @@ def _apply_temporal_window(
     entries: list[dict],
     max_age_days: int = _FINDINGS_MAX_AGE_DAYS,
     max_entries: int = _FINDINGS_MAX_ENTRIES,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Sort by recency, exclude entries older than max_age_days, cap at max_entries."""
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     cutoff = now - timedelta(days=max_age_days)
 
     # Separate entries with and without timestamps
@@ -111,7 +141,10 @@ def _apply_temporal_window(
             # Make timezone-aware if naive
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
+            cutoff_date = cutoff.date()
+            if _has_date_only_timestamp(entry):
+                cutoff_date = cutoff_date - timedelta(days=1)
+            if ts.date() >= cutoff_date:
                 with_ts.append((ts, entry))
         else:
             without_ts.append(entry)
@@ -127,6 +160,11 @@ def _apply_temporal_window(
     result = [e for _, e in with_ts] + without_ts
 
     return result[:max_entries]
+
+
+def _has_date_only_timestamp(entry: dict) -> bool:
+    value = entry.get("date")
+    return isinstance(value, str) and len(value) == 10 and "T" not in value
 
 
 _DEFAULT_CONTEXT_BUDGET_ITEMS = 15
@@ -186,15 +224,21 @@ class ContextBuilder:
                 parts.append(f"--- {name} ---\n{path.read_text(encoding='utf-8')}")
         return "\n\n".join(parts)
 
-    def load_corrections(self, bot_id: str = "") -> list[dict]:
+    def load_corrections(
+        self,
+        bot_id: str = "",
+        *,
+        max_age_days: int = _FINDINGS_MAX_AGE_DAYS,
+        as_of: datetime | None = None,
+    ) -> list[dict]:
         """Load manual corrections from findings/corrections.jsonl.
 
-        Applies temporal decay: sorted by recency, capped at 90 days / 50 entries.
+        Applies temporal decay and caps at 50 entries.
         If bot_id is provided, only returns corrections relevant to that bot.
         """
         corrections = _safe_jsonl(self._memory_dir / "findings" / "corrections.jsonl")
         filtered = _filter_by_bot(corrections, bot_id) if bot_id else corrections
-        return _apply_temporal_window(filtered)
+        return _apply_temporal_window(filtered, max_age_days=max_age_days, now=as_of)
 
     def load_failure_log(self, bot_id: str = "") -> list[dict]:
         """Load failure log entries from findings/failure-log.jsonl.
@@ -260,6 +304,7 @@ class ContextBuilder:
         reliable: list[dict] = []
         low_quality: list[dict] = []
         for entry in seen.values():
+            entry.setdefault("outcome_source", "early_warning")
             quality = (entry.get("measurement_quality") or "").lower()
             if not quality:
                 # No quality field — include for backward compat
@@ -272,6 +317,31 @@ class ContextBuilder:
         reliable = _filter_inactive_strategies(reliable, registry)
         low_quality = _filter_inactive_strategies(low_quality, registry)
         return _apply_temporal_window(reliable), _apply_temporal_window(low_quality)
+
+    def load_monthly_outcomes(
+        self, bot_id: str = "", days: int = 365, max_entries: int = 30,
+    ) -> list[dict]:
+        """Load authoritative monthly/follow-up outcome verdicts."""
+        path = self._memory_dir / "findings" / "monthly_outcomes.jsonl"
+        entries = _safe_jsonl(path)
+        if bot_id:
+            entries = [entry for entry in entries if entry.get("bot_id") == bot_id]
+        entries = _apply_temporal_window(entries, max_age_days=days, max_entries=max_entries)
+        return entries
+
+    def load_outcome_priors(
+        self, bot_id: str = "", max_entries: int = 30,
+    ) -> list[dict]:
+        """Load operational priors that steer monthly search/allocation."""
+        path = self._memory_dir / "findings" / "outcome_priors.jsonl"
+        entries = _safe_jsonl(path)
+        if bot_id:
+            entries = [
+                entry for entry in entries
+                if entry.get("bot_id") == bot_id
+            ]
+        entries.sort(key=lambda entry: entry.get("updated_at", ""), reverse=True)
+        return entries[:max_entries]
 
     def load_allocation_history(self) -> list[dict]:
         """Load allocation history from findings/allocation_history.jsonl.
@@ -424,6 +494,37 @@ class ContextBuilder:
             logger.debug("Similar runs loading failed; skipping")
             return []
 
+    def load_focused_recall(
+        self,
+        agent_type: str = "",
+        bot_id: str = "",
+        strategy_id: str = "",
+        tags: list[str] | None = None,
+        limit: int = 5,
+        days: int = 90,
+    ) -> list[dict]:
+        """Load provenance-rich recall cards for prompt context."""
+        if not agent_type:
+            return []
+        try:
+            from skills.run_recall_summarizer import RunRecallSummarizer
+
+            cards = RunRecallSummarizer(
+                self._memory_dir,
+                run_index=self._run_index,
+            ).summarize(
+                workflow=agent_type,
+                bot_id=bot_id,
+                strategy_id=strategy_id,
+                tags=tags or [],
+                limit=limit,
+                days=days,
+            )
+            return [card.to_prompt_dict() for card in cards]
+        except Exception:
+            logger.debug("Focused recall loading failed; skipping")
+            return []
+
     def build_retrieval_profile(self, agent_type: str = "", bot_id: str = "") -> dict:
         """Build structured retrieval tags and query terms from current context."""
         tags: list[str] = []
@@ -534,7 +635,9 @@ class ContextBuilder:
             return []
         try:
             from schemas.generated_playbook import GeneratedPlaybook
+            from skills.generated_playbook_guard import GeneratedPlaybookGuard
 
+            guard = GeneratedPlaybookGuard(self._memory_dir)
             matches: list[tuple[float, GeneratedPlaybook]] = []
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -542,6 +645,8 @@ class ContextBuilder:
                 try:
                     playbook = GeneratedPlaybook.model_validate_json(line)
                 except Exception:
+                    continue
+                if not guard.is_safe(playbook):
                     continue
                 score = playbook.match_score(workflow, tags)
                 if score > 0:
@@ -742,6 +847,35 @@ class ContextBuilder:
         out.sort(key=lambda r: r["measured_at"], reverse=True)
         return out[:max_entries]
 
+    def load_strategy_change_ledger(
+        self, bot_id: str = "", days: int = 180, max_entries: int = 30,
+    ) -> list[dict]:
+        """Load recent strategy-level monthly/change decisions."""
+        try:
+            from skills.strategy_change_ledger import StrategyChangeLedger
+
+            ledger = StrategyChangeLedger(self._memory_dir / "findings")
+            records = ledger.get_recent(days=days)
+        except Exception:
+            return []
+        out: list[dict] = []
+        for record in records:
+            if bot_id and record.bot_id != bot_id:
+                continue
+            out.append({
+                "record_id": record.record_id,
+                "bot_id": record.bot_id,
+                "strategy_id": record.strategy_id,
+                "record_type": record.record_type.value,
+                "run_month": record.run_month,
+                "monthly_status": record.monthly_status,
+                "decision_reason": record.decision_reason,
+                "evidence_paths": record.evidence_paths[:10],
+                "objective_deltas": record.objective_deltas,
+                "updated_at": record.updated_at.isoformat(),
+            })
+        return out[:max_entries]
+
     def load_category_scorecard(self) -> dict:
         """Load category-level suggestion success rates."""
         try:
@@ -779,7 +913,7 @@ class ContextBuilder:
             return None
 
     def load_search_signal_summary(self) -> dict:
-        """Load search signal approve/discard summary from search_signals.jsonl."""
+        """Load historical search signal approve/discard summary."""
         path = self._memory_dir / "findings" / "search_signals.jsonl"
         if not path.exists():
             return {}
@@ -973,48 +1107,58 @@ class ContextBuilder:
         try:
             from collections import defaultdict
 
-            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-            category_blocks: dict[str, list[str]] = defaultdict(list)
-
+            rows = []
             for line in path.read_text(encoding="utf-8").strip().splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = entry.get("timestamp", "")
-                if ts:
+                if line.strip():
                     try:
-                        entry_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                        if entry_time.tzinfo is None:
-                            entry_time = entry_time.replace(tzinfo=timezone.utc)
-                        if entry_time < cutoff:
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-                for detail in entry.get("blocked_details", []):
-                    detail_bot_id = detail.get("bot_id", "")
-                    if bot_id and detail_bot_id and detail_bot_id != bot_id:
+                        parsed = json.loads(line)
+                    except json.JSONDecodeError:
                         continue
-                    reason = detail.get("reason", "")
-                    category = detail.get("category", "")
-                    if category:
-                        category_blocks[category].append(reason)
-                        continue
-                    # Infer category from reason or title
-                    title = detail.get("title", "").lower()
-                    for keyword, cat in [
-                        ("exit", "exit_timing"), ("filter", "filter_threshold"),
-                        ("stop", "stop_loss"), ("signal", "signal"),
-                        ("regime", "regime_gate"), ("sizing", "position_sizing"),
-                    ]:
-                        if keyword in title:
-                            category_blocks[cat].append(reason)
-                            break
-                    else:
-                        category_blocks["other"].append(reason)
+                    if isinstance(parsed, dict):
+                        rows.append(parsed)
 
+            def _collect(days: int) -> dict[str, list[str]]:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                category_blocks: dict[str, list[str]] = defaultdict(list)
+                for entry in rows:
+                    ts = entry.get("timestamp", "")
+                    if ts:
+                        try:
+                            entry_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            if entry_time.tzinfo is None:
+                                entry_time = entry_time.replace(tzinfo=timezone.utc)
+                            if entry_time < cutoff:
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+                    for detail in entry.get("blocked_details", []):
+                        detail_bot_id = detail.get("bot_id", "")
+                        if bot_id and detail_bot_id and detail_bot_id != bot_id:
+                            continue
+                        reason = detail.get("reason", "")
+                        category = detail.get("category", "")
+                        if category:
+                            category_blocks[category].append(reason)
+                            continue
+                        # Infer category from reason or title
+                        title = detail.get("title", "").lower()
+                        for keyword, cat in [
+                            ("exit", "exit_timing"), ("filter", "filter_threshold"),
+                            ("stop", "stop_loss"), ("signal", "signal"),
+                            ("regime", "regime_gate"), ("sizing", "position_sizing"),
+                        ]:
+                            if keyword in title:
+                                category_blocks[cat].append(reason)
+                                break
+                        else:
+                            category_blocks["other"].append(reason)
+                return category_blocks
+
+            category_blocks = _collect(30)
+            stale_window_days = 0
+            if not category_blocks:
+                category_blocks = _collect(90)
+                stale_window_days = 90
             if not category_blocks:
                 return {}
 
@@ -1026,6 +1170,8 @@ class ContextBuilder:
                     "blocked_count": len(reasons),
                     "common_reasons": unique_reasons,
                 }
+                if stale_window_days:
+                    result[cat]["stale_window_days"] = stale_window_days
             return result
         except Exception:
             return {}
@@ -1247,7 +1393,7 @@ class ContextBuilder:
             return ""
 
     def load_search_reports(self, bot_id: str = "", lookback_n: int = 5) -> list[dict]:
-        """Recent parameter search reports: what params were explored, routing decisions."""
+        """Historical parameter-search reports used as read-only context."""
         path = self._memory_dir / "findings" / "search_reports.jsonl"
         if not path.exists():
             return []
@@ -1269,6 +1415,7 @@ class ContextBuilder:
                     "discard_reason": entry.get("discard_reason", ""),
                     "exploration_summary": entry.get("exploration_summary", ""),
                     "searched_at": entry.get("searched_at", ""),
+                    "context_role": "historical_read_only",
                 })
             return reports[-lookback_n:]
         except Exception:
@@ -1300,7 +1447,7 @@ class ContextBuilder:
             return []
 
     def load_backtest_reliability(self, bot_id: str = "") -> dict[str, float]:
-        """Per-category backtest reliability ratios (categories with n >= 3)."""
+        """Historical per-category backtest reliability ratios."""
         path = self._memory_dir / "findings" / "backtest_calibration.jsonl"
         if not path.exists():
             return {}
@@ -1629,6 +1776,10 @@ class ContextBuilder:
         "active_suggestions",
         "rejected_suggestions",
         "recent_proposal_outcomes",
+        "monthly_outcomes",
+        "outcome_priors",
+        "strategy_change_history",
+        "focused_run_recall",
         "category_scorecard",
         "regime_stratified_scores",
         "prediction_accuracy_by_metric",
@@ -1674,7 +1825,11 @@ class ContextBuilder:
             "self_assessment",
             "last_week_synthesis",
             "outcome_measurements",
+            "monthly_outcomes",
+            "outcome_priors",
             "recent_proposal_outcomes",
+            "strategy_change_history",
+            "focused_run_recall",
             "forecast_meta_analysis",
             "category_scorecard",
             "regime_stratified_scores",
@@ -1723,25 +1878,6 @@ class ContextBuilder:
             "allocation_history",
             "session_history",
         ],
-        "wfo": [
-            # WFO cares about optimization, backtest reliability, parameters
-            "backtest_reliability",
-            "recent_proposal_outcomes",
-            "regime_config_history",
-            "search_reports",
-            "regime_parameter_analysis",
-            "search_signal_summary",
-            "optimization_allocation",
-            "active_experiments",
-            "experiment_track_record",
-            "ground_truth_trend",
-            "strategy_profiles",
-            "archetype_expectations",
-            "threshold_profile",
-            "convergence_report",
-            "self_assessment",
-            "category_scorecard",
-        ],
         "discovery_analysis": [
             # Discovery focuses on novel patterns and gaps in coverage
             "discoveries",
@@ -1761,7 +1897,11 @@ class ContextBuilder:
         "outcome_reasoning": [
             # Reasoning about why suggestions worked/failed
             "outcome_measurements",
+            "monthly_outcomes",
+            "outcome_priors",
             "recent_proposal_outcomes",
+            "strategy_change_history",
+            "focused_run_recall",
             "category_scorecard",
             "regime_stratified_scores",
             "active_suggestions",
@@ -1794,6 +1934,8 @@ class ContextBuilder:
         context_budget_tokens: int = 0,
         strategy_registry=None,
         bot_id: str = "",
+        record_retrieval: bool = True,
+        retrieval_profile_override: dict | None = None,
     ) -> PromptPackage:
         """Build a PromptPackage pre-filled with system prompt, corrections, and metadata.
 
@@ -1806,7 +1948,10 @@ class ContextBuilder:
                 of item count.  Items are added in priority order until the
                 budget is exhausted.
         """
-        retrieval_profile = self.build_retrieval_profile(agent_type=agent_type, bot_id=bot_id)
+        retrieval_profile = _merge_retrieval_profile(
+            self.build_retrieval_profile(agent_type=agent_type, bot_id=bot_id),
+            retrieval_profile_override or {},
+        )
         failure_log = self.load_failure_log()
         rejected_suggestions = self.load_rejected_suggestions()
         outcome_measurements, low_quality_outcomes = self.load_outcome_measurements()
@@ -1819,6 +1964,12 @@ class ContextBuilder:
             data["rejected_suggestions"] = rejected_suggestions
         if outcome_measurements:
             data["outcome_measurements"] = outcome_measurements
+        monthly_outcomes = self.load_monthly_outcomes(bot_id=bot_id)
+        if monthly_outcomes:
+            data["monthly_outcomes"] = monthly_outcomes
+        outcome_priors = self.load_outcome_priors(bot_id=bot_id)
+        if outcome_priors:
+            data["outcome_priors"] = outcome_priors
         if allocation_history:
             data["allocation_history"] = allocation_history
         if consolidated_patterns:
@@ -1838,6 +1989,9 @@ class ContextBuilder:
         recent_proposal_outcomes = self.load_recent_proposal_outcomes(bot_id=bot_id)
         if recent_proposal_outcomes:
             data["recent_proposal_outcomes"] = recent_proposal_outcomes
+        strategy_change_history = self.load_strategy_change_ledger(bot_id=bot_id)
+        if strategy_change_history:
+            data["strategy_change_history"] = strategy_change_history
         category_scorecard = self.load_category_scorecard()
         if category_scorecard:
             data["category_scorecard"] = category_scorecard
@@ -1945,15 +2099,25 @@ class ContextBuilder:
             if session_history:
                 data["session_history"] = session_history
 
-        # Inject similar past runs from RunIndex
+        focused_recall = self.load_focused_recall(
+            agent_type=agent_type,
+            bot_id=bot_id,
+            tags=retrieval_profile.get("tags", []),
+        )
+        if focused_recall:
+            data["focused_run_recall"] = focused_recall
+
+        # Inject similar past runs from RunIndex as fallback when focused
+        # provenance-rich recall is unavailable.
         if self._run_index is not None and agent_type:
-            similar_runs = self.load_similar_runs(
-                agent_type=agent_type,
-                bot_id=bot_id,
-                retrieval_profile=retrieval_profile,
-            )
-            if similar_runs:
-                data["similar_past_runs"] = similar_runs
+            if not focused_recall:
+                similar_runs = self.load_similar_runs(
+                    agent_type=agent_type,
+                    bot_id=bot_id,
+                    retrieval_profile=retrieval_profile,
+                )
+                if similar_runs:
+                    data["similar_past_runs"] = similar_runs
 
         # Inject strategy registry data if available
         if strategy_registry and getattr(strategy_registry, "strategies", None):
@@ -2069,8 +2233,9 @@ class ContextBuilder:
                 tags=retrieval_profile.get("tags", []),
             )
             if ranked:
-                card_store.load().record_retrieval([c.card_id for c in ranked])
-                card_store.save()
+                if record_retrieval:
+                    card_store.load().record_retrieval([c.card_id for c in ranked])
+                    card_store.save()
                 learning_cards_text = "\n\n".join(c.to_prompt_text() for c in ranked)
                 metadata["_learning_card_ids"] = [c.card_id for c in ranked]
         except Exception:
@@ -2083,7 +2248,17 @@ class ContextBuilder:
         )
         if playbooks:
             playbooks_text = "\n\n".join(playbook["text"] for playbook in playbooks)
-            metadata["_generated_playbook_ids"] = [playbook["playbook_id"] for playbook in playbooks]
+            playbook_ids = [playbook["playbook_id"] for playbook in playbooks]
+            metadata["_generated_playbook_ids"] = playbook_ids
+            try:
+                from skills.playbook_generator import PlaybookGenerator
+
+                if record_retrieval:
+                    tracker = PlaybookGenerator(self._memory_dir)
+                    for playbook_id in playbook_ids:
+                        tracker.record_usage(playbook_id)
+            except Exception:
+                logger.debug("Generated playbook usage tracking skipped")
 
         return PromptPackage(
             system_prompt=self.build_system_prompt(),

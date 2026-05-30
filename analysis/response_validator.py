@@ -9,7 +9,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from schemas.agent_response import AgentPrediction, AgentSuggestion, ParsedAnalysis, StructuralProposal
+from schemas.agent_response import (
+    CATEGORY_TO_TIER,
+    AgentPrediction,
+    AgentSuggestion,
+    ParsedAnalysis,
+    StructuralProposal,
+)
 from schemas.suggestion_scoring import CategoryScorecard
 
 logger = logging.getLogger(__name__)
@@ -90,6 +96,7 @@ class ResponseValidator:
         hypothesis_track_record: dict | None = None,
         prediction_accuracy: dict | None = None,
         recalibrations: list[dict] | None = None,
+        outcome_priors: list[dict] | None = None,
         current_macro_regime: str = "",
         strategy_registry: object | None = None,
         safety_critical_params: set[str] | None = None,
@@ -99,6 +106,7 @@ class ResponseValidator:
         self._scorecard = category_scorecard or CategoryScorecard()
         self._hypothesis_track_record = hypothesis_track_record or {}
         self._prediction_accuracy = prediction_accuracy or {}
+        self._outcome_priors = outcome_priors or []
         self._current_macro_regime = current_macro_regime
         self._strategy_registry = strategy_registry  # StrategyRegistry or None
         self._safety_critical_params: set[str] = safety_critical_params or set()
@@ -214,6 +222,14 @@ class ResponseValidator:
                 ))
                 continue
 
+            prior_block = self._check_negative_monthly_prior(suggestion)
+            if prior_block:
+                blocked.append(BlockedSuggestion(
+                    suggestion=suggestion,
+                    reason=prior_block,
+                ))
+                continue
+
             # 2c. Low-confidence structural suggestions blocked
             if (
                 suggestion.category == "structural"
@@ -300,6 +316,55 @@ class ResponseValidator:
             if _jaccard_similarity(suggestion.title, rej_title) >= 0.6:
                 return rej_title
 
+        return None
+
+    def _check_negative_monthly_prior(self, suggestion: AgentSuggestion) -> str | None:
+        """Require stronger evidence after repeated negative monthly outcomes."""
+        prior = self._matching_negative_monthly_prior(
+            suggestion.bot_id,
+            suggestion.strategy_id or "",
+            suggestion.category,
+        )
+        if prior is None:
+            return None
+        if suggestion.confidence >= 0.85:
+            return None
+        category = prior.get("category") or prior.get("mutation_family") or suggestion.category
+        return (
+            f"Negative monthly prior for {category or 'this family'} "
+            "requires confidence >= 0.85 and stronger replay evidence"
+        )
+
+    def _matching_negative_monthly_prior(
+        self,
+        bot_id: str,
+        strategy_id: str,
+        category: str,
+    ) -> dict | None:
+        tier = CATEGORY_TO_TIER.get(category, category)
+        tokens = {value for value in (category, tier) if value}
+        for prior in self._outcome_priors:
+            prior_bot = prior.get("bot_id") or ""
+            if prior_bot and prior_bot != bot_id:
+                continue
+            prior_strategy = prior.get("strategy_id") or ""
+            if prior_strategy and prior_strategy != strategy_id:
+                continue
+            prior_tokens = {
+                value
+                for value in (
+                    prior.get("category") or "",
+                    prior.get("mutation_family") or "",
+                )
+                if value
+            }
+            if prior_tokens and tokens and not (prior_tokens & tokens):
+                continue
+            if prior.get("gate_strictness") != "stricter":
+                continue
+            if int(prior.get("negative_count") or 0) < 1:
+                continue
+            return prior
         return None
 
     def _apply_calibration(self, suggestion: AgentSuggestion) -> AgentSuggestion:
@@ -433,6 +498,7 @@ class ResponseValidator:
 
             # Gate 2: Category track record (parity with parameter suggestions)
             bot_id = getattr(proposal, "bot_id", "") or ""
+            strategy_id = getattr(proposal, "affected_strategy_id", "") or getattr(proposal, "strategy_id", "") or ""
             category = self._infer_structural_category(proposal)
             if bot_id and category:
                 score = self._scorecard.get_score(bot_id, category)
@@ -513,11 +579,37 @@ class ResponseValidator:
                 )
                 continue
 
+            prior = self._matching_negative_monthly_prior(bot_id, strategy_id, category)
+            if prior is not None and confidence < 0.85:
+                prior_category = prior.get("category") or prior.get("mutation_family") or category
+                reason = (
+                    f"Negative monthly prior for {prior_category} requires "
+                    "confidence >= 0.85 and stronger replay evidence"
+                )
+                blocked_list.append(BlockedStructuralProposal(
+                    proposal=proposal, reason=reason,
+                ))
+                logger.info(
+                    "Blocked structural proposal '%s': %s",
+                    proposal.title, reason,
+                )
+                continue
+
             # Gate 6: Calibration adjustment on confidence
             if bot_id and category:
                 adjusted_confidence = self._calibrate_structural_confidence(
                     confidence, bot_id, category,
                 )
+                if adjusted_confidence < 0.4:
+                    reason = f"Calibrated confidence too low: {adjusted_confidence:.2f} < 0.4"
+                    blocked_list.append(BlockedStructuralProposal(
+                        proposal=proposal, reason=reason,
+                    ))
+                    logger.info(
+                        "Blocked structural proposal '%s': %s",
+                        proposal.title, reason,
+                    )
+                    continue
                 if hasattr(proposal, "model_copy"):
                     proposal = proposal.model_copy(
                         update={"confidence": adjusted_confidence},

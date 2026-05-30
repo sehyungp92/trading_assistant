@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from analysis.response_validator import ResponseValidator, _jaccard_similarity
-from schemas.agent_response import AgentPrediction, AgentSuggestion, ParsedAnalysis
+from schemas.agent_response import AgentPrediction, AgentSuggestion, ParsedAnalysis, StructuralProposal
 from schemas.suggestion_scoring import CategoryScore, CategoryScorecard
 from skills.suggestion_scorer import SuggestionScorer
 
@@ -150,6 +150,44 @@ class TestResponseValidator:
         v = ResponseValidator(forecast_meta=meta)
         result = v.validate(parsed)
         assert "calibration" in result.validator_notes.lower()
+
+    def test_negative_monthly_prior_blocks_low_confidence_suggestion(self):
+        s = self._make_suggestion(
+            category="filter_threshold",
+            confidence=0.8,
+            strategy_id="strat1",
+        )
+        parsed = ParsedAnalysis(suggestions=[s])
+        v = ResponseValidator(outcome_priors=[{
+            "bot_id": "bot1",
+            "strategy_id": "strat1",
+            "category": "filter_threshold",
+            "negative_count": 1,
+            "gate_strictness": "stricter",
+        }])
+        result = v.validate(parsed)
+        assert len(result.blocked_suggestions) == 1
+        assert "negative monthly prior" in result.blocked_suggestions[0].reason.lower()
+
+    def test_negative_monthly_prior_blocks_structural_proposal(self):
+        proposal = StructuralProposal(
+            bot_id="bot1",
+            affected_strategy_id="strat1",
+            title="Tighten threshold routing",
+            confidence=0.8,
+            acceptance_criteria=[{"metric": "pnl", "direction": "improve"}],
+        )
+        parsed = ParsedAnalysis(structural_proposals=[proposal])
+        v = ResponseValidator(outcome_priors=[{
+            "bot_id": "bot1",
+            "strategy_id": "strat1",
+            "category": "signal",
+            "negative_count": 1,
+            "gate_strictness": "stricter",
+        }])
+        result = v.validate(parsed)
+        assert len(result.blocked_structural_proposals) == 1
+        assert "negative monthly prior" in result.blocked_structural_proposals[0].reason.lower()
 
     def test_end_to_end_parse_validate_annotate(self):
         """Parse → validate → annotated report."""

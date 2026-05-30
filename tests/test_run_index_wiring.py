@@ -164,12 +164,12 @@ class TestMetadataJson:
             system_prompt="sys",
             metadata={"bot_ids": "bot_x", "date": "2026-04-17"},
         )
-        runner._write_run_files(run_dir, pkg, agent_type="wfo")
+        runner._write_run_files(run_dir, pkg, agent_type="monthly_validation")
 
         meta_path = run_dir / "metadata.json"
         assert meta_path.exists()
         meta = json.loads(meta_path.read_text())
-        assert meta["agent_type"] == "wfo"
+        assert meta["agent_type"] == "monthly_validation"
         assert meta["bot_ids"] == "bot_x"
         assert meta["date"] == "2026-04-17"
         assert "effective_model" in meta  # Key expected by reindex_from_directory
@@ -214,7 +214,7 @@ class TestMetadataJson:
             system_prompt="sys",
             metadata={"bot_ids": "bot_z", "date": "2026-04-17"},
         )
-        runner._write_run_files(run_dir, pkg, agent_type="wfo")
+        runner._write_run_files(run_dir, pkg, agent_type="monthly_validation")
 
         # Verify initially empty
         meta = json.loads((run_dir / "metadata.json").read_text())

@@ -6,9 +6,9 @@ import logging
 import os
 from json import JSONDecodeError
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from schemas.bot_config import BotConfig
 from schemas.strategy_profile import StrategyRegistry
@@ -79,6 +79,10 @@ def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _parse_csv(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()] if raw else []
+
+
 def _parse_bot_timezones(raw: str, bot_ids: list[str]) -> dict[str, BotConfig]:
     """Parse BOT_TIMEZONES env var into BotConfig dict.
 
@@ -133,8 +137,10 @@ class AppConfig(BaseModel):
     daily_agent_model: str = ""
     weekly_agent_provider: str = ""
     weekly_agent_model: str = ""
-    wfo_agent_provider: str = ""
-    wfo_agent_model: str = ""
+    monthly_validation_agent_provider: str = ""
+    monthly_validation_agent_model: str = ""
+    monthly_model_review_agent_provider: str = ""
+    monthly_model_review_agent_model: str = ""
     triage_agent_provider: str = ""
     triage_agent_model: str = ""
     relay_url: str = ""
@@ -171,6 +177,34 @@ class AppConfig(BaseModel):
     adaptive_thresholds_enabled: bool = False
     deployment_monitoring_enabled: bool = False
     ab_testing_enabled: bool = False
+    learning_review_mode: Literal["disabled", "deterministic", "llm_review"] = "deterministic"
+    learning_review_disabled_workflows: list[str] = []
+    market_data_root: str = ""
+    backtest_repo_path: str = ""
+    backtest_artifact_root: str = ""
+    monthly_validation_enabled: bool = False
+    monthly_validation_mode: Literal["disabled", "shadow", "approval_gated"] = "disabled"
+    monthly_validation_day_of_month: int = 2
+    monthly_validation_hour: int = 3
+    monthly_validation_minute: int = 0
+    monthly_optimizer_sequence_enabled: bool = True
+    monthly_backtest_command: list[str] = []
+    monthly_workflow_contract_path: str = ""
+    monthly_workflow_contract_version: str = ""
+    monthly_strategy_plugin_contract_path: str = ""
+    market_data_sync_day_of_month: int = 1
+    market_data_sync_hour: int = 1
+    market_data_sync_minute: int = 0
+    backtest_command_timeout_seconds: int = 3600
+    backtest_max_parallel_strategies: int = 1
+    market_data_required_coverage_ratio: float = 0.95
+    telemetry_required_lineage_ratio: float = 0.95
+
+    @model_validator(mode="after")
+    def _normalize_monthly_validation_flag(self) -> AppConfig:
+        if self.monthly_validation_mode != "disabled":
+            self.monthly_validation_enabled = True
+        return self
 
     @classmethod
     def from_env(cls, dotenv_path: str | Path | None = None) -> AppConfig:
@@ -212,8 +246,10 @@ class AppConfig(BaseModel):
             daily_agent_model=env.get("DAILY_AGENT_MODEL", ""),
             weekly_agent_provider=env.get("WEEKLY_AGENT_PROVIDER", ""),
             weekly_agent_model=env.get("WEEKLY_AGENT_MODEL", ""),
-            wfo_agent_provider=env.get("WFO_AGENT_PROVIDER", ""),
-            wfo_agent_model=env.get("WFO_AGENT_MODEL", ""),
+            monthly_validation_agent_provider=env.get("MONTHLY_VALIDATION_AGENT_PROVIDER", ""),
+            monthly_validation_agent_model=env.get("MONTHLY_VALIDATION_AGENT_MODEL", ""),
+            monthly_model_review_agent_provider=env.get("MONTHLY_MODEL_REVIEW_AGENT_PROVIDER", ""),
+            monthly_model_review_agent_model=env.get("MONTHLY_MODEL_REVIEW_AGENT_MODEL", ""),
             triage_agent_provider=env.get("TRIAGE_AGENT_PROVIDER", ""),
             triage_agent_model=env.get("TRIAGE_AGENT_MODEL", ""),
             relay_url=env.get("RELAY_URL", ""),
@@ -246,9 +282,39 @@ class AppConfig(BaseModel):
             adaptive_thresholds_enabled=env.get("ADAPTIVE_THRESHOLDS_ENABLED", "false").lower() in ("true", "1", "yes"),
             deployment_monitoring_enabled=env.get("DEPLOYMENT_MONITORING_ENABLED", "false").lower() in ("true", "1", "yes"),
             ab_testing_enabled=env.get("AB_TESTING_ENABLED", "false").lower() in ("true", "1", "yes"),
+            learning_review_mode=env.get("LEARNING_REVIEW_MODE", "deterministic"),
+            learning_review_disabled_workflows=_parse_csv(
+                env.get("LEARNING_REVIEW_DISABLED_WORKFLOWS", ""),
+            ),
+            market_data_root=env.get("MARKET_DATA_ROOT", ""),
+            backtest_repo_path=env.get("BACKTEST_REPO_PATH", ""),
+            backtest_artifact_root=env.get("BACKTEST_ARTIFACT_ROOT", ""),
+            monthly_validation_enabled=_parse_bool(env.get("MONTHLY_VALIDATION_ENABLED", "false")),
+            monthly_validation_mode=env.get("MONTHLY_VALIDATION_MODE", "disabled"),
+            monthly_validation_day_of_month=int(env.get("MONTHLY_VALIDATION_DAY_OF_MONTH", "2")),
+            monthly_validation_hour=int(env.get("MONTHLY_VALIDATION_HOUR", "3")),
+            monthly_validation_minute=int(env.get("MONTHLY_VALIDATION_MINUTE", "0")),
+            monthly_optimizer_sequence_enabled=_parse_bool(
+                env.get("MONTHLY_OPTIMIZER_SEQUENCE_ENABLED", "true"),
+            ),
+            monthly_backtest_command=_parse_command_args(
+                env.get("MONTHLY_BACKTEST_COMMAND", ""),
+                "MONTHLY_BACKTEST_COMMAND",
+            ),
+            monthly_workflow_contract_path=env.get("MONTHLY_WORKFLOW_CONTRACT_PATH", ""),
+            monthly_workflow_contract_version=env.get("MONTHLY_WORKFLOW_CONTRACT_VERSION", ""),
+            monthly_strategy_plugin_contract_path=env.get("MONTHLY_STRATEGY_PLUGIN_CONTRACT_PATH", ""),
+            market_data_sync_day_of_month=int(env.get("MARKET_DATA_SYNC_DAY_OF_MONTH", "1")),
+            market_data_sync_hour=int(env.get("MARKET_DATA_SYNC_HOUR", "1")),
+            market_data_sync_minute=int(env.get("MARKET_DATA_SYNC_MINUTE", "0")),
+            backtest_command_timeout_seconds=int(env.get("BACKTEST_COMMAND_TIMEOUT_SECONDS", "3600")),
+            backtest_max_parallel_strategies=int(env.get("BACKTEST_MAX_PARALLEL_STRATEGIES", "1")),
+            market_data_required_coverage_ratio=float(env.get("MARKET_DATA_REQUIRED_COVERAGE_RATIO", "0.95")),
+            telemetry_required_lineage_ratio=float(env.get("TELEMETRY_REQUIRED_LINEAGE_RATIO", "0.95")),
         )
 
         config._validate_provider_secrets()
+        config._validate_monthly_paths()
         return config
 
     # Providers that require an API key in the environment to function. Other
@@ -266,7 +332,8 @@ class AppConfig(BaseModel):
             ("AGENT_PROVIDER", self.agent_default_provider),
             ("DAILY_AGENT_PROVIDER", self.daily_agent_provider),
             ("WEEKLY_AGENT_PROVIDER", self.weekly_agent_provider),
-            ("WFO_AGENT_PROVIDER", self.wfo_agent_provider),
+            ("MONTHLY_VALIDATION_AGENT_PROVIDER", self.monthly_validation_agent_provider),
+            ("MONTHLY_MODEL_REVIEW_AGENT_PROVIDER", self.monthly_model_review_agent_provider),
             ("TRIAGE_AGENT_PROVIDER", self.triage_agent_provider),
         ):
             if name:
@@ -290,4 +357,29 @@ class AppConfig(BaseModel):
             raise ValueError(
                 "Provider secret validation failed:\n  - "
                 + "\n  - ".join(missing)
+            )
+
+    def _validate_monthly_paths(self) -> None:
+        if self.monthly_validation_mode != "disabled":
+            self.monthly_validation_enabled = True
+        if not self.monthly_validation_enabled:
+            return
+        if not self.backtest_repo_path.strip():
+            logger.warning(
+                "Disabling monthly validation: BACKTEST_REPO_PATH is empty",
+            )
+            self.monthly_validation_enabled = False
+            self.monthly_validation_mode = "disabled"
+            return
+        if not Path(self.backtest_repo_path).is_dir():
+            logger.warning(
+                "Disabling monthly validation: BACKTEST_REPO_PATH is not a directory: %s",
+                self.backtest_repo_path,
+            )
+            self.monthly_validation_enabled = False
+            self.monthly_validation_mode = "disabled"
+        if self.market_data_root and not Path(self.market_data_root).exists():
+            logger.warning(
+                "Monthly validation can run only in diagnostics mode until MARKET_DATA_ROOT exists: %s",
+                self.market_data_root,
             )

@@ -17,6 +17,7 @@ class BenchmarkSource(str, Enum):
     NEGATIVE_OUTCOME = "negative_outcome"
     CALIBRATION_MISS = "calibration_miss"
     TRANSFER_FAILURE = "transfer_failure"
+    DISCARDED_HARNESS_EXPERIMENT = "discarded_harness_experiment"
 
 
 class BenchmarkSeverity(str, Enum):

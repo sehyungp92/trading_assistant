@@ -4,7 +4,7 @@ from __future__ import annotations
 from fnmatch import fnmatch
 
 from orchestrator.permission_gates import PermissionGateChecker
-from schemas.autonomous_pipeline import BotConfigProfile
+from schemas.bot_profile import BotConfigProfile
 from schemas.permissions import PermissionCheckResult, PermissionTier
 
 DEFAULT_PERMISSION_CONFIG = {

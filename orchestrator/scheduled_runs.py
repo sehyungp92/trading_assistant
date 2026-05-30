@@ -200,7 +200,7 @@ class ScheduledRunStore:
     ) -> None:
         """Trigger has been enqueued; downstream handler still owes mark_completed.
 
-        Used for daily/weekly/WFO/triage cron jobs where the cron only enqueues
+        Used for daily/weekly/monthly/triage cron jobs where the cron only enqueues
         a trigger event and the actual report/analysis runs asynchronously.
         """
         started = started_at or _to_iso(datetime.now(timezone.utc))

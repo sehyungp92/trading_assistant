@@ -3,6 +3,10 @@
 Regime-controlled measurement: compares before/after performance with
 regime matching, volatility controls, concurrent change detection,
 and statistical significance estimation.
+
+Monthly full-fidelity validation is authoritative for material strategy/config
+changes. This module supplies early-warning/context signals and should not
+finalize material changes once they are linked to monthly validation.
 """
 from __future__ import annotations
 
@@ -19,7 +23,6 @@ from schemas.outcome_measurement import (
 )
 
 if TYPE_CHECKING:
-    from skills.backtest_calibration_tracker import BacktestCalibrationTracker
     from skills.hypothesis_library import HypothesisLibrary
     from skills.proposal_ledger import ProposalLedger
 
@@ -45,16 +48,16 @@ class AutoOutcomeMeasurer:
     def __init__(
         self,
         curated_dir: Path,
-        wfo_dir: Path | None = None,
         findings_dir: Path | None = None,
-        calibration_tracker: "BacktestCalibrationTracker | None" = None,
+        calibration_tracker: object | None = None,
         hypothesis_library: "HypothesisLibrary | None" = None,
         proposal_ledger: "ProposalLedger | None" = None,
     ) -> None:
         self._curated_dir = curated_dir
-        self._wfo_dir = wfo_dir
         self._findings_dir = findings_dir
-        self._calibration_tracker = calibration_tracker
+        # Accepted for compatibility with older wiring, but early-warning
+        # measurement no longer writes backtest-calibration feedback.
+        self._calibration_tracker = None
         self._hypothesis_library = hypothesis_library
         self._proposal_ledger = proposal_ledger
 
@@ -222,9 +225,6 @@ class AutoOutcomeMeasurer:
             proposal_id = proposal_id or loaded_proposal_id
 
         delta = self._estimate_composite_delta(measurement)
-        if self._calibration_tracker:
-            self._calibration_tracker.record_outcome(suggestion_id, delta)
-
         verdict = measurement.verdict
         verdict_str = verdict.value if hasattr(verdict, "value") else str(verdict)
 
@@ -252,6 +252,7 @@ class AutoOutcomeMeasurer:
                         objective_delta=float(delta),
                         verdict=verdict_str,
                         measurement_path=measurement_path,
+                        outcome_source="early_warning",
                     ),
                 )
             except Exception:
@@ -422,32 +423,6 @@ class AutoOutcomeMeasurer:
         dd_inc = m.drawdown_after - m.drawdown_before
 
         return 0.4 * calmar_imp + 0.3 * pf_imp - 0.3 * max(0.0, dd_inc)
-
-    def detect_parameter_changes(self, bot_id: str) -> list[dict]:
-        """Detect parameter changes from WFO reports over time."""
-        if not self._wfo_dir or not self._wfo_dir.exists():
-            return []
-
-        reports = []
-        for f in sorted(self._wfo_dir.glob("*.json")):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                if data.get("bot_id") == bot_id:
-                    reports.append(data)
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        changes = []
-        for i in range(1, len(reports)):
-            prev = reports[i - 1].get("suggested_params", {})
-            curr = reports[i].get("suggested_params", {})
-            if prev != curr:
-                changes.append({
-                    "date": reports[i].get("date", "unknown"),
-                    "previous_params": prev,
-                    "new_params": curr,
-                })
-        return changes
 
     # ------------------------------------------------------------------
     # Private helpers

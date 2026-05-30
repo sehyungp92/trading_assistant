@@ -9,7 +9,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from schemas.regime_conditional import RegimeParameterAnalysis
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 
 
 class SearchRouting(str, Enum):

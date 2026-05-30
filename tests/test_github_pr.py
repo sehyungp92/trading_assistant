@@ -7,15 +7,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from schemas.autonomous_pipeline import (
+from schemas.approval import (
     BacktestComparison,
     BacktestContext,
+)
+from schemas.repo_changes import (
     FileChange,
     GitHubIssueRequest,
     PRRequest,
     ReviewState,
 )
-from schemas.wfo_results import SimulationMetrics
+from schemas.simulation_metrics import SimulationMetrics
 from skills.github_pr import PRBuilder
 
 
@@ -327,7 +329,7 @@ class TestBranchPRDedup:
         builder = PRBuilder()
         with patch.object(builder, "preflight_check", new_callable=AsyncMock) as mock_pf, \
              patch.object(builder, "check_existing_pr", new_callable=AsyncMock) as mock_dedup:
-            from schemas.autonomous_pipeline import PreflightResult
+            from schemas.repo_changes import PreflightResult
             mock_pf.return_value = PreflightResult(passed=True)
             mock_dedup.return_value = (True, "https://github.com/x/y/pull/42")
             result = await builder.create_pr(_make_request(repo_dir=str(_temp_repo_dir(tmp_path))))

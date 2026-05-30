@@ -7,7 +7,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from schemas.autonomous_pipeline import FileChange
+from schemas.repo_changes import FileChange
 
 
 class BugSeverity(str, Enum):

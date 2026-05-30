@@ -57,13 +57,13 @@ class TestBuildFullPrompt:
 
     def test_includes_skill_context(self):
         pkg = PromptPackage(
-            task_prompt="Run WFO.",
-            skill_context="WFO pipeline guide:\n1. Load data\n2. Run optimizer",
+            task_prompt="Run monthly validation.",
+            skill_context="Monthly validation guide:\n1. Load data\n2. Review evidence",
             data={},
         )
         result = InvocationBuilder.build_full_prompt(pkg)
         assert "## SKILL CONTEXT" in result
-        assert "WFO pipeline guide" in result
+        assert "Monthly validation guide" in result
 
     def test_includes_data_file_manifest(self):
         pkg = PromptPackage(
@@ -143,12 +143,6 @@ class TestWorkflowAwareFiltering:
         pkg = ctx.base_package(agent_type="daily_analysis")
         manifest = pkg.metadata["_context_budget_manifest"]
         assert manifest["workflow"] == "daily_analysis"
-
-    def test_workflow_priority_used_for_wfo(self, tmp_path):
-        ctx = self._make_builder(tmp_path)
-        pkg = ctx.base_package(agent_type="wfo")
-        manifest = pkg.metadata["_context_budget_manifest"]
-        assert manifest["workflow"] == "wfo"
 
     def test_triage_gets_minimal_context(self, tmp_path):
         ctx = self._make_builder(tmp_path)
@@ -642,7 +636,7 @@ class TestRunIndex:
         db_path = tmp_path / "run_index.db"
         runs_dir = tmp_path / "runs"
 
-        for name in ["daily-2026-04-10", "weekly-2026-04-11", "wfo-bot1"]:
+        for name in ["daily-2026-04-10", "weekly-2026-04-11", "monthly-validation-bot1"]:
             d = runs_dir / name
             d.mkdir(parents=True)
             (d / "response.md").write_text(f"Result for {name}")
@@ -659,7 +653,7 @@ class TestRunIndex:
     def test_infer_agent_type(self):
         assert RunIndex._infer_agent_type("daily-2026-04-13") == "daily_analysis"
         assert RunIndex._infer_agent_type("weekly-2026-W15") == "weekly_analysis"
-        assert RunIndex._infer_agent_type("wfo-bot1") == "wfo"
+        assert RunIndex._infer_agent_type("monthly-validation-bot1") == "monthly_validation"
         assert RunIndex._infer_agent_type("reasoning-2026-04-13") == "outcome_reasoning"
         assert RunIndex._infer_agent_type("random-thing") == "unknown"
 
@@ -785,7 +779,7 @@ class TestRunFileWriting:
             data={"summary": {"pnl": 100}},
             instructions="Step 1: analyze",
             corrections=[{"id": "c1", "summary": "past fix"}],
-            skill_context="WFO guide content",
+            skill_context="Monthly validation guide content",
         )
         runner._write_run_files(run_dir, pkg)
 
@@ -797,11 +791,11 @@ class TestRunFileWriting:
 
         corrections = json.loads((run_dir / "corrections.json").read_text())
         assert corrections[0]["summary"] == "past fix"
-        assert (run_dir / "skill_context.md").read_text() == "WFO guide content"
+        assert (run_dir / "skill_context.md").read_text() == "Monthly validation guide content"
 
 
 # ---------------------------------------------------------------------------
-# Assembler data preservation (triage + WFO must not discard base_package data)
+# Assembler data preservation
 # ---------------------------------------------------------------------------
 
 class TestAssemblerDataPreservation:
@@ -836,21 +830,3 @@ class TestAssemblerDataPreservation:
         # Base package data not discarded (corrections loaded something)
         base_keys = [k for k in pkg.data if k != "context"]
         assert len(base_keys) > 0, "base_package data was discarded by triage assembler"
-
-    def test_wfo_assembler_preserves_base_data(self, tmp_path):
-        """WFO assembler should merge its data, not overwrite base_package data."""
-        from analysis.wfo_prompt_assembler import WFOPromptAssembler
-
-        memory_dir = self._make_memory_dir(tmp_path)
-        wfo_dir = tmp_path / "wfo_output"
-        wfo_dir.mkdir()
-        assembler = WFOPromptAssembler(
-            memory_dir=memory_dir,
-            bot_id="test_bot",
-            wfo_output_dir=wfo_dir,
-        )
-        pkg = assembler.assemble()
-        # Base package data should not have been discarded
-        # At minimum, corrections-derived data should survive the merge
-        assert isinstance(pkg.data, dict)
-        assert len(pkg.data) > 0, "base_package data was discarded by WFO assembler"

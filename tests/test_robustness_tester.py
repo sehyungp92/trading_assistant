@@ -2,9 +2,11 @@
 """Tests for the robustness tester."""
 from datetime import datetime
 
+from schemas.cost_model import CostModelConfig
 from schemas.events import TradeEvent
-from schemas.wfo_config import CostModelConfig, RobustnessConfig, ParameterDef, ParameterSpace
-from schemas.wfo_results import RobustnessResult, SafetyFlag, SimulationMetrics
+from schemas.parameter_space import ParameterDef, ParameterSpace, RobustnessConfig
+from schemas.simulation_metrics import SimulationMetrics
+from schemas.validation_results import RobustnessResult, SafetyFlag
 from skills.backtest_simulator import BacktestSimulator
 from skills.cost_model import CostModel
 from skills.robustness_tester import RobustnessTester

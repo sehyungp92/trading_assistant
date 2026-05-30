@@ -28,19 +28,17 @@ Every day, raw event data is transformed into a curated analysis package per bot
 
 The agent runtime can be switched per workflow between Claude Max, Codex Pro, Z.AI Coding Plan, and OpenRouter-backed Claude-compatible models, while reports still flow through Telegram, Discord, or email.
 
-### Optimises parameters through walk-forward optimisation
+### Runs monthly evidence and replay validation
 
-The WFO pipeline runs grid search over configured parameter spaces with:
+The monthly learning loop is the authoritative path for material strategy changes. It assembles a frozen evidence package with:
 
-- Anchored or rolling fold generation on historical trade data
-- Out-of-sample validation per fold with consensus parameter selection
-- Cost sensitivity testing at multiple slippage multipliers
-- Neighborhood stability testing (nearby parameters should also perform well)
-- Regime stability testing (profitable across market regime types)
-- Temporal leakage auditing
-- Safety flag generation and a final recommendation of ADOPT, TEST_FURTHER, or REJECT
+- Market-data coverage manifests and telemetry lineage
+- Live-vs-backtest replay parity checks
+- Objective deltas, counterfactuals, and regime slices
+- Leakage and cost-realism signals from the monthly replay artifacts
+- Structured candidate proposals with calibrated predictions and rollback plans
 
-When parameters pass, the autonomous pipeline backtests the specific change, validates safety, and sends a Telegram approval card. On human approval, it creates a GitHub PR with the parameter file changes. After merge, deployment monitoring tracks the bot for regressions and auto-creates a rollback PR if performance degrades.
+Approval-gated monthly candidates create Telegram approval cards and GitHub PRs through shared approval infrastructure. After merge, deployment monitoring tracks the bot for regressions and can create rollback PRs if performance degrades.
 
 ### Proposes structural and portfolio-level improvements
 
@@ -54,7 +52,7 @@ Beyond parameter tuning, the strategy engine runs 19 detectors across four level
 
 These findings feed into the configured weekly analysis provider, which produces structural suggestions (e.g., "add a regime-aware exit rule", "split this strategy into two variants"). Portfolio-level analysis computes cross-bot exposure concentration, crowding alerts, and risk-parity allocation recommendations with Calmar ratio tilt. Cross-bot transfer proposals identify validated patterns from one bot that may apply to others, scored by regime distribution overlap and historical transfer success rates.
 
-Structural suggestions surface in reports for human consideration — they are never auto-implemented.
+Weekly structural suggestions surface as advisory hypotheses unless they are promoted into monthly candidate validation. Production implementation still requires isolated candidate testing, parity evidence, and human approval.
 
 ### Learns from its own suggestions over time
 
@@ -67,11 +65,11 @@ Every suggestion the system makes is tracked through a full lifecycle:
                           ↓                       ↓
                    parameter change          structural proposal
                           ↓                       ↓
-                   ParameterSearcher         6 validation gates
-                   (grid search, backtest,   (hypothesis track record,
-                    robustness testing)       category win rate, confidence,
+                   monthly validation       6 validation gates
+                   (replay evidence,        (hypothesis track record,
+                    parity checks)           category win rate, confidence,
                           ↓                   acceptance criteria)
-                   search_reports.jsonl            ↓
+                   monthly ledgers                ↓
                           ↓                  report for human review
                    Telegram approval card
                           ↓
@@ -79,7 +77,7 @@ Every suggestion the system makes is tracked through a full lifecycle:
                           ↓
   ┌─────────────────── Learning Cycle (weekly) ───────────────────┐
   │  ground truth snapshot → ledger delta → route pending items   │
-  │  parameter suggestions → inner loop    structural → tracker   │
+  │  parameter candidates → monthly val.   structural → tracker   │
   └───────────────────────────────────────────────────────────────┘
                           ↓
          AutoOutcomeMeasurer → 7-day pre/post comparison → outcomes.jsonl
@@ -104,7 +102,7 @@ Crucially, the learning system is self-correcting — it monitors whether its ow
 
 - **Convergence tracking** synthesises composite score trends, prediction accuracy, outcome ratios, and scorecard evolution into an overall signal (improving/degrading/oscillating/stable). When oscillation is detected, the LLM is instructed to hold steady rather than reversing last week's suggestions.
 - **Loop health metrics** quantify six operational KPIs per cycle: proposal-to-measurement latency, oscillation severity, transfer success rate, recalibration effectiveness, suggestions per cycle, and measurement coverage. These are injected into every prompt so the agent can see where the learning pipeline itself is underperforming.
-- **Temporal decay on scorecards** applies 5%/week exponential decay to outcome weights, matching the learning ledger's existing decay rate. Categories recover from early failures as old negatives fade, making the inner loop adaptive rather than accumulative.
+- **Temporal decay on scorecards** applies 5%/week exponential decay to outcome weights, matching the learning ledger's existing decay rate. Categories recover from early failures as old negatives fade, making the learning loop adaptive rather than accumulative.
 - **Directional bias correction** detects systematic optimism or pessimism per metric in the LLM's prediction track record and reduces confidence on predictions that match the bias pattern (capped at 20%).
 - **Per-detector confidence calibration** gives each of the strategy engine's 19 detectors an empirical confidence multiplier derived from its outcome history. This is distinct from threshold learning (which adapts *when* a detector fires) — confidence calibration adapts *how much to trust* a detection once it fires.
 - **Suggestion pre-validation** filters strategy engine suggestions against the scorecard at recording time, preventing category leakage when the scorecard was unavailable during report generation.
@@ -113,15 +111,15 @@ Crucially, the learning system is self-correcting — it monitors whether its ow
 - **Experiment auto-conclusion** tracks parameter experiments to statistical resolution, then escalates through the full chain: conclude experiment → accept/reject linked suggestion → record hypothesis outcome (positive or negative). This closes the loop from "the system proposed a change" through "the change was tested" to "the hypothesis that motivated it was updated."
 - **Discovery and convergence context** in prompt instructions tells the LLM how to use automated pattern discoveries and convergence status that were previously loaded into data but invisible to the instruction set.
 
-## Design Philosophy: OpenClaw Governance + Hermes Memory + Autoresearch Optimisation
+## Design Philosophy: OpenClaw Governance + Hermes Memory + Autoresearch Optimisation + Symphony Orchestration
 
-This system combines three reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
+This system combines four reference architectures to serve a single goal: continuously improve trading bot performance while keeping a human in control of what matters.
 
 ### From OpenClaw: disposable agents, permanent knowledge
 
 The core architectural choice from OpenClaw is that the agent is disposable and the knowledge is permanent. The CLI runtime is a stateless executor — it reads context, runs a skill, writes results, and exits. Everything that compounds value over time — outcome measurements, suggestion histories, forecast calibration, correction logs, prompt patterns — lives in local files and SQLite on your machine: owned, queryable, backed up, inspectable. The agent is the lens; the data is the asset.
 
-This gives you three things concretely. The agent brain is swappable: when a better model arrives or a new provider launches, you swap the executor and everything continues — the skills, the memory, the learning history, the bot configurations. The system already supports four runtime providers (Claude Max, Codex Pro, ZAI, OpenRouter) with automatic fallback chains. Every interaction is auditable: because the agent reads explicit context (memory files, skill prompts, event payloads) and writes explicit outputs (run folder artifacts, JSONL records, parsed analyses), you can trace exactly what the agent saw when it made a particular recommendation. And the scheduler gives you proactive intelligence without infrastructure: APScheduler fires cron jobs for daily analysis, weekly summaries, heartbeat monitoring, and proactive scanning — just scheduled subprocesses on your local machine, not a server or cloud function.
+This gives you three things concretely. The agent brain is swappable: when a better model arrives or a new provider launches, you swap the executor and everything continues — the skills, the memory, the learning history, the bot configurations. The system already supports four runtime providers (Claude Max, Codex Pro, ZAI, OpenRouter) with automatic fallback chains. Every interaction is auditable: because the agent reads explicit context (memory files, skill prompts, event payloads) and writes explicit outputs (run folder artifacts, JSONL records, parsed analyses), you can trace exactly what the agent saw when it made a particular recommendation. And the scheduler gives you proactive intelligence without infrastructure: APScheduler fires cron jobs for daily analysis, weekly summaries, monthly validation, heartbeat monitoring, and proactive scanning — just scheduled subprocesses on your local machine, not a server or cloud function.
 
 This disposability depends on clear, enforceable boundaries between what the system can change and what only a human can change.
 
@@ -131,47 +129,57 @@ This disposability depends on clear, enforceable boundaries between what the sys
 
 **Deterministic routing** keeps the critical path predictable. The orchestrator brain classifies events and creates tasks without any LLM involvement. The LLM is invoked only for analysis and reasoning, never for routing or scheduling decisions.
 
-### From Hermes: memory orchestration that improves what the next run sees
+### From Hermes: advisory memory and harness meta-learning
 
-The trading assistant already had a rich learning substrate — outcome measurements, scorecards, convergence tracking, calibration, retrospective synthesis. What it lacked was the last mile: ensuring those signals actually reached the agent runtime in ranked, relevant form and that the artifacts produced by each run fed back into the next one. From Hermes, it inherits the memory orchestration layer that closes that gap.
+The trading assistant already had a rich learning substrate: outcome measurements, scorecards, convergence tracking, calibration, and retrospective synthesis. Hermes adds the advisory memory and harness layer that decides what the next agent run should see, and whether prompt, retrieval, validator, parser, playbook, or provider changes actually improve decision quality.
 
-**Prompt delivery closes the last-mile gap.** The context builder assembled corrections, skill instructions, and outcome histories — but these were sidecar files in the run directory that the CLI runtime might never read. `InvocationBuilder.build_full_prompt()` now merges all learning context directly into the prompt text: instructions, corrections, skill methodology, and ranked learning cards. The agent sees its accumulated experience in every run, so the upstream learning system actually influences the analysis it was built to improve.
+**Prompt delivery closes the last-mile gap.** The context builder assembled corrections, skill instructions, and outcome histories, but these were sidecar files in the run directory that the CLI runtime might never read. `InvocationBuilder.build_full_prompt()` now merges learning context directly into the prompt text: instructions, corrections, skill methodology, ranked learning cards, and focused recall. The agent sees accumulated experience in every run, so upstream learning can influence analysis without becoming trading authority.
 
-**Learning cards turn past lessons into ranked retrieval.** Eight evidence types — corrections, measured outcomes, discoveries, causal outcome reasonings, confidence recalibrations, spurious outcome flags, hypothesis results, and validator blocks — are ingested into `LearningCard` objects scored by recency, impact, confidence, and context match. Cards are populated automatically after outcome reasoning and weekly memory consolidation. `ranked_for_prompt()` injects the most relevant cards first, scoped by bot for single-bot workflows, so a daily analysis for a specific bot sees the corrections and outcomes that matter to that bot rather than an unranked global dump.
+**Learning cards turn past lessons into ranked retrieval.** Evidence types such as corrections, measured outcomes, discoveries, causal outcome reasonings, confidence recalibrations, spurious outcome flags, hypothesis results, validator blocks, transfer outcomes, retrospectives, and validation logs are ingested into `LearningCard` objects scored by recency, impact, confidence, and context match. `ranked_for_prompt()` injects the most relevant cards first, scoped by bot for single-bot workflows, so a daily analysis for a specific bot sees the corrections and outcomes that matter to that bot rather than an unranked global dump.
 
-**Session history flows through every assembler.** The session store is passed through all six assembler paths into `base_package()`, giving each analysis run visibility into its own recent invocation history — what was analysed, what was recommended, what the agent saw last time. This prevents redundant re-analysis and lets the agent build on prior reasoning rather than starting from a blank slate each run.
+**Session history and run recall flow through assemblers.** The session store is passed through assembler paths into `base_package()`, and `RunIndex`/focused recall can surface relevant prior artifacts. This prevents redundant re-analysis and lets the agent build on prior reasoning rather than starting from a blank slate each run.
 
-### From Autoresearch: an immutable objective function and a separable inner loop
+**Bounded search briefs are the bridge into monthly optimization.** Weekly synthesis, learning cards, hypotheses, and prior outcomes may be summarized into `monthly_search_brief.json` so the LLM planner and monthly runners inspect the most plausible mechanisms first. The brief can adjust experiment emphasis, phase order, seed neighborhoods, negative priors, and repair-ablation ordering after repair is triggered; it cannot choose the monthly sequence, trigger OOS repair, satisfy gates, approve changes, weaken policy memory, or command bots.
 
-The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimisation loop that runs without the LLM in the critical path.
+**Generated memory remains advisory.** Policy memory and monthly evidence outrank learning cards, generated playbooks, raw recall, and harness benchmark results. Those artifacts improve retrieval, summaries, validation, model review, and provider routing, but they require provenance, outcome attribution, supersession, quarantine/archive semantics, and keep/discard evidence before they are promoted into future prompts.
 
-**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalised metrics with fixed weights centralised in `schemas/objective_weights.py`: expected return (30%), Calmar ratio (20%), profit factor (15%), expectancy (15%), inverse drawdown (10%), and process quality (10%). These six weights are the single source of truth — the parameter searcher uses the same constants (renormalised to exclude process quality, which only applies to human-facing evaluation). This function is immutable — it lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured. Every downstream decision in the learning system — cycle verdicts, retrospective synthesis, experiment acceptance, calibration tracking — flows from this one number.
+### From Autoresearch: an immutable objective function and a separable evidence loop
 
-**The parameter search inner loop** (`skills/parameter_searcher.py`) runs neighbourhood exploration without any LLM involvement. When the LLM proposes a parameter change, the inner loop takes over: it builds a candidate grid around the proposed value, backtests each candidate, tests robustness across regimes and cost multipliers, and ranks results by a composite score using the same objective weights as the ground truth computer (renormalised to exclude process quality, since backtests have no process signal). The best value often differs from what the LLM suggested — the LLM identifies *what* to change, the inner loop finds the *optimal value*. Results route to APPROVE, EXPERIMENT, or DISCARD based on improvement thresholds and robustness scores.
+The core insight from Autoresearch is that a self-improving system needs an evaluation function it cannot modify, and an optimization loop whose scoring, gates, repair triggers, and adoption decisions do not depend on model persuasion. The LLM can design experiments and review candidates after evidence is assembled; deterministic replay, objective scoring, parity gates, and approval policy remain decisive.
 
-**The weekly learning cycle** (`skills/learning_cycle.py`) ties both architectures together. Each week it computes ground truth snapshots at the start and end of the period, records the delta in the learning ledger, and routes pending suggestions by type — parameter changes to the inner loop, structural changes to the experiment tracker. The composite score trajectory is injected into every subsequent LLM prompt, so the agent always sees whether its suggestions are actually improving performance against the immutable metric.
+**The ground truth computer** (`skills/ground_truth_computer.py`) is the system's equivalent of Autoresearch's `evaluate_bpb()`. It computes a single composite performance score from daily trading data using z-score normalized metrics with fixed weights centralized in `schemas/objective_weights.py`: expected return (30%), Calmar ratio (20%), profit factor (15%), expectancy (15%), inverse drawdown (10%), and process quality (10%). When replay cannot simulate process quality, the remaining objective weights are renormalized; trade frequency is a viability and under-trading gate, not a standalone target that can override expectancy, Calmar, or drawdown. The objective lives behind the double-approval permission gate, meaning neither the system nor a single human action can change how performance is measured.
+
+**The monthly evidence loop** (`skills/monthly_validation_orchestrator.py`) is the material strategy-learning path that replaces legacy WFO. In `trading_assistant`, it owns frozen manifests, telemetry and market-data coverage checks, replay-parity evidence, monthly search-brief attachment, model review, candidate gates, approval packets, ledgers, and monthly outcome measurement. The full target loop delegates full-fidelity replay to `trading_assistant_backtest`: run `round_N` diagnostics, use the bounded search brief as advisory priors, run two-fold phased-auto on the in-sample window, trigger granular OOS repair only when the latest completed month underperforms, run repair-centered confirmatory follow-up, and adopt `round_N+1` only after parity and approval gates.
+
+**The weekly learning cycle** (`skills/learning_cycle.py`) remains a sensor, early-warning, and context provider. It computes ground-truth snapshots, records learning signals, and feeds trend context into subsequent prompts. Its influence on monthly optimization is intentionally bounded to `monthly_search_brief.json`: it may steer planner emphasis, phase order, seed neighborhoods, negative priors, and conditional repair-ablation priority, but it cannot create approval-ready candidates, change the monthly sequence, trigger OOS repair, or satisfy adoption gates.
+
+### From Symphony: isolated candidate orchestration
+
+Symphony contributes the runner boundary for expensive monthly optimisation work, not the trading brain. In this system, the Symphony-style layer owns deterministic per-candidate workspaces, path containment and enforced subprocess `cwd`, repo-owned optimizer workflow contracts, candidate-attempt state, retry/backoff, stall detection, drift reconciliation, and structured attempt logs.
+
+It explicitly does not own strategy logic, replay scoring, live/backtest parity gates, approval or deployment decisions, ticket workflow, or live trading commands. `trading_assistant` remains the control plane and ledger; `trading_assistant_backtest` is the experiment lab; the actual trading repo remains the production source of truth.
 
 ### How they integrate into a single learning system
 
-The three architectures are not just additive — they share a single objective function and a unified suggestion lifecycle, so that every proposal flows through the same measurement and feedback path regardless of whether it originated from the LLM or the inner loop.
+The four patterns are not just additive: they share a single objective function and a unified suggestion lifecycle, so every proposal flows through approval, deployment monitoring, and outcome measurement regardless of whether it originated in report reasoning or monthly candidate validation.
 
-**Shared objective function.** The ground truth computer and the parameter searcher draw their weights from the same source (`schemas/objective_weights.py`). The ground truth computer uses all six components with z-score normalisation against a bot's own history; the parameter searcher uses the same five non-process weights renormalised to sum to 1.0, applied as improvement ratios against a baseline simulation. The scoring *methods* differ because they serve different purposes — evaluation vs exploration — but the relative priority of metrics is identical. When weights are updated (behind double-approval), both systems move together.
+**Shared objective function.** Daily ground truth, monthly replay evidence, and approval-gated candidate scoring draw from the same objective vocabulary (`schemas/objective_weights.py`). Replay layers renormalize only when process quality is unavailable, and trade frequency remains a viability gate. When weights are updated behind double approval, evaluation, candidate scoring, and monthly outcomes move together.
 
-**Unified suggestion lifecycle.** Whether a suggestion comes from the LLM's structural analysis or from the parameter searcher's grid exploration, it enters `SuggestionTracker` with a deterministic ID and follows the same path: proposed → approved → implemented → measured. The `AutoOutcomeMeasurer` doesn't distinguish origin — it measures pre/post performance deltas against the ground truth composite for every implemented suggestion. Outcomes feed back into per-category scorecards, which gate future suggestions of both types.
+**Unified suggestion lifecycle.** Suggestions and monthly candidates are tracked with deterministic IDs through `SuggestionTracker`, `ProposalLedger`, and `StrategyChangeLedger`, then flow through approval, implementation, deployment monitoring, rollback/watch decisions, and outcome measurement. Early-warning measurements remain prompt context; the next completed one-month full-fidelity validation is the primary deployed verdict for material strategy changes.
 
-**Experiment-to-hypothesis traceability.** When the inner loop runs a parameter experiment, `ExperimentManager` tracks it to statistical conclusion. On resolution, the auto-conclusion chain updates the linked suggestion (accept or reject) and records the outcome against the hypothesis that motivated it (positive or negative). This means the LLM's next analysis prompt reflects not just "this parameter change was tested" but "the hypothesis behind it was strengthened or weakened" — connecting empirical results back to the analytical reasoning that produced them.
+**Experiment-to-hypothesis traceability.** When a parameter or structural experiment is approved, `ExperimentManager` tracks it to statistical conclusion. On resolution, the auto-conclusion chain updates the linked suggestion (accept or reject) and records the outcome against the hypothesis that motivated it (positive or negative). This means the LLM's next analysis prompt reflects not just "this change was tested" but "the hypothesis behind it was strengthened or weakened" — connecting empirical results back to the analytical reasoning that produced them.
 
-**Bidirectional context flow.** The weekly learning cycle is the single orchestration point. It computes ground truth deltas, routes pending parameter suggestions to the inner loop, routes structural changes to the experiment tracker, and records the period's ledger entry. Results flow back through `analysis/context_builder.py`, which loads ground truth trends, search reports, outcome measurements, category scorecards, prediction accuracy, convergence reports, loop health metrics, instrumentation readiness, and directional bias data into every prompt. The LLM sees what the inner loop explored (preventing re-proposals), what past suggestions achieved (calibrating confidence), which categories have poor track records (auto-stripping weak suggestions), whether the system is converging or oscillating (avoiding destabilising reversals), where its directional biases lie (correcting systematic over-optimism), and which bots have sufficient instrumentation (preventing conclusions from incomplete data). The inner loop, in turn, receives updated detector confidence multipliers and scorecard weights from the outcomes its suggestions produce — closing the loop in both directions.
+**Bidirectional context flow.** The weekly learning cycle computes ground truth deltas and records the period's ledger entry, while monthly validation owns material strategy evidence and approvals. Results flow back through `analysis/context_builder.py`, monthly outcome priors, learning cards, focused recall, and `monthly_search_brief.json`. The LLM sees what was already tried, what past suggestions achieved, which candidate families have poor track records, whether the system is converging or oscillating, where its directional biases lie, which bots have sufficient instrumentation, and which weak weekly signals should stay low-confidence.
 
-**Governance prevents gaming.** OpenClaw's permission gates ensure neither loop can drift its own objective. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot shift to something easier to optimise. Structural proposals pass through six validation gates before reaching reports, ensuring only well-supported, high-confidence suggestions with measurable acceptance criteria survive. The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
+**Governance prevents gaming.** OpenClaw's permission gates ensure neither the weekly/harness layer nor the monthly optimizer can drift its own objective. Because `soul.md` and the ground truth formula sit behind human-only policy controls, the system cannot shift to something easier to optimize. Structural and config candidates must pass data coverage, replay parity, objective, no-regression, model-review, approval-payload, and human approval gates before adoption. The system learns from its own history through an evaluation function it cannot change, governed by permissions it cannot override.
 
 ### Matching the change type to the right tool
 
 The learning system routes each type of improvement to whichever tool handles it best. 
 
-Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimisation problems with a clear objective function. These belong to the autonomous inner loop, which can explore a candidate grid, backtest every value, and rank results by composite score without any LLM involvement. The inner loop is faster, cheaper, and more rigorous than asking a language model to guess the right number.
+Parameter-level changes — adjusting a stop-loss percentage, a signal threshold, a filter sensitivity — are numerical optimization problems with a clear objective function. These now belong to monthly evidence and replay validation, where phased-auto can compare config candidates against frozen artifacts, replay parity, objective thresholds, OOS degradation checks, and rollback requirements before approval.
 
-Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading performance data in context, forming hypotheses about *why* something is failing, and proposing changes that may not have an obvious metric to optimise against. These belong to the LLM, which receives the full context package (ground truth trends, outcome history, regime analysis, root cause distributions) and reasons about what to change and why. Structural proposals always surface in reports for human review — they are never auto-implemented, because the right structural change depends on judgment that neither a grid search nor a language model should make alone.
+Structural changes — adding a regime-aware exit rule, splitting a strategy into variants, redesigning a filter interaction — require genuine analytical reasoning: reading diagnostics in context, forming hypotheses about *why* something is failing, and proposing changes that a simple config grid would never enumerate. In the target monthly loop, they are first-class phased-auto candidates, not a separate advisory-only lane: the LLM designs candidate patches, the runner applies them in isolated workspaces across the live strategy repo and backtest adapter, unit/decision/parity tests run before fold scoring, and config neighborhoods can then be tuned around passing structural candidates. Weekly reports may still surface structural ideas for human review, but production adoption remains gated by monthly evidence and explicit approval.
 
 Portfolio-level changes — rebalancing family allocation weights, adjusting risk caps, modifying coordination rules between strategies, changing drawdown tier multipliers — operate above individual strategies. The strategy engine runs portfolio-level detectors (correlation crowding, family imbalance, drawdown synchronisation) and produces structured `PortfolioProposal` objects. Allocation proposals are validated through a what-if analysis (`skills/portfolio_what_if.py`) that rescales historical family PnL under the proposed weights to estimate portfolio Calmar, Sharpe, and max drawdown before any change is recorded. When per-family trade-level data is available, the what-if uses individual trades instead of daily aggregates — producing intra-day max drawdown from the per-trade equity curve, Sortino ratio, profit factor, and PnL-by-regime breakdowns that daily aggregation would mask. Portfolio outcomes are measured over a 30-day observation window (vs 7 days for strategy-level), and regime shifts during the window yield INCONCLUSIVE verdicts rather than false signals. Each strategy carries an archetype profile (`data/strategy_profiles.yaml`) that sets archetype-specific detection thresholds — trend-following strategies get looser alpha decay thresholds than intraday momentum, for example — so the engine's suggestions respect each strategy's inherent characteristics rather than applying uniform rules.
 
@@ -260,7 +268,7 @@ See `orchestrator/config.py` for all settings.
 Agent selection is persisted in `data/agent_preferences.json`.
 
 - Global default applies everywhere unless a workflow override exists.
-- Workflow overrides are available for `daily_analysis`, `weekly_analysis`, `wfo`, and `triage`.
+- Workflow overrides are available for `daily_analysis`, `weekly_analysis`, `monthly_validation`, `monthly_model_review`, and `triage`.
 - Initial values can be seeded from `AGENT_PROVIDER` and the per-workflow `*_AGENT_PROVIDER` env vars, but only when no persisted preferences file exists yet.
 - `GET /agent/preferences` returns the persisted default, overrides, effective workflow selections, and provider readiness.
 - `PUT /agent/preferences` updates the global default or workflow overrides. A `null` model means "use the provider default model."
@@ -293,7 +301,7 @@ Provider notes:
 - The app surfaces Codex diagnostics when it detects high-latency local settings such as `model_reasoning_effort = "xhigh"` or recent shared-state lock/slow-write symptoms.
 - `zai_coding_plan` intentionally stays Claude Code-backed so tool use still works and usage can count against the Z.AI coding plan. It only requires the Claude CLI itself plus `ZAI_API_KEY`; it does not depend on Claude Max auth.
 - `openrouter` uses the Claude-compatible Anthropic surface for parity with the existing tool-using flow. It only requires the Claude CLI itself plus `OPENROUTER_API_KEY`; it does not depend on Claude Max auth.
-- Daily, weekly, and WFO Claude workflows use read-only tool allowlists (`Read`, `Grep`, `Glob`). Triage keeps `Bash` enabled alongside those read-only tools.
+- Daily and weekly Claude workflows use read-only tool allowlists (`Read`, `Grep`, `Glob`). Monthly model review runs without tools. Triage keeps `Bash` enabled alongside those read-only tools.
 
 ## Scheduled Tasks
 
@@ -301,7 +309,7 @@ Provider notes:
 |------|----------|--------------|
 | Daily Analysis | 06:00 UTC (configurable per bot timezone) | Per-bot daily report with quality gate |
 | Weekly Summary | Sunday | Cross-bot review, strategy suggestions, structural proposals |
-| WFO | Weekly/monthly | Walk-forward parameter optimisation |
+| Monthly Validation | Monthly | Authoritative evidence package, candidate validation, and approval-gated proposals |
 | Proactive Scanner | Morning + evening | Anomaly detection, heartbeat monitoring |
 | Learning Cycle | Weekly | Ground truth snapshots, suggestion routing, ledger deltas |
 | Outcome Measurement | Sunday 10:00 UTC | Measures implemented suggestions against pre/post performance |
@@ -319,7 +327,7 @@ Bug triage runs on-demand when HIGH+ severity errors arrive. The configured agen
 The system is read-only with respect to bots — it never sends commands to them. All changes flow through GitHub PRs that require human action to merge:
 
 - **Parameter changes**: backtested and safety-checked automatically, but require explicit Telegram approval before a PR is even created
-- **Structural suggestions**: surface in reports only, never auto-implemented
+- **Structural candidates**: may be implemented and scored inside the monthly phased-auto/backtest lane, but production PRs require evidence gates and human approval; weekly structural suggestions remain report-only until promoted
 - **Bug fix PRs**: generated for obvious fixes, always require human review
 - **Rollback PRs**: created automatically on regression detection, still require human merge
 - **Portfolio allocation**: recommendations only — reallocating capital is a manual action

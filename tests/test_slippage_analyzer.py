@@ -75,7 +75,7 @@ class TestSlippageAnalyzer:
         assert dist.by_hour == {}
 
     def test_export_for_cost_model(self):
-        """Exports regime->bps mapping for WFO cost model empirical mode."""
+        """Exports regime->bps mapping for empirical cost models."""
         trades = [
             make_trade(
                 trade_id="t1", pair="BTCUSDT",

@@ -9,14 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from schemas.autonomous_pipeline import (
-    ApprovalRequest,
-    ChangeKind,
-    FileChange,
-    FileChangeMode,
-    PRRequest,
-    RepoRiskTier,
-)
+from schemas.approval import ApprovalRequest, RepoRiskTier
+from schemas.repo_changes import ChangeKind, FileChange, FileChangeMode, PRRequest
 from schemas.permissions import PermissionTier
 from schemas.prompt_package import PromptPackage
 from skills.approval_tracker import ApprovalTracker

@@ -57,7 +57,7 @@ class TestLockUsable:
 
     def test_approval_tracker_concurrent_create(self, tmp_path):
         tracker = ApprovalTracker(storage_path=tmp_path / "approvals.jsonl")
-        from schemas.autonomous_pipeline import ApprovalRequest
+        from schemas.approval import ApprovalRequest
         req = ApprovalRequest(
             request_id="r1", suggestion_id="s1", bot_id="bot1",
             param_changes=[],
@@ -89,7 +89,7 @@ class TestLockUsable:
     def test_concurrent_writes_dont_corrupt(self, tmp_path):
         """Multiple threads writing simultaneously should not corrupt data."""
         tracker = ApprovalTracker(storage_path=tmp_path / "approvals.jsonl")
-        from schemas.autonomous_pipeline import ApprovalRequest
+        from schemas.approval import ApprovalRequest
         errors = []
 
         def create_request(i: int) -> None:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.catchup import StartupCatchup
+from orchestrator.catchup import StartupCatchup, bootstrap_run_store_from_history
 from orchestrator.scheduler import ScheduledJobClass, ScheduledJobSpec
 from orchestrator.scheduled_runs import ScheduledRunStore
 
@@ -80,6 +80,21 @@ def _interval_spec() -> ScheduledJobSpec:
     )
 
 
+def _legacy_wfo_spec() -> ScheduledJobSpec:
+    return ScheduledJobSpec(
+        name="wfo_bot_alpha",
+        job_key="wfo",
+        trigger="cron",
+        job_class=ScheduledJobClass.STATEFUL,
+        execute=_noop_job,
+        scope_key="bot:bot_alpha",
+        day_of_week="sat",
+        hour=2,
+        minute=0,
+        catchup_limit=4,
+    )
+
+
 class TestStartupCatchup:
     @pytest.mark.asyncio
     async def test_no_false_daily_catchup_after_completed_run(self, run_store: ScheduledRunStore):
@@ -136,3 +151,22 @@ class TestStartupCatchup:
     async def test_interval_jobs_are_not_replayed(self, run_store: ScheduledRunStore):
         catchup = StartupCatchup([_interval_spec()], run_store)
         assert await catchup.build_plan(now=datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)) == []
+
+
+class TestBootstrapRunStoreFromHistory:
+    @pytest.mark.asyncio
+    async def test_legacy_wfo_history_is_not_seeded(self, run_store: ScheduledRunStore, tmp_path: Path):
+        history = tmp_path / "run_history.jsonl"
+        history.write_text(
+            '{"run_id":"wfo-bot_alpha-2026-03-07","handler":"wfo","status":"completed"}\n',
+            encoding="utf-8",
+        )
+
+        seeded = await bootstrap_run_store_from_history(
+            run_store,
+            [_legacy_wfo_spec()],
+            history,
+        )
+
+        assert seeded is None
+        assert await run_store.count_runs() == 0

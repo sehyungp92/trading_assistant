@@ -10,9 +10,12 @@ from httpx import ASGITransport, AsyncClient
 from orchestrator.agent_preferences import (
     DEFAULT_PROVIDER_MODELS,
     AgentPreferencesManager,
+    WORKFLOW_ORDER,
 )
+from orchestrator.provider_cooldown import ProviderCooldownTracker
 from orchestrator.app import (
     _load_agent_preferences,
+    _requires_monthly_outcome,
     _save_agent_preferences,
     _seed_agent_preferences,
     _selection_from_env,
@@ -58,13 +61,13 @@ class TestResolveSelection:
         prefs = AgentPreferences(
             default=AgentSelection(provider=AgentProvider.CLAUDE_MAX),
             overrides={
-                AgentWorkflow.WFO: AgentSelection(
+                AgentWorkflow.MONTHLY_MODEL_REVIEW: AgentSelection(
                     provider=AgentProvider.CODEX_PRO, model="gpt-5.4",
                 ),
             },
         )
         mgr = AgentPreferencesManager(preferences=prefs)
-        sel, _ = mgr.resolve_selection(AgentWorkflow.WFO)
+        sel, _ = mgr.resolve_selection(AgentWorkflow.MONTHLY_MODEL_REVIEW)
         assert sel.provider == AgentProvider.CODEX_PRO
         assert sel.model == "gpt-5.4"
 
@@ -72,7 +75,7 @@ class TestResolveSelection:
         prefs = AgentPreferences(
             default=AgentSelection(provider=AgentProvider.CODEX_PRO),
             overrides={
-                AgentWorkflow.WFO: AgentSelection(provider=AgentProvider.CLAUDE_MAX),
+                AgentWorkflow.MONTHLY_MODEL_REVIEW: AgentSelection(provider=AgentProvider.CLAUDE_MAX),
             },
         )
         mgr = AgentPreferencesManager(preferences=prefs)
@@ -124,20 +127,22 @@ class TestBuildView:
         mgr = AgentPreferencesManager()
         view = mgr.build_view()
         assert isinstance(view, AgentPreferencesView)
-        assert set(view.effective.keys()) == set(AgentWorkflow)
-        for workflow in AgentWorkflow:
+        assert set(view.effective.keys()) == set(WORKFLOW_ORDER)
+        assert AgentWorkflow.MONTHLY_VALIDATION in view.effective
+        assert AgentWorkflow.MONTHLY_MODEL_REVIEW in view.effective
+        for workflow in WORKFLOW_ORDER:
             assert view.effective[workflow].provider == AgentProvider.CLAUDE_MAX
 
     def test_view_reflects_overrides(self):
         prefs = AgentPreferences(
             default=AgentSelection(provider=AgentProvider.CLAUDE_MAX),
             overrides={
-                AgentWorkflow.WFO: AgentSelection(provider=AgentProvider.CODEX_PRO),
+                AgentWorkflow.TRIAGE: AgentSelection(provider=AgentProvider.CODEX_PRO),
             },
         )
         mgr = AgentPreferencesManager(preferences=prefs)
         view = mgr.build_view()
-        assert view.effective[AgentWorkflow.WFO].provider == AgentProvider.CODEX_PRO
+        assert view.effective[AgentWorkflow.TRIAGE].provider == AgentProvider.CODEX_PRO
         assert view.effective[AgentWorkflow.DAILY_ANALYSIS].provider == AgentProvider.CLAUDE_MAX
 
     def test_view_includes_provider_statuses_when_resolver_set(self):
@@ -156,18 +161,28 @@ class TestBuildView:
     def test_view_overrides_deep_copied(self):
         prefs = AgentPreferences(
             overrides={
-                AgentWorkflow.WFO: AgentSelection(
+                AgentWorkflow.TRIAGE: AgentSelection(
                     provider=AgentProvider.CODEX_PRO, model="gpt-5.4",
                 ),
             },
         )
         mgr = AgentPreferencesManager(preferences=prefs)
         view = mgr.build_view()
-        assert AgentWorkflow.WFO in view.overrides
+        assert AgentWorkflow.TRIAGE in view.overrides
         # Mutating the view should not affect the manager
-        view.overrides[AgentWorkflow.WFO].model = "mutated"
-        sel, _ = mgr.resolve_selection(AgentWorkflow.WFO)
+        view.overrides[AgentWorkflow.TRIAGE].model = "mutated"
+        sel, _ = mgr.resolve_selection(AgentWorkflow.TRIAGE)
         assert sel.model == "gpt-5.4"
+
+    def test_view_hides_legacy_wfo_overrides(self):
+        prefs = AgentPreferences.model_validate({
+            "overrides": {
+                "wfo": {"provider": "codex_pro"},
+            },
+        })
+        view = AgentPreferencesManager(preferences=prefs).build_view()
+        assert "wfo" not in {workflow.value for workflow in view.effective}
+        assert "wfo" not in {workflow.value for workflow in view.overrides}
 
 
 class TestUnavailableReasons:
@@ -216,9 +231,7 @@ class TestUnavailableReasons:
     def test_none_override_skipped(self):
         statuses = [_readiness(AgentProvider.CLAUDE_MAX, True)]
         mgr = AgentPreferencesManager(provider_status_resolver=lambda: statuses)
-        prefs = AgentPreferences(
-            overrides={AgentWorkflow.WFO: None},
-        )
+        prefs = AgentPreferences.model_validate({"overrides": {"wfo": None}})
         assert mgr.unavailable_reasons(prefs) == []
 
 
@@ -292,6 +305,127 @@ class TestLearnedRoutingOverride:
 
         assert selection.provider == AgentProvider.CODEX_PRO
         assert selection.model == "gpt-5.4"
+        assert not (findings / "provider_route_changes.jsonl").exists()
+
+        mgr.record_committed_route_change(
+            workflow=AgentWorkflow.DAILY_ANALYSIS,
+            selected=selection,
+            agent_type="daily_analysis",
+            run_id="daily-2026-05-29",
+            success=True,
+        )
+        changes = [
+            json.loads(line)
+            for line in (findings / "provider_route_changes.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(changes) == 1
+        assert changes[0]["workflow"] == "daily_analysis"
+        assert changes[0]["previous_provider"] == "claude_max"
+        assert changes[0]["recommended_provider"] == "codex_pro"
+        assert changes[0]["score_gap"] == 0.2
+        assert changes[0]["sample_count"] == 7
+        assert changes[0]["rollback_condition"]
+        assert changes[0]["first_used_run_id"] == "daily-2026-05-29"
+        assert changes[0]["first_attempt_success"] is True
+
+        mgr.record_committed_route_change(
+            workflow=AgentWorkflow.DAILY_ANALYSIS,
+            selected=selection,
+            agent_type="daily_analysis",
+            run_id="daily-2026-05-30",
+            success=True,
+        )
+        changes_after_repeat = [
+            json.loads(line)
+            for line in (findings / "provider_route_changes.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(changes_after_repeat) == 1
+
+    def test_build_view_previews_learned_routing_without_audit(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "sample_count": 7,
+            },
+        ])
+        mgr = AgentPreferencesManager(findings_dir=findings)
+
+        view = mgr.build_view()
+
+        assert view.effective[AgentWorkflow.DAILY_ANALYSIS].provider == AgentProvider.CODEX_PRO
+        assert not (findings / "provider_route_changes.jsonl").exists()
+
+    def test_committed_route_change_is_stable_when_score_samples_change(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "sample_count": 7,
+            },
+        ])
+        mgr = AgentPreferencesManager(findings_dir=findings)
+        selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
+        mgr.record_committed_route_change(
+            workflow=AgentWorkflow.DAILY_ANALYSIS,
+            selected=selection,
+            agent_type="daily_analysis",
+            run_id="daily-2026-05-29",
+            success=True,
+        )
+
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.93,
+                "benchmark_quality": 0.98,
+                "sample_count": 12,
+            },
+        ])
+        selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
+        mgr.record_committed_route_change(
+            workflow=AgentWorkflow.DAILY_ANALYSIS,
+            selected=selection,
+            agent_type="daily_analysis",
+            run_id="daily-2026-05-30",
+            success=True,
+        )
+
+        changes = [
+            json.loads(line)
+            for line in (findings / "provider_route_changes.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert len(changes) == 1
+        assert changes[0]["first_used_run_id"] == "daily-2026-05-29"
 
     def test_does_not_override_without_requested_baseline_evidence(self, tmp_path):
         findings = tmp_path / "memory" / "findings"
@@ -307,6 +441,92 @@ class TestLearnedRoutingOverride:
         selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
 
         assert selection.provider == AgentProvider.CLAUDE_MAX
+
+    def test_learned_routing_does_not_override_explicit_workflow_choice(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "sample_count": 7,
+            },
+        ])
+        prefs = AgentPreferences(overrides={
+            AgentWorkflow.DAILY_ANALYSIS: AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="opus"),
+        })
+        mgr = AgentPreferencesManager(preferences=prefs, findings_dir=findings)
+
+        selection, _ = mgr.resolve_selection(AgentWorkflow.DAILY_ANALYSIS)
+
+        assert selection.provider == AgentProvider.CLAUDE_MAX
+        assert selection.model == "opus"
+        assert not (findings / "provider_route_changes.jsonl").exists()
+
+    def test_learned_routing_skips_cooled_down_recommendation(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "sample_count": 7,
+            },
+        ])
+        cooldown = ProviderCooldownTracker()
+        cooldown.record_failure(AgentProvider.CODEX_PRO)
+        mgr = AgentPreferencesManager(findings_dir=findings)
+
+        candidates = mgr.resolve_with_fallbacks(
+            AgentWorkflow.DAILY_ANALYSIS,
+            cooldown_tracker=cooldown,
+        )
+
+        assert [selection.provider for selection, _ in candidates] == [AgentProvider.CLAUDE_MAX]
+        assert not (findings / "provider_route_changes.jsonl").exists()
+
+    def test_learned_routing_keeps_configured_provider_as_fallback(self, tmp_path):
+        findings = tmp_path / "memory" / "findings"
+        self._write_scores(findings, [
+            {
+                "workflow": "daily_analysis",
+                "provider": "claude_max",
+                "model": "sonnet",
+                "composite_score": 0.52,
+                "sample_count": 6,
+            },
+            {
+                "workflow": "daily_analysis",
+                "provider": "codex_pro",
+                "model": "gpt-5.4",
+                "composite_score": 0.90,
+                "sample_count": 7,
+            },
+        ])
+        mgr = AgentPreferencesManager(findings_dir=findings)
+
+        candidates = mgr.resolve_with_fallbacks(AgentWorkflow.DAILY_ANALYSIS)
+
+        assert [selection.provider for selection, _ in candidates] == [
+            AgentProvider.CODEX_PRO,
+            AgentProvider.CLAUDE_MAX,
+        ]
 
     def test_stripped_model_preserved(self):
         sel = AgentSelection(provider=AgentProvider.CLAUDE_MAX, model="  opus  ")
@@ -381,18 +601,21 @@ class TestSeedAgentPreferences:
         config = AppConfig(
             daily_agent_provider="zai_coding_plan",
             daily_agent_model="glm-5",
-            wfo_agent_provider="codex_pro",
-            wfo_agent_model="gpt-5.4",
+            weekly_agent_provider="codex_pro",
+            weekly_agent_model="gpt-5.4",
+            monthly_model_review_agent_provider="openrouter",
+            monthly_model_review_agent_model="custom/reviewer",
         )
         prefs = _seed_agent_preferences(config)
         assert AgentWorkflow.DAILY_ANALYSIS in prefs.overrides
         assert prefs.overrides[AgentWorkflow.DAILY_ANALYSIS].provider == AgentProvider.ZAI_CODING_PLAN
-        assert AgentWorkflow.WFO in prefs.overrides
-        assert prefs.overrides[AgentWorkflow.WFO].provider == AgentProvider.CODEX_PRO
-        assert AgentWorkflow.WEEKLY_ANALYSIS not in prefs.overrides
+        assert AgentWorkflow.WEEKLY_ANALYSIS in prefs.overrides
+        assert prefs.overrides[AgentWorkflow.WEEKLY_ANALYSIS].provider == AgentProvider.CODEX_PRO
+        assert AgentWorkflow.MONTHLY_MODEL_REVIEW in prefs.overrides
+        assert prefs.overrides[AgentWorkflow.MONTHLY_MODEL_REVIEW].provider == AgentProvider.OPENROUTER
 
     def test_empty_workflow_overrides_not_added(self):
-        config = AppConfig(daily_agent_provider="", wfo_agent_provider="")
+        config = AppConfig(daily_agent_provider="", triage_agent_provider="")
         prefs = _seed_agent_preferences(config)
         assert len(prefs.overrides) == 0
 
@@ -405,19 +628,16 @@ class TestSeedAgentPreferences:
 class TestLoadSavePreferences:
     def test_load_from_disk(self, tmp_path: Path):
         prefs_path = tmp_path / "agent_preferences.json"
-        saved = AgentPreferences(
-            default=AgentSelection(provider=AgentProvider.CODEX_PRO, model="gpt-5.4"),
-            overrides={
-                AgentWorkflow.WFO: AgentSelection(
-                    provider=AgentProvider.OPENROUTER, model="minimax/minimax-m2.5",
-                ),
+        prefs_path.write_text(json.dumps({
+            "default": {"provider": "codex_pro", "model": "gpt-5.4"},
+            "overrides": {
+                "wfo": {"provider": "openrouter", "model": "minimax/minimax-m2.5"},
             },
-        )
-        prefs_path.write_text(saved.model_dump_json(indent=2), encoding="utf-8")
+        }), encoding="utf-8")
 
         loaded = _load_agent_preferences(prefs_path, AppConfig())
         assert loaded.default.provider == AgentProvider.CODEX_PRO
-        assert loaded.overrides[AgentWorkflow.WFO].provider == AgentProvider.OPENROUTER
+        assert "wfo" not in {workflow.value for workflow in loaded.overrides}
 
     def test_load_falls_back_to_seed_on_missing(self, tmp_path: Path):
         prefs_path = tmp_path / "missing.json"
@@ -460,6 +680,7 @@ class TestAppConfigEnvVars:
         monkeypatch.setenv("AGENT_PROVIDER", "codex_pro")
         monkeypatch.setenv("AGENT_MODEL", "gpt-5.4")
         monkeypatch.setenv("DAILY_AGENT_PROVIDER", "zai_coding_plan")
+        monkeypatch.setenv("MONTHLY_MODEL_REVIEW_AGENT_PROVIDER", "openrouter")
         monkeypatch.setenv("ZAI_API_KEY", "zai-test-key")
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
 
@@ -467,6 +688,7 @@ class TestAppConfigEnvVars:
         assert config.agent_default_provider == "codex_pro"
         assert config.agent_default_model == "gpt-5.4"
         assert config.daily_agent_provider == "zai_coding_plan"
+        assert config.monthly_model_review_agent_provider == "openrouter"
         assert config.zai_api_key == "zai-test-key"
         assert config.openrouter_api_key == "or-test-key"
 
@@ -477,6 +699,22 @@ class TestAppConfigEnvVars:
         assert config.zai_api_key == ""
         assert config.openrouter_api_key == ""
         assert config.agent_default_provider == ""
+
+
+class TestMaterialOutcomeRouting:
+    def test_parameter_without_strategy_id_still_waits_for_monthly_outcome(self):
+        assert _requires_monthly_outcome({
+            "suggestion_id": "s1",
+            "category": "parameter",
+            "param_name": "quality_min",
+        }) is True
+
+    def test_non_material_observation_can_finish_from_early_warning(self):
+        assert _requires_monthly_outcome({
+            "suggestion_id": "s2",
+            "category": "reporting",
+            "tier": "observation",
+        }) is False
 
 
 # ---------------------------------------------------------------------------
@@ -606,3 +844,29 @@ class TestAgentPreferencesApi:
 
         assert resp.status_code == 400
         assert "unavailable" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_put_rejects_legacy_wfo_override(self, app_factory):
+        app = app_factory()
+        await app.state.queue.initialize()
+        await app.state.registry.initialize()
+        _set_provider_statuses(app, {
+            AgentProvider.CLAUDE_MAX: (True, "claude_cli", ""),
+            AgentProvider.CODEX_PRO: (True, "codex_cli", ""),
+            AgentProvider.ZAI_CODING_PLAN: (False, "claude_cli", "ZAI_API_KEY is not configured"),
+            AgentProvider.OPENROUTER: (False, "claude_cli", "OPENROUTER_API_KEY is not configured"),
+        })
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            resp = await client.put("/agent/preferences", json={
+                "default": {"provider": "claude_max", "model": None},
+                "overrides": {
+                    "wfo": {"provider": "codex_pro", "model": None},
+                },
+            })
+
+        assert resp.status_code == 400
+        assert "wfo" in resp.json()["detail"]

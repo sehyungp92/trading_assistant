@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 _DAILY_RUN_RE = re.compile(r"^daily-(\d{4}-\d{2}-\d{2})")
 _WEEKLY_RUN_RE = re.compile(r"^weekly-(\d{4}-\d{2}-\d{2})")
-_WFO_RUN_RE = re.compile(r"^wfo-([^-]+)-(\d{4}-\d{2}-\d{2})$")
 
 
 @dataclass(frozen=True)
@@ -108,7 +107,6 @@ async def bootstrap_run_store_from_history(
 
     daily_specs = [spec for spec in job_specs if spec.job_key == "daily_analysis"]
     weekly_specs = [spec for spec in job_specs if spec.job_key == "weekly_summary"]
-    wfo_specs = {spec.scope_key: spec for spec in job_specs if spec.job_key == "wfo"}
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -167,32 +165,6 @@ async def bootstrap_run_store_from_history(
                 )
                 earliest_seeded = _min_datetime(earliest_seeded, scheduled_for)
             continue
-
-        if handler_name == "wfo":
-            match = _WFO_RUN_RE.match(run_id)
-            if not match:
-                continue
-            bot_id = match.group(1)
-            spec = wfo_specs.get(f"bot:{bot_id}") or wfo_specs.get(bot_id)
-            if spec is None:
-                continue
-            run_date = datetime.strptime(match.group(2), "%Y-%m-%d").date()
-            scheduled_for = datetime(
-                run_date.year,
-                run_date.month,
-                run_date.day,
-                spec.hour or 0,
-                spec.minute or 0,
-                tzinfo=timezone.utc,
-            )
-            await run_store.seed_completion(
-                spec.job_key,
-                spec.scope_key,
-                scheduled_for,
-                started_at=entry.get("started_at", ""),
-                finished_at=entry.get("finished_at", ""),
-            )
-            earliest_seeded = _min_datetime(earliest_seeded, scheduled_for)
 
     return earliest_seeded
 

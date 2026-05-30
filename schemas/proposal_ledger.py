@@ -1,7 +1,7 @@
 # schemas/proposal_ledger.py
 """ProposalLedger schemas — unified record of every proposal the system produces.
 
-Every parameter/structural/discovery/WFO/portfolio/transfer/instrumentation
+Every parameter/structural/discovery/portfolio/transfer/instrumentation
 proposal becomes a ProposalCandidate with cross-links to the existing trackers
 (SuggestionTracker, StructuralExperimentTracker, ExperimentManager, DeploymentMonitor).
 """
@@ -20,8 +20,10 @@ class ProposalSource(str, Enum):
     LLM_DAILY = "llm_daily"
     LLM_WEEKLY = "llm_weekly"
     DETERMINISTIC = "deterministic"
+    MONTHLY_SMOKE_REPAIR = "monthly_smoke_repair"
+    MONTHLY_PHASED_AUTO = "monthly_phased_auto"
+    MONTHLY_MODEL_REVIEW = "monthly_model_review"
     DISCOVERY = "discovery"
-    WFO = "wfo"
     PARAMETER_SEARCH = "parameter_search"
     STRUCTURAL_EXPERIMENT = "structural"
     PORTFOLIO = "portfolio"
@@ -32,6 +34,7 @@ class ProposalSource(str, Enum):
 class ProposalKind(str, Enum):
     PARAMETER_CHANGE = "parameter_change"
     STRUCTURAL_CHANGE = "structural_change"
+    ROLLBACK = "rollback"
     NEW_STRATEGY = "new_strategy"
     PORTFOLIO_CHANGE = "portfolio_change"
     SEARCH_SPACE_CHANGE = "search_space_change"
@@ -55,7 +58,7 @@ class ProposalCandidate(BaseModel):
     affected_parameters: list[str] = Field(default_factory=list)
     affected_files: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
-    evaluation_method: str = ""  # parameter_search/wfo/experiment/replay/approval
+    evaluation_method: str = ""  # parameter_search/experiment/replay/approval
     linked_diagnostics: list[str] = Field(default_factory=list)
     linked_run_id: str = ""
     suggestion_id: str = ""  # cross-link to SuggestionTracker
@@ -70,7 +73,7 @@ class ProposalEvaluation(BaseModel):
     """An evaluation step against a ProposalCandidate."""
 
     proposal_id: str
-    method: str  # parameter_search/wfo/experiment/...
+    method: str  # parameter_search/experiment/replay/...
     summary: str = ""
     objective_score: float = 0.0
     confidence: float = 0.0
@@ -92,6 +95,10 @@ class ProposalOutcome(BaseModel):
     objective_version: str = OBJECTIVE_WEIGHTS_VERSION
     verdict: str  # improved/regressed/inconclusive/insufficient_data/positive/negative/neutral
     measurement_path: str = ""  # link to OutcomeMeasurement record
+    outcome_source: str = "early_warning"
+    monthly_outcome_id: str = ""
+    strategy_change_record_id: str = ""
+    outcome_source_history: list[dict] = Field(default_factory=list)
     measured_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

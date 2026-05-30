@@ -14,7 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-from schemas.autonomous_pipeline import ApprovalRequest, ApprovalStatus, ChangeKind, PRResult, RepoRiskTier
+from schemas.approval import ApprovalRequest, ApprovalStatus, RepoRiskTier
+from schemas.repo_changes import ChangeKind, PRResult
 from schemas.suggestion_tracking import SuggestionRecord
 from skills.approval_handler import ApprovalHandler
 from skills.approval_tracker import ApprovalTracker

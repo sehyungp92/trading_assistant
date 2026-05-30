@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from schemas.autonomous_pipeline import FileChange, PRRequest
+from schemas.repo_changes import FileChange, PRRequest
 from schemas.experiments import (
     ExperimentConfig,
     ExperimentStatus,

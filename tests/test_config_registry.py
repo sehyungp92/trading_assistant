@@ -6,7 +6,7 @@ import pytest
 import yaml
 from pathlib import Path
 
-from schemas.autonomous_pipeline import ParameterType
+from schemas.parameter_definition import ParameterType
 from skills.config_registry import ConfigRegistry
 
 

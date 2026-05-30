@@ -92,25 +92,6 @@ class TestAutoOutcomeMeasurer:
         )
         assert result is None
 
-    def test_detect_parameter_change(self, tmp_path):
-        from skills.auto_outcome_measurer import AutoOutcomeMeasurer
-
-        # Write WFO reports with different params
-        wfo_dir = tmp_path / "wfo"
-        wfo_dir.mkdir()
-        (wfo_dir / "2026-02-15.json").write_text(json.dumps({
-            "bot_id": "bot1", "suggested_params": {"stop_pct": 2.0},
-            "recommendation": "ADOPT",
-        }))
-        (wfo_dir / "2026-03-01.json").write_text(json.dumps({
-            "bot_id": "bot1", "suggested_params": {"stop_pct": 3.0},
-            "recommendation": "ADOPT",
-        }))
-
-        measurer = AutoOutcomeMeasurer(curated_dir=tmp_path, wfo_dir=wfo_dir)
-        changes = measurer.detect_parameter_changes("bot1")
-        assert len(changes) >= 1
-
     def test_measure_prefers_net_pnl(self, tmp_path):
         from skills.auto_outcome_measurer import AutoOutcomeMeasurer
 
@@ -187,7 +168,7 @@ class TestAutoOutcomeMeasurer:
 
         measurer.record_measurement_feedback(selected)
 
-        assert calibration_tracker.record_outcome.call_count == 1
+        assert calibration_tracker.record_outcome.call_count == 0
         hypothesis_library.record_outcome.assert_called_once_with(
             "hyp-feedback", positive=True,
         )

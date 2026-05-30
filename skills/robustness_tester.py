@@ -12,8 +12,8 @@ import statistics
 from collections import defaultdict
 
 from schemas.events import TradeEvent, MissedOpportunityEvent
-from schemas.wfo_config import RobustnessConfig, ParameterSpace
-from schemas.wfo_results import RobustnessResult, SafetyFlag
+from schemas.parameter_space import ParameterSpace, RobustnessConfig
+from schemas.validation_results import RobustnessResult, SafetyFlag
 from skills.backtest_simulator import BacktestSimulator
 
 

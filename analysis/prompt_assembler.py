@@ -1,4 +1,4 @@
-"""Prompt assembler — builds the context package for the daily analysis runtime invocation.
+"""Prompt assembler - builds the context package for the daily analysis runtime invocation.
 
 Uses deterministic triage to pre-process data and generate focused analytical
 questions. Claude reasons about 3-5 significant events rather than mechanically
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, time, timezone
 from pathlib import Path
 
 from analysis.context_builder import ContextBuilder
@@ -72,7 +73,7 @@ _FOCUSED_INSTRUCTIONS = """\
 You are analyzing today's trading data. A deterministic triage system has already
 pre-processed the data and identified what deserves your attention.
 
-## ROUTINE SUMMARY (pre-computed — do NOT regenerate this)
+## ROUTINE SUMMARY (pre-computed - do NOT regenerate this)
 {routine_summary}
 
 ## SIGNIFICANT EVENTS REQUIRING YOUR ANALYSIS
@@ -83,8 +84,8 @@ pre-processed the data and identified what deserves your attention.
 For each significant event above, you MUST:
 1. State a hypothesis about WHY it happened
 2. Identify confirming AND refuting evidence in the data
-3. Check the evidence — does it support or undermine your hypothesis?
-4. Rate your confidence (0.0–1.0) with explicit justification
+3. Check the evidence - does it support or undermine your hypothesis?
+4. Rate your confidence (0.0-1.0) with explicit justification
 
 {focus_questions}
 
@@ -102,20 +103,22 @@ If prediction_accuracy_by_metric data is present, recalibrate accordingly:
 
 ## DIRECTIONAL BIAS AWARENESS
 If forecast_meta_analysis contains directional_bias data:
-- "optimistic" bias: you predict improvement more than reality — reduce improve predictions
-- "pessimistic" bias: you predict decline more than reality — consider improve scenarios
+- "optimistic" bias: you predict improvement more than reality - reduce improve predictions
+- "pessimistic" bias: you predict decline more than reality - consider improve scenarios
 - Acknowledge your bias before making predictions in affected metrics
 
 ## BLOCKED APPROACHES
 If last_week_synthesis data contains a "discard" list, do NOT suggest those
-approaches — they have failed repeatedly.
+approaches - they have failed repeatedly.
 
-## PARAMETER SEARCH CONTEXT
-If search_reports data is present, the autonomous inner loop has already tested
-parameter neighborhoods. Do NOT propose parameter changes that overlap with what
-the inner loop already explored — focus on structural changes or untested parameters.
-If backtest_reliability data is present, categories marked as unreliable should be
-addressed with structural changes rather than further parameter tuning.
+## HISTORICAL SEARCH CONTEXT
+If search_reports data is present, treat it as historical read-only context from
+the retired local parameter-search path. Use it to avoid repeating discarded
+ideas, but do not treat it as current approval authority. Material parameter or
+strategy changes must go through monthly validation.
+If backtest_reliability data is present, categories marked as unreliable should
+be handled conservatively and escalated to monthly evidence rather than further
+daily parameter tuning.
 
 ## BLOCKED SUGGESTION PATTERNS
 If validation_patterns data is present, it shows which suggestion categories have
@@ -130,7 +133,7 @@ linked to hypotheses with effectiveness <= 0 or status="retired".
 
 ## ACTIVE EXPERIMENTS
 If active_experiments data is present, do NOT propose changes that overlap with
-experiments currently in progress — let them complete their observation window.
+experiments currently in progress - let them complete their observation window.
 Reference experiment status when discussing related metrics.
 
 ## STRATEGY CONTEXT
@@ -139,16 +142,15 @@ If strategy_profiles data is present:
   performance ranges in archetype_expectations
 - Distinguish EXPECTED underperformance (strategy in adverse regime) from PROBLEMATIC
   underperformance (strategy in preferred regime but still losing)
-- Reference coordination_rules when analyzing multi-strategy bots — did coordination
+- Reference coordination_rules when analyzing multi-strategy bots - did coordination
   signals fire correctly? Did cooldown pairs prevent whipsaws?
-- Check portfolio_risk_config bounds before suggesting parameter changes — never suggest
+- Check portfolio_risk_config bounds before suggesting parameter changes - never suggest
   exceeding heat_cap_R or daily_stop_R limits
 - For strategies with `sub_engines` in their profile, compare performance across engines
   to identify which engines perform best in each regime/vol state combination.
 - For strategies with `entry_types`, compare entry type win rates and payoff ratios.
 - Reference the strategy's `analysis_focus` list for priority analytical dimensions.
-- For mean_reversion_pullback archetype: high win rate + low payoff is expected —
-  flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
+- For mean_reversion_pullback archetype: high win rate + low payoff is expected - flag if win rate drops below archetype floor or if average loss exceeds 1.5x average win.
 
 ## ENGINE-LEVEL ANALYSIS
 If engine_decomposition data is present, it shows per-engine metrics with regime
@@ -162,7 +164,7 @@ BREAKDOWN, FADE). When this data is available:
 ## ABLATION ANALYSIS
 If ablation_analysis data is present, it shows statistical comparisons of boolean
 flag on/off states from strategy_params_at_entry. When this data is available:
-- Review `flags_with_signal` — these are flags with statistically significant (p < 0.10)
+- Review `flags_with_signal` - these are flags with statistically significant (p < 0.10)
   performance differences between enabled and disabled states
 - Proposals to toggle a flag MUST reference the statistical evidence (p-value, PnL delta)
 - Include `ablation_flag` field in structured output for flag toggle suggestions
@@ -183,14 +185,14 @@ If macro_regime_analysis data is present (in portfolio curated files):
 - Check applied_regime_config per bot: active sizing multiplier, directional caps, disabled strategies
 - Cross-reference today's performance with macro regime expectations:
   strategies with macro_regime_sensitivity "disabled" in current regime should have zero trades
-- Note: stress_level is observational only (41% false positive rate) — record it for diagnostics but do not use it to gate decisions or flag entries
+- Note: stress_level is observational only (41% false positive rate) - record it for diagnostics but do not use it to gate decisions or flag entries
 - If regime changed from yesterday: flag as transition event, assess transition cost
 - Note: macro regime (G/R/S/D) is distinct from per-trade market_regime (trending_up, ranging, etc.)
 
 ## CONVERGENCE STATUS (learning loop health)
 If `convergence_report` is present, it shows whether the learning system is
 improving, degrading, oscillating, or stable across multiple dimensions.
-- If OSCILLATING: avoid reversing last week's suggestions — let changes settle
+- If OSCILLATING: avoid reversing last week's suggestions - let changes settle
 - If DEGRADING: question current approach fundamentals before proposing more changes
 - If IMPROVING: maintain current approach, propose incremental refinements only
 - Reference specific dimension statuses when justifying confidence levels
@@ -204,7 +206,7 @@ recent data.
 ## EXECUTION & SIZING CONTEXT
 If execution_latency data is present:
 - Identify execution pipeline bottleneck stages
-- Correlate latency with slippage — is latency causing worse fills?
+- Correlate latency with slippage - is latency causing worse fills?
 - Focus on systematic patterns, not individual outliers
 
 If sizing_analysis data is present:
@@ -214,7 +216,7 @@ If sizing_analysis data is present:
 If param_outcome_correlation data is present:
 - Reference specific parameter ranges correlated with better outcomes
 - Cross-reference with parameter_changes for recent drift into/away from optimal ranges
-- Require 20+ trades per bucket — do NOT draw conclusions from small samples
+- Require 20+ trades per bucket - do NOT draw conclusions from small samples
 
 If portfolio_context data is present:
 - Flag entries during high exposure or with many correlated positions
@@ -231,20 +233,20 @@ biases, weak categories, and recurring mistakes. You MUST:
 - Avoid or explicitly justify suggestions in weak categories
 - Not repeat patterns listed in recurring corrections
 
-## CONSTRAINTS (enforced by validator — violations are automatically stripped)
-- Do NOT restate the routine summary — it's already computed above.
-- Do NOT mechanically review every data file — focus only on what the triage flagged.
+## CONSTRAINTS (enforced by validator - violations are automatically stripped)
+- Do NOT restate the routine summary - it's already computed above.
+- Do NOT mechanically review every data file - focus only on what the triage flagged.
 - Every suggestion MUST include quantified expected impact (PnL range, drawdown change)
   with evidence base (trade count, time period, statistical significance).
 - Check rejected_suggestions: do NOT re-suggest previously rejected items without new evidence.
-- Check active_suggestions: do NOT contradict DEPLOYED suggestions — propose revert with evidence.
+- Check active_suggestions: do NOT contradict DEPLOYED suggestions - propose revert with evidence.
 - BLOCKED by validator: categories with win_rate < 30% (n>=5) in category_scorecard.
   Only propose with exceptional new evidence and explicit justification.
 - BLOCKED by validator: structural suggestions with confidence < 0.4.
 - BLOCKED by validator: suggestions without quantified expected impact (quantification required).
-- Prediction calibration: accuracy < 50% → cap confidence at 0.3; > 70% → up to 0.8.
+- Prediction calibration: accuracy < 50% - cap confidence at 0.3; > 70% - up to 0.8.
 - outcome_measurements contains only HIGH/MEDIUM quality data. spurious_outcomes
-  (if present) had confounding factors — treat as hypotheses, not evidence.
+  (if present) had confounding factors - treat as hypotheses, not evidence.
 
 ## STRUCTURED OUTPUT (REQUIRED)
 At the END of your analysis, emit a structured data block.
@@ -273,7 +275,7 @@ _CRYPTO_DAILY_SUPPLEMENT = """
 ## CRYPTO PERPETUAL ANALYSIS
 This bot trades crypto perpetual futures. Apply the following crypto-specific guidance:
 
-**Funding analysis**: Evaluate funding_analysis data — is funding cost eroding edge?
+**Funding analysis**: Evaluate funding_analysis data - is funding cost eroding edge?
 Compare per-direction (longs pay positive funding, shorts receive in positive-rate regimes).
 Suggest time-stop tightening if avg_funding_per_hour is high relative to expected R.
 
@@ -305,8 +307,8 @@ same-direction trades across strategies caused concentrated losses.
 
 # Legacy instructions kept for backward compatibility (used when no triage is provided)
 _INSTRUCTIONS = _FOCUSED_INSTRUCTIONS.format(
-    routine_summary="(No triage data — review all bots manually)",
-    significant_events="(No triage — review all curated data files for anomalies)",
+    routine_summary="(No triage data - review all bots manually)",
+    significant_events="(No triage - review all curated data files for anomalies)",
     focus_questions="Analyze today's trading performance across all bots. Focus on anomalies, "
     "process failures, and actionable improvements.",
 )
@@ -351,6 +353,11 @@ class DailyPromptAssembler:
             strategy_registry=self.strategy_registry,
             bot_id=self.bots[0] if len(self.bots) == 1 else "",
         )
+        pkg.corrections = self._ctx.load_corrections(
+            bot_id=self.bots[0] if len(self.bots) == 1 else "",
+            max_age_days=self.corrections_lookback_days,
+            as_of=_end_of_report_day(self.date),
+        )
         pkg.task_prompt = self._build_task_prompt()
         pkg.data.update(self._load_structured_data(triage_report))
         pkg.instructions = self._build_instructions(triage_report)
@@ -378,9 +385,9 @@ class DailyPromptAssembler:
         for i, event in enumerate(triage_report.significant_events, 1):
             event_lines.append(
                 f"{i}. **[{event.event_type.upper()}]** [{event.bot_id}] "
-                f"(severity: {event.severity}) — {event.description}"
+                f"(severity: {event.severity}) - {event.description}"
             )
-        events_text = "\n".join(event_lines) if event_lines else "(No significant events detected — routine day)"
+        events_text = "\n".join(event_lines) if event_lines else "(No significant events detected - routine day)"
 
         # Format focus questions
         question_lines = []
@@ -518,3 +525,11 @@ class DailyPromptAssembler:
         except (json.JSONDecodeError, OSError):
             return False
         return True
+
+
+def _end_of_report_day(value: str) -> datetime:
+    try:
+        report_date = datetime.fromisoformat(value).date()
+    except ValueError:
+        return datetime.now(timezone.utc)
+    return datetime.combine(report_date, time.max, tzinfo=timezone.utc)

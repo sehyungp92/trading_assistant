@@ -7,30 +7,22 @@ GroundTruthComputer (absolute z-score composite) and ParameterSearcher
 from these constants.
 
 Weights aligned with soul.md priorities:
-  expected_total_r (30%): annualized net PnL — primary optimization target
+  expected_total_r (30%): annualized net PnL, the primary optimization target
   calmar (20%): preferred risk-adjusted metric; net profit / max drawdown
   profit_factor (15%): gross_wins / gross_losses quality ratio
-  expectancy (15%): win_rate × (avg_win / avg_loss) — the expectancy equation
+  expectancy (15%): win-rate and average win/loss quality
   inverse_drawdown (10%): hard constraint emphasis
   process_quality (10%): process over outcomes; anti-gaming safeguard
 
-Scoring contexts (intentional divergence):
-  - GroundTruthComputer: Absolute evaluation via z-scores against the bot's
-    own 90-day history, output normalized to [0, 1]. A score of 0.5 means
-    "performing at historical average". Used for bot health monitoring and
-    outcome measurement.
-  - ParameterSearcher: Relative candidate comparison via improvement ratios
-    against a baseline simulation. Baseline always scores 1.0; candidates
-    above/below are proportionally better/worse. Used for parameter candidate
-    ranking and routing (APPROVE / EXPERIMENT / DISCARD).
-  - ParamOptimizer (WFO): Single-metric optimization (Sharpe, Sortino, etc.)
-    configured per bot — does not use the composite weights at all.
+Scoring contexts intentionally differ:
+  - GroundTruthComputer: absolute evaluation via z-scores against the bot's
+    own 90-day history, output normalized to [0, 1].
+  - ParameterSearcher: relative candidate comparison via improvement ratios
+    against a baseline simulation. Baseline always scores 1.0.
 
-These systems intentionally use different scales because they answer different
-questions: "how healthy is this bot?" vs "is this candidate better than current?"
-vs "what parameter maximizes Sharpe?". Scores from different systems MUST NOT be
-compared directly. Use ratio_to_unit_scale() when a [0, 1] normalization of
-ParameterSearcher output is needed for display or logging alongside ground truth.
+Scores from different systems MUST NOT be compared directly. Use
+ratio_to_unit_scale() when a [0, 1] normalization of ParameterSearcher output is
+needed for display or logging alongside ground truth.
 """
 from __future__ import annotations
 
@@ -63,9 +55,9 @@ def ratio_to_unit_scale(ratio: float, sensitivity: float = 5.0) -> float:
     """Map a ratio-based composite score to [0, 1] for cross-system comparability.
 
     Uses a logistic function centered on 1.0 (the baseline ratio):
-      - ratio = 1.0  →  0.5  (neutral, matches GroundTruthComputer midpoint)
-      - ratio > 1.0  →  (0.5, 1.0)  (improvement)
-      - ratio < 1.0  →  (0.0, 0.5)  (degradation)
+      - ratio = 1.0  -> 0.5  (neutral, matches GroundTruthComputer midpoint)
+      - ratio > 1.0  -> (0.5, 1.0)  (improvement)
+      - ratio < 1.0  -> (0.0, 0.5)  (degradation)
 
     Args:
         ratio: Raw ratio-based composite (baseline = 1.0).

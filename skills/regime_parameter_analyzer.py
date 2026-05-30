@@ -10,7 +10,7 @@ import statistics
 from collections import defaultdict
 from typing import Any
 
-from schemas.autonomous_pipeline import ParameterDefinition
+from schemas.parameter_definition import ParameterDefinition
 from schemas.events import TradeEvent
 from schemas.regime_conditional import RegimeParameterAnalysis, RegimeParameterStats
 

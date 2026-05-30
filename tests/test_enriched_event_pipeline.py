@@ -348,7 +348,7 @@ class TestHandlerBuildsEnrichedCurated:
                 "param_name": "stop_loss",
                 "old_value": 0.02,
                 "new_value": 0.015,
-                "reason": "WFO",
+                "reason": "monthly_validation",
                 "exchange_timestamp": "2026-03-01T15:00:00+00:00",
             }) + "\n",
             encoding="utf-8",

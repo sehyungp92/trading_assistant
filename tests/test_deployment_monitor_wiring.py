@@ -188,3 +188,22 @@ class TestAppDeploymentMonitorWiring:
         from skills.deployment_monitor import DeploymentMonitor
 
         assert isinstance(app.state.deployment_monitor, DeploymentMonitor)
+
+    def test_deployment_monitor_gets_shared_helpers_without_autonomous(self, tmp_path: Path):
+        """Deployment monitoring uses shared PR/config helpers even when autonomous is off."""
+        config = AppConfig(
+            data_dir=str(tmp_path),
+            autonomous_enabled=False,
+            deployment_monitoring_enabled=True,
+            allow_unauthenticated_local=True,
+        )
+        from orchestrator.app import create_app
+
+        app = create_app(db_dir=str(tmp_path), config=config)
+
+        assert app.state.autonomous_pipeline is None
+        assert app.state.approval_tracker is not None
+        assert app.state.deployment_monitor is not None
+        assert app.state.deployment_monitor._pr_builder is not None
+        assert app.state.deployment_monitor._config_registry is not None
+        assert app.state.deployment_monitor._file_change_generator is not None

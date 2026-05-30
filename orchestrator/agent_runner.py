@@ -197,30 +197,66 @@ class AgentRunner:
         )
 
         if not candidates:
-            # No candidates at all — fall back to simple resolution
-            selection, requested_model = self._preferences.resolve_selection(workflow, model)
-            return await self.invoke_with_selection(
+            # Every configured candidate is unavailable or cooling down.
+            self._check_skill_access(agent_type)
+            run_dir = self._runs_dir / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            self._write_run_files(run_dir, prompt_package, agent_type=agent_type)
+            selection, requested_model = self._preferences.resolve_selection(
+                workflow,
+                model,
+                cooldown_tracker=self._cooldown_tracker,
+            )
+            status = self._get_provider_status(selection.provider)
+            reason = status.reason or "provider unavailable or cooling down"
+            error = (
+                f"No available providers for {agent_type} after availability "
+                f"and cooldown filtering. Primary {selection.provider.value}: {reason}"
+            )
+            result = AgentResult(
+                response="",
+                run_dir=run_dir,
+                success=False,
+                error=error,
+                provider=selection.provider.value,
+                runtime=status.runtime,
+                requested_model=requested_model,
+                effective_model=selection.model,
+            )
+            self._broadcast_runtime_event(
+                "agent_invocation_failed",
+                {
+                    "run_id": run_id,
+                    "agent_type": agent_type,
+                    "provider": result.provider,
+                    "runtime": result.runtime,
+                    "model": result.effective_model,
+                    "error": error,
+                },
+            )
+            self._record_cost(result, agent_type, run_id)
+            return result
+
+        last_result: AgentResult | None = None
+        for i, (selection, requested_model) in enumerate(candidates):
+            attempt_run_id = run_id if i == 0 else f"{run_id}-fallback-{i}"
+            result = await self.invoke_with_selection(
                 agent_type=agent_type,
                 prompt_package=prompt_package,
-                run_id=run_id,
+                run_id=attempt_run_id,
                 selection=selection,
                 requested_model=requested_model,
                 max_turns=effective_max_turns,
                 allowed_tools=effective_allowed_tools,
                 timeout_seconds=effective_timeout,
             )
-
-        last_result: AgentResult | None = None
-        for i, (selection, requested_model) in enumerate(candidates):
-            result = await self.invoke_with_selection(
+            self._preferences.record_committed_route_change(
+                workflow=workflow,
+                selected=selection,
+                model_override=model,
                 agent_type=agent_type,
-                prompt_package=prompt_package,
-                run_id=run_id if i == 0 else f"{run_id}-fallback-{i}",
-                selection=selection,
-                requested_model=requested_model,
-                max_turns=effective_max_turns,
-                allowed_tools=effective_allowed_tools,
-                timeout_seconds=effective_timeout,
+                run_id=attempt_run_id,
+                success=result.success,
             )
             if result.success:
                 return result

@@ -5,9 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
-from schemas.benchmark_case import BenchmarkCase, BenchmarkSeverity, BenchmarkSource, BenchmarkSuite
+from schemas.benchmark_case import BenchmarkCase, BenchmarkSeverity, BenchmarkSource
 from skills.benchmark_compiler import BenchmarkCompiler
 
 
@@ -132,6 +130,7 @@ class TestNegativeOutcomes:
         assert suite.cases[0].source_run_id == "daily-2026-03-01"
         assert "runs/daily-2026-03-01/parsed_analysis.json" in suite.cases[0].artifact_refs
         assert "category:parameter" in suite.cases[0].case_tags
+        assert suite.cases[0].output_snapshot["parsed_analysis"] == {}
 
     def test_low_quality_negative_skipped(self, tmp_path):
         findings = tmp_path / "findings"
@@ -229,6 +228,37 @@ class TestTransferFailures:
         compiler = BenchmarkCompiler(findings)
         suite = compiler.compile()
         assert len(suite.cases) == 0
+
+
+class TestDiscardedHarnessExperiments:
+    def test_discarded_harness_experiment_creates_negative_case(self, tmp_path):
+        findings = tmp_path / "findings"
+        _write_jsonl(findings / "discarded_harness_experiments.jsonl", [{
+            "experiment_id": "exp123",
+            "variant_name": "unsafe_patch",
+            "hypothesis": "Unsafe patch should never be promoted",
+            "changed_components": ["validator", "prompt_patch"],
+            "score_delta": -0.12,
+            "aggregate_score": 0.22,
+            "baseline_score": 0.34,
+            "kept": False,
+            "discard_reason": "Rejected by governance hard-fail: approval bypass",
+            "governance_regressions": ["approval bypass"],
+            "anti_overfitting_assessment": "Does not generalize safely.",
+            "future_warning_tags": ["governance_regression"],
+            "program_ref": "memory/policies/v1/harness_program.md",
+            "recorded_at": _recent_ts(),
+        }])
+
+        suite = BenchmarkCompiler(findings).compile()
+
+        assert len(suite.cases) == 1
+        case = suite.cases[0]
+        assert case.source == BenchmarkSource.DISCARDED_HARNESS_EXPERIMENT
+        assert case.severity == BenchmarkSeverity.CRITICAL
+        assert "component:validator" in case.case_tags
+        assert "governance:approval_bypass" in case.case_tags
+        assert case.score_profile["score_delta"] == -0.12
 
 
 class TestDeduplication:

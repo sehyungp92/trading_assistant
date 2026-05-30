@@ -33,10 +33,10 @@ class TestSubagentManager:
         async def work():
             await asyncio.sleep(10)
 
-        await mgr.spawn("wfo", work)
+        await mgr.spawn("monthly_validation", work)
         running = mgr.get_running()
         assert len(running) == 1
-        assert running[0].agent_type == "wfo"
+        assert running[0].agent_type == "monthly_validation"
         assert running[0].is_running
 
         await mgr.cancel_all()
@@ -46,7 +46,7 @@ class TestSubagentManager:
         async def long_work():
             await asyncio.sleep(10)
 
-        agent_id = await mgr.spawn("wfo", long_work)
+        agent_id = await mgr.spawn("monthly_validation", long_work)
         assert len(mgr.get_running()) == 1
 
         cancelled = await mgr.cancel(agent_id)
